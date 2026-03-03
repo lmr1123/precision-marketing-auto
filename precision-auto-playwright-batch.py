@@ -29,6 +29,7 @@ import sys
 import csv
 import argparse
 import subprocess
+import re
 from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
@@ -54,6 +55,9 @@ DEFAULT_PLAN = {
     "main_operating_area": "广佛省区",
     "coupon_ids": "1-20000005475",
     "sms_content": "短信内容测试",
+    "step3_end_time": "2026-03-08 08:00",
+    "executor_employees": "西北大区、湖北省区",
+    "send_content": "企微1对1内容测试",
 }
 
 HEADLESS = False
@@ -61,6 +65,7 @@ SLOW_MO = 100
 MAX_RETRIES = 2
 MAX_CONCURRENT = 3
 FEISHU_USER_ID = "ou_ed20f9990c63fa5448a0f2cd613ecf30"
+DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:9222"
 
 # ============ 工具函数 ============
 
@@ -75,20 +80,24 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
             if end and i > end:
                 break
             plan = {
-                "name": row["name"],
-                "region": row["region"],
-                "theme": row["theme"],
-                "use_recommend": row["use_recommend"],
-                "start_time": row["start_time"],
-                "end_time": row["end_time"],
-                "trigger_type": row["trigger_type"],
-                "send_time": row["send_time"],
-                "global_limit": row["global_limit"],
-                "set_target": row["set_target"],
-                "group_name": row["group_name"],
-                "update_type": row["update_type"],
-                "coupon_ids": row["coupon_ids"],
-                "sms_content": row["sms_content"],
+                "name": row.get("name", "").strip(),
+                "region": row.get("region", "").strip(),
+                "theme": row.get("theme", "").strip(),
+                "use_recommend": row.get("use_recommend", "").strip(),
+                "start_time": row.get("start_time", "").strip(),
+                "end_time": row.get("end_time", "").strip(),
+                "trigger_type": row.get("trigger_type", "").strip(),
+                "send_time": row.get("send_time", "").strip(),
+                "global_limit": row.get("global_limit", "").strip(),
+                "set_target": row.get("set_target", "").strip(),
+                "group_name": row.get("group_name", "").strip(),
+                "update_type": row.get("update_type", "").strip(),
+                "main_operating_area": row.get("main_operating_area", "").strip(),
+                "coupon_ids": row.get("coupon_ids", "").strip(),
+                "sms_content": row.get("sms_content", "").strip(),
+                "step3_end_time": row.get("step3_end_time", "").strip(),
+                "executor_employees": row.get("executor_employees", "").strip(),
+                "send_content": row.get("send_content", "").strip(),
             }
             plans.append(plan)
     return plans
@@ -125,82 +134,116 @@ async def click_by_label(page, label_text: str, timeout: int = 5000):
     except:
         return False
 
+async def get_form_item_by_label(page, label: str):
+    """按 label 匹配表单项，兼容 Element/Ant。"""
+    form_items = page.locator('.el-form-item, .ant-form-item')
+    count = await form_items.count()
+    for i in range(count):
+        item = form_items.nth(i)
+        label_el = item.locator('.el-form-item__label, .ant-form-item-label label').first
+        try:
+            text = (await label_el.text_content() or "").strip().replace("：", "").replace(":", "")
+            if text == label or label in text:
+                return item
+        except:
+            continue
+    return None
+
+async def fill_with_retry(input_locator, value: str):
+    """统一输入策略：先 fill，失败后 click+快捷键清空再 type。"""
+    try:
+        await input_locator.fill(value)
+    except:
+        await input_locator.click(force=True)
+        await input_locator.press("ControlOrMeta+A")
+        await input_locator.press("Backspace")
+        await input_locator.type(value, delay=30)
+    try:
+        await input_locator.blur()
+    except:
+        pass
+
+def escape_js_string(value: str) -> str:
+    """转义注入到 JS 字符串中的特殊字符，避免脚本断裂。"""
+    return (
+        value.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+
 async def select_option(page, label: str, value: str, is_multi: bool = False):
     """选择下拉选项（Element UI / Ant Design）"""
     print(f"   🏷️  {label}: {value}")
-    
-    form_items = page.locator('.el-form-item, .ant-form-item')
-    count = await form_items.count()
-    
-    for i in range(count):
-        item = form_items.nth(i)
-        label_el = item.locator('.el-form-item__label, .ant-form-item-label label')
+
+    item = await get_form_item_by_label(page, label)
+    if item:
         try:
-            text = await label_el.text_content()
-            if text.strip() == label or label in text and len(text.strip()) < len(label) + 5:
-                input_el = item.locator('.el-input__inner, .ant-input, .ant-select-selector').first
-                await input_el.click(force=True)
-                await asyncio.sleep(0.8)
-                
-                options = page.locator('.el-select-dropdown__item:visible, .ant-select-item:visible')
-                opt_count = await options.count()
-                
-                if opt_count > 0:
-                    all_options = []
-                    for j in range(min(opt_count, 10)):
-                        try:
-                            opt_text = await options.nth(j).text_content()
-                            all_options.append(opt_text.strip())
-                        except:
-                            pass
-                    print(f"      可选项: {all_options[:5]}")
-                
-                for j in range(opt_count):
-                    opt_text = await options.nth(j).text_content()
-                    clean_text = opt_text.strip()
-                    if value in clean_text or clean_text in value:
-                        await options.nth(j).click(force=True)
-                        print(f"      ✅ 已选择: {clean_text}")
-                        await asyncio.sleep(0.3)
-                        return
-                
-                print(f"      ⚠️ 未找到选项: {value}")
-                await page.keyboard.press('Escape')
-                await asyncio.sleep(0.3)
-                return
+            # 三步走：点击输入框 -> 等待弹层 -> 点击文本
+            await item.locator(
+                '.el-input__inner, .el-select .el-input, .ant-select-selector, .ant-select-selection-item'
+            ).first.click(force=True)
+            await page.locator('.el-select-dropdown:visible, .ant-select-dropdown:visible').first.wait_for(timeout=3000)
+
+            option = page.locator(
+                '.el-select-dropdown__item:visible, .ant-select-item-option:visible, .ant-select-item:visible'
+            ).filter(has_text=value).first
+            if await option.count() > 0:
+                await option.click(force=True)
+                print(f"      ✅ 已选择: {value}")
+                await asyncio.sleep(0.2)
+                return True
+        except:
+            pass
+
+    # 兜底：直接按文本点击可见选项
+    options = page.locator('.el-select-dropdown__item:visible, .ant-select-item:visible')
+    opt_count = await options.count()
+    for j in range(opt_count):
+        try:
+            opt_text = (await options.nth(j).text_content() or "").strip()
+            if value in opt_text or opt_text in value:
+                await options.nth(j).click(force=True)
+                print(f"      ✅ 已选择: {opt_text}")
+                await asyncio.sleep(0.2)
+                return True
         except:
             continue
-    
+
     print(f"      ⚠️ 未找到字段: {label}")
+    return False
 
 async def fill_input(page, label: str, value: str):
     """填充文本输入框"""
     print(f"   📝 {label}: {value}")
-    
-    try:
-        input_el = page.locator(f'input[placeholder*="{label}"]').first
-        await input_el.fill(value)
-        await input_el.blur()
-        return
-    except:
-        pass
-    
-    form_items = page.locator('.el-form-item, .ant-form-item')
-    count = await form_items.count()
-    
-    for i in range(count):
-        item = form_items.nth(i)
-        label_el = item.locator('.el-form-item__label, .ant-form-item-label label')
+
+    # 优先 placeholder 定位，抗样式改动
+    placeholder_candidates = [
+        f"请输入{label}",
+        label,
+        f"选择{label}",
+    ]
+    for placeholder in placeholder_candidates:
         try:
-            text = await label_el.text_content()
-            if label in text:
-                input_el = item.locator('input[type="text"], input:not([type])').first
-                await input_el.fill(value)
-                await input_el.blur()
-                print(f"      ✅ 已填充")
+            input_el = page.get_by_placeholder(placeholder).first
+            if await input_el.count() > 0:
+                await fill_with_retry(input_el, value)
+                print("      ✅ 已填充")
                 return
         except:
             continue
+
+    item = await get_form_item_by_label(page, label)
+    if item:
+        try:
+            input_el = item.locator('input[type="text"], input:not([type]), textarea').first
+            await fill_with_retry(input_el, value)
+            print("      ✅ 已填充")
+            return
+        except:
+            pass
+
+    print(f"      ⚠️ 未找到字段: {label}")
 
 async def select_radio(page, label: str, value: str):
     """选择单选项"""
@@ -221,6 +264,500 @@ async def select_radio(page, label: str, value: str):
         except:
             continue
 
+def split_datetime(raw: str):
+    """将 YYYY-MM-DD HH:MM[:SS] 拆分为 (date, time) 并标准化为 HH:MM:SS。"""
+    raw = (raw or "").strip()
+    if " " in raw:
+        date_part, time_part = raw.split(" ", 1)
+    else:
+        date_part, time_part = raw, "00:00:00"
+    if len(time_part.split(":")) == 2:
+        time_part = f"{time_part}:00"
+    return date_part, time_part
+
+def normalize_time_text(value: str) -> str:
+    """标准化时间字符串用于比对。"""
+    value = (value or "").strip().replace("T", " ").replace("/", "-")
+    parts = value.split(" ")
+    if len(parts) >= 2:
+        date_part = parts[0]
+        time_part = parts[1]
+        if len(time_part.split(":")) == 2:
+            time_part = f"{time_part}:00"
+        return f"{date_part} {time_part}"
+    return value
+
+def datetime_equals(actual: str, expected: str) -> bool:
+    """时间字符串严格等价比较（允许秒位缺省）。"""
+    a = normalize_time_text(actual)
+    e = normalize_time_text(expected)
+    if a == e:
+        return True
+    if len(a.split(":")) == 3 and a.endswith(":00") and e == a[:-3]:
+        return True
+    if len(e.split(":")) == 3 and e.endswith(":00") and a == e[:-3]:
+        return True
+    return False
+
+def values_include_datetime(values: list, date_part: str, time_part: str) -> bool:
+    """检查一组输入值是否包含期望日期+时间。"""
+    normalized_values = [normalize_time_text(v) for v in values if v]
+    time_hm = ":".join(time_part.split(":")[:2])
+    for val in normalized_values:
+        if date_part in val and (time_part in val or time_hm in val):
+            return True
+    return False
+
+async def click_picker_confirm_if_visible(page):
+    """点击可见日期/时间面板的确定按钮。"""
+    confirm_btn = page.locator(
+        '.el-picker-panel__footer button:has-text("确定"), '
+        '.el-time-panel__footer button.confirm, '
+        '.el-time-panel__btn.confirm'
+    ).first
+    if await confirm_btn.count() > 0 and await confirm_btn.is_visible():
+        await confirm_btn.click(force=True)
+        await asyncio.sleep(0.2)
+        return True
+    return False
+
+async def read_item_input_values(item) -> list:
+    """读取表单项中所有 input 的 value。"""
+    return await item.evaluate("""(node) => {
+        const inputs = node.querySelectorAll('input');
+        return Array.from(inputs).map(i => (i.value || '').trim()).filter(Boolean);
+    }""")
+
+async def click_button_with_text(page, include_text: str, exclude_text: str = "") -> bool:
+    """点击按钮文本，返回是否点击成功。"""
+    try:
+        btn = page.locator("button").filter(has_text=include_text).first
+        if await btn.count() > 0 and await btn.is_visible():
+            txt = (await btn.text_content() or "").strip()
+            if exclude_text and exclude_text in txt:
+                pass
+            else:
+                await btn.click(force=True)
+                return True
+    except:
+        pass
+
+    try:
+        return await page.evaluate(
+            """({includeText, excludeText}) => {
+                const btns = document.querySelectorAll('button');
+                for (const btn of btns) {
+                    const text = (btn.textContent || '').trim();
+                    if (text.includes(includeText) && (!excludeText || !text.includes(excludeText))) {
+                        btn.click();
+                        return true;
+                    }
+                }
+                return false;
+            }""",
+            {"includeText": include_text, "excludeText": exclude_text}
+        )
+    except:
+        return False
+
+def split_multi_values(raw: str) -> list:
+    """将多选值按中文顿号/逗号/斜杠拆分。"""
+    if not raw:
+        return []
+    vals = [v.strip() for v in re.split(r"[、,，/]", raw) if v.strip()]
+    return vals
+
+async def fill_step3_end_time(page, end_time: str) -> bool:
+    """第3步结束时间：填入并确认日期面板。"""
+    date_part, _ = split_datetime(end_time)
+    item = page.locator(".item", has_text="结束时间").first
+    if await item.count() == 0:
+        return False
+    done = await item.evaluate(
+        """(node, dateText) => {
+            const input = node.querySelector('input[placeholder*="结束"], input.el-input__inner, input');
+            if (!input) return false;
+            input.click();
+            input.value = dateText;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.blur();
+            return true;
+        }""",
+        date_part
+    )
+    if not done:
+        # 兜底：按 placeholder 直接填写
+        try:
+            input_el = item.get_by_placeholder("请选择结束日期").first
+            if await input_el.count() > 0:
+                await fill_with_retry(input_el, date_part)
+                await asyncio.sleep(0.1)
+                await click_button_with_text(page, "确定")
+                await asyncio.sleep(0.2)
+                val = (await input_el.input_value()).strip()
+                return date_part in val
+        except:
+            pass
+        return False
+    await asyncio.sleep(0.2)
+    await click_button_with_text(page, "确定")
+    await asyncio.sleep(0.2)
+    input_el = item.locator('input[placeholder*="结束"], input.el-input__inner, input').first
+    if await input_el.count() == 0:
+        return False
+    val = (await input_el.input_value()).strip()
+    return date_part in val
+
+async def fill_step3_send_content(page, content: str) -> bool:
+    """第3步发送内容：优先按标签定位。"""
+    return await page.evaluate(
+        """(content) => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+
+            const tryWrite = (el) => {
+                if (!el || !isVisible(el) || el.readOnly || el.disabled) return false;
+                const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+                if (ph.includes('search')) return false;
+                el.focus();
+                el.value = content;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.blur();
+                return (el.value || '').includes(content.slice(0, 8));
+            };
+
+            // 优先：发送内容/任务详情同一块内的可见 textarea
+            const labels = Array.from(document.querySelectorAll('label, .label, span, div'));
+            for (const n of labels) {
+                const txt = (n.textContent || '').replace(/\\s+/g, '');
+                if (!txt.includes('发送内容') && !txt.includes('任务详情')) continue;
+                const item = n.closest('.item, .el-form-item, .ant-form-item') || n.parentElement;
+                if (!item) continue;
+                const area = item.querySelector('textarea');
+                if (tryWrite(area)) return true;
+                const input = item.querySelector("input[type='text'], input:not([type])");
+                if (tryWrite(input)) return true;
+            }
+
+            // 兜底：第一个可见 textarea
+            const areas = Array.from(document.querySelectorAll('textarea'));
+            for (const a of areas) {
+                if (tryWrite(a)) return true;
+            }
+            return false;
+        }""",
+        content
+    )
+
+async def set_step3_distribution_mode(page, mode_text: str = "指定门店分配") -> bool:
+    """第3步分配方式：点击单选文本。"""
+    return await page.evaluate(
+        """(modeText) => {
+            const labels = Array.from(document.querySelectorAll('label, span, div'));
+            for (const el of labels) {
+                const txt = (el.textContent || '').replace(/\\s+/g, '');
+                if (txt.includes(modeText)) {
+                    (el.closest('label') || el).click();
+                    return true;
+                }
+            }
+            return false;
+        }""",
+        mode_text
+    )
+
+async def fill_step3_executor(page, raw_values: str) -> bool:
+    """第3步执行员工：按级联面板（全国->大区->省区/门店）多选。"""
+    targets = split_multi_values(raw_values)
+    if not targets:
+        return True
+
+    opened = await page.evaluate("""() => {
+        const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
+        for (const label of labels) {
+            const txt = (label.textContent || '').replace(/\\s+/g, '');
+            if (!txt.includes('执行员工')) continue;
+            const item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
+            if (!item) continue;
+            const input = item.querySelector('input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"], .el-cascader input.el-input__inner');
+            if (input) {
+                input.click();
+                return true;
+            }
+        }
+        return false;
+    }""")
+    if not opened:
+        return False
+    await asyncio.sleep(0.3)
+
+    panel = page.locator(".el-cascader-panel:visible").first
+    menus = panel.locator(".el-cascader-menu")
+
+    async def expand_in_menu(menu_index: int, target: str) -> bool:
+        menu = menus.nth(menu_index)
+        nodes = menu.locator(".el-cascader-node")
+        count = await nodes.count()
+        for i in range(count):
+            node = nodes.nth(i)
+            label = node.locator(".el-cascader-node__label").first
+            if await label.count() == 0:
+                continue
+            txt = ((await label.text_content()) or "").strip()
+            if txt != target and target not in txt:
+                continue
+            await label.scroll_into_view_if_needed()
+            postfix = node.locator(".el-cascader-node__postfix").first
+            if await postfix.count() > 0:
+                await postfix.hover()
+                await postfix.click(force=True)
+            else:
+                await label.hover()
+            await asyncio.sleep(0.2)
+            return True
+        return False
+
+    async def check_in_menu(menu_index: int, target: str) -> bool:
+        menu = menus.nth(menu_index)
+        nodes = menu.locator(".el-cascader-node")
+        count = await nodes.count()
+        for i in range(count):
+            node = nodes.nth(i)
+            label = node.locator(".el-cascader-node__label").first
+            if await label.count() == 0:
+                continue
+            txt = ((await label.text_content()) or "").strip()
+            if txt != target and target not in txt:
+                continue
+            checkbox = node.locator(".el-checkbox__input").first
+            if await checkbox.count() == 0:
+                continue
+            await checkbox.scroll_into_view_if_needed()
+            cls = (await checkbox.get_attribute("class")) or ""
+            if "is-checked" not in cls:
+                await checkbox.click(force=True)
+                await asyncio.sleep(0.15)
+            return True
+        return False
+
+    # 先点全国，展开大区列
+    await expand_in_menu(0, "全国")
+
+    selected = {t: False for t in targets}
+    region_targets = [t for t in targets if "大区" in t]
+    province_targets = [t for t in targets if "省区" in t or "营运区" in t or "店" in t]
+
+    # 先选大区目标（例如西北大区）
+    for rt in region_targets:
+        selected[rt] = await check_in_menu(1, rt)
+
+    # 再跨大区选省区目标（例如湖北省区）
+    region_nodes = menus.nth(1).locator(".el-cascader-node .el-cascader-node__label")
+    region_count = await region_nodes.count()
+    region_names = []
+    for i in range(region_count):
+        txt = ((await region_nodes.nth(i).text_content()) or "").strip()
+        if txt.endswith("大区"):
+            region_names.append(txt)
+
+    for region in region_names:
+        await expand_in_menu(1, region)
+        for pt in province_targets:
+            if selected.get(pt):
+                continue
+            if await check_in_menu(2, pt):
+                selected[pt] = True
+
+    selected_labels = await page.evaluate("""() => {
+        const panel = document.querySelector('.el-cascader-panel');
+        if (!panel) return [];
+        const checked = Array.from(panel.querySelectorAll('.el-checkbox__input.is-checked'));
+        return checked.map(c => {
+            const node = c.closest('.el-cascader-node');
+            const label = node ? node.querySelector('.el-cascader-node__label') : null;
+            return (label?.textContent || '').trim();
+        }).filter(Boolean);
+    }""")
+    print(f"      🧪 执行员工面板勾选节点: {selected_labels}")
+
+    await page.keyboard.press("Escape")
+    await asyncio.sleep(0.2)
+
+    # 回读校验：限定在“执行员工”字段容器内。
+    readback = await page.evaluate("""() => {
+        const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
+        for (const label of labels) {
+            const txt = (label.textContent || '').replace(/\\s+/g, '');
+            if (!txt.includes('执行员工')) continue;
+            const item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
+            if (!item) continue;
+            const input = item.querySelector('input.el-input__inner');
+            const tags = Array.from(item.querySelectorAll('.el-tag .el-tag__content, .el-cascader__tags span'))
+                .map(n => (n.textContent || '').trim())
+                .filter(Boolean);
+            return [input ? (input.value || '').trim() : '', ...tags].join(' ');
+        }
+        return '';
+    }""")
+    for t in targets:
+        if t in readback:
+            selected[t] = True
+
+    print(f"      🧪 执行员工回读文本: {readback}")
+    return all(selected.values())
+
+async def set_plan_time_range(page, start_time: str, end_time: str):
+    """设置 Element 日期范围并点击确定，避免值未提交。"""
+    s_date, s_time = split_datetime(start_time)
+    e_date, e_time = split_datetime(end_time)
+    print(f"   📅 计划时间: {s_date} {s_time} -> {e_date} {e_time}")
+
+    item = await get_form_item_by_label(page, "计划时间")
+    if not item:
+        print("      ⚠️ 未找到“计划时间”字段，回退到普通输入")
+        await fill_input(page, "开始日期", start_time)
+        await fill_input(page, "结束日期", end_time)
+        return
+
+    async def apply_once() -> bool:
+        # 打开日期范围面板
+        await item.locator("input").first.click(force=True)
+        panel = page.locator('.el-picker-panel.el-date-range-picker:visible').first
+        try:
+            await panel.wait_for(timeout=3000)
+        except PlaywrightTimeout:
+            try:
+                await item.locator("input").first.click(force=True)
+                await panel.wait_for(timeout=2500)
+            except PlaywrightTimeout:
+                return False
+
+        # 在面板头部编辑器中填值（并回车触发内部校验）
+        s_date_input = panel.get_by_placeholder("开始日期").first
+        s_time_input = panel.get_by_placeholder("开始时间").first
+        e_date_input = panel.get_by_placeholder("结束日期").first
+        e_time_input = panel.get_by_placeholder("结束时间").first
+        await fill_with_retry(s_date_input, s_date)
+        await s_date_input.press("Enter")
+        await fill_with_retry(s_time_input, s_time)
+        await s_time_input.press("Enter")
+        await fill_with_retry(e_date_input, e_date)
+        await e_date_input.press("Enter")
+        await fill_with_retry(e_time_input, e_time)
+        await e_time_input.press("Enter")
+
+        # 必须点确定，否则会保留旧值
+        footer_confirm = panel.locator('.el-picker-panel__footer button:has-text("确定")').first
+        await footer_confirm.click(force=True)
+        await asyncio.sleep(0.35)
+        return True
+
+    async def direct_set_two_inputs() -> bool:
+        """兜底：直接写入计划时间区域内的前两个输入框（开始/结束）。"""
+        start_full = f"{s_date} {s_time}"
+        end_full = f"{e_date} {e_time}"
+        ok = await item.evaluate(
+            """(node, payload) => {
+                const inputs = Array.from(node.querySelectorAll('input'));
+                if (inputs.length < 2) return false;
+                const [startInput, endInput] = inputs;
+                const write = (el, val) => {
+                    el.focus();
+                    el.value = val;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+                    el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+                    el.blur();
+                };
+                write(startInput, payload.start);
+                write(endInput, payload.end);
+                return true;
+            }""",
+            {"start": start_full, "end": end_full}
+        )
+        await asyncio.sleep(0.25)
+        return ok
+
+    applied = await apply_once()
+    values = await read_item_input_values(item)
+    ok = values_include_datetime(values, s_date, s_time) and values_include_datetime(values, e_date, e_time)
+    if not ok:
+        print(f"      ⚠️ 第1轮计划时间未生效，回读={values}，执行第2轮写入...")
+        applied = await apply_once() or applied
+        values = await read_item_input_values(item)
+        ok = values_include_datetime(values, s_date, s_time) and values_include_datetime(values, e_date, e_time)
+
+    if not ok:
+        wrote = await direct_set_two_inputs()
+        values = await read_item_input_values(item)
+        ok = wrote and values_include_datetime(values, s_date, s_time) and values_include_datetime(values, e_date, e_time)
+        if wrote:
+            print("      ⚠️ 日期面板路径失败，已走双输入框兜底")
+
+    # 最后一轮强制覆盖，避免页面内部回填旧结束时间
+    if ok:
+        await direct_set_two_inputs()
+        values = await read_item_input_values(item)
+        ok = values_include_datetime(values, s_date, s_time) and values_include_datetime(values, e_date, e_time)
+
+    if not ok:
+        raise RuntimeError(f"计划时间回读校验失败，当前值={values}，期望={s_date} {s_time} -> {e_date} {e_time}")
+    print(f"      ✅ 计划时间回读校验通过: {values}")
+
+async def set_send_time(page, send_time: str):
+    """设置发送时间：单日期时间面板内填写并强制点击确定。"""
+    s_date, s_time = split_datetime(send_time)
+    print(f"   🕒 发送时间: {s_date} {s_time}")
+
+    item = await get_form_item_by_label(page, "发送时间")
+    if not item:
+        raise RuntimeError("发送时间设置失败：未找到字段")
+
+    expected = f"{s_date} {s_time}"
+
+    async def apply_once() -> bool:
+        await item.locator("input").first.click(force=True)
+        panel = page.locator('.el-picker-panel.el-date-picker:visible').first
+        try:
+            await panel.wait_for(timeout=2500)
+        except PlaywrightTimeout:
+            return False
+        await fill_with_retry(panel.get_by_placeholder("选择日期").first, s_date)
+        await fill_with_retry(panel.get_by_placeholder("选择时间").first, s_time)
+        footer_confirm = panel.locator('.el-picker-panel__footer button:has-text("确定")').first
+        await footer_confirm.click(force=True)
+        await asyncio.sleep(0.3)
+        print("      ✅ 已点击发送时间面板“确定”")
+        return True
+
+    field_input = item.locator("input").first
+    applied = await apply_once()
+    if not applied:
+        applied = await apply_once()
+
+    field_value = (await field_input.input_value()).strip()
+    print(f"      🔎 发送时间字段回读: {field_value}")
+
+    if not datetime_equals(field_value, expected):
+        # 兜底：直接回填字段本体，并触发 input/change/Enter/blur。
+        await fill_with_retry(field_input, expected)
+        await field_input.press("Enter")
+        await field_input.blur()
+        await asyncio.sleep(0.2)
+        field_value = (await field_input.input_value()).strip()
+        print(f"      🔁 发送时间兜底后回读: {field_value}")
+
+    if not datetime_equals(field_value, expected):
+        raise RuntimeError(f"发送时间回读校验失败，当前值={field_value}，期望={expected}")
+    print(f"      ✅ 发送时间回读校验通过: {field_value}")
+
 # ============ 第1步：基础信息 ============
 
 async def fill_step1(page, data: dict):
@@ -231,45 +768,57 @@ async def fill_step1(page, data: dict):
     await page.wait_for_selector('.el-form, .ant-form', timeout=10000)
     await wait_and_log(page, 2, "页面加载中...")
     
+    results = {}
+
     await fill_input(page, "计划名称", data["name"])
-    await select_option(page, "计划区域", data["region"])
-    await select_option(page, "营销主题", data.get("theme", "其他"))
+    results["第1步-计划名称"] = True
+    region_ok = await select_option(page, "计划区域", data["region"])
+    if not region_ok:
+        await asyncio.sleep(0.5)
+        region_ok = await select_option(page, "计划区域", data["region"])
+    if not region_ok:
+        raise RuntimeError("第1步失败：计划区域未选择成功")
+    results["第1步-计划区域"] = True
+    theme_ok = await select_option(page, "营销主题", data.get("theme", "其他"))
+    if not theme_ok:
+        await asyncio.sleep(0.5)
+        theme_ok = await select_option(page, "营销主题", data.get("theme", "其他"))
+    if not theme_ok:
+        raise RuntimeError("第1步失败：营销主题未选择成功")
+    results["第1步-营销主题"] = True
     
     print("   ⏭️  场景类型、计划类型: 跳过（已预设）")
     print("   ⏭️  营销模板: 跳过")
     
     await select_radio(page, "推荐算法", data["use_recommend"])
-    await fill_input(page, "开始日期", data["start_time"])
-    await fill_input(page, "结束日期", data["end_time"])
+    results["第1步-推荐算法"] = True
+    await set_plan_time_range(page, data["start_time"], data["end_time"])
+    results["第1步-计划时间"] = True
     await select_radio(page, "触发方式", data["trigger_type"])
-    await fill_input(page, "发送时间", data["send_time"])
+    results["第1步-触发方式"] = True
+    await set_send_time(page, data["send_time"])
+    results["第1步-发送时间"] = True
     await select_radio(page, "触达限制", data["global_limit"])
+    results["第1步-全局触达限制"] = True
     await select_radio(page, "设置目标", data["set_target"])
+    results["第1步-是否设置目标"] = True
     
     print("\n   ✅ 第1步完成")
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step1-after.png')
     
     print("   ⏭️  点击下一步...")
-    try:
-        await page.evaluate('''() => {
-            const btns = document.querySelectorAll('button');
-            for (const btn of btns) {
-                if (btn.textContent.includes('下一步')) {
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
-        }''')
-        print("      ✅ 点击成功")
-    except Exception as e:
-        print(f"      ⚠️ 点击失败: {e}")
+    clicked = await click_button_with_text(page, "下一步")
+    if not clicked:
+        raise RuntimeError("第1步完成后未能点击“下一步”")
+    print("      ✅ 点击成功")
+    results["第1步-下一步按钮"] = True
     
     await wait_and_log(page, 3, "等待页面跳转...")
+    return results
 
 # ============ 第2步：目标分群 ============
 
-async def fill_step2(page, data: dict):
+async def fill_step2(page, data: dict, strict_step2: bool = False):
     """填充第2步：目标分群"""
     print("\n📋 第2步：目标分群")
     print("="*50)
@@ -318,10 +867,12 @@ async def fill_step2(page, data: dict):
     }''')
     print(f"      找到 {len(iframe_info)} 个 iframe")
     
-    # 等待弹窗/iframe 内容加载 - 增加等待时间
+    # 等待弹窗/iframe 内容加载
     print("   ⏳ 等待 iframe 内容加载...")
-    await asyncio.sleep(5)  # 增加到5秒
+    await asyncio.sleep(3)
     
+    step2_error = None
+
     if iframe_info:
         print("   🔧 在 iframe 内执行操作...")
         try:
@@ -330,6 +881,20 @@ async def fill_step2(page, data: dict):
             if frame_handle:
                 frame = await frame_handle.content_frame()
                 if frame:
+                    # 内网/代理异常时常见现象：iframe 空白或加载失败，提前抛错避免“假成功”。
+                    frame_diag = await frame.evaluate("""() => {
+                        const bodyText = (document.body && document.body.innerText ? document.body.innerText : '').trim();
+                        return {
+                            href: location.href || '',
+                            title: document.title || '',
+                            textLen: bodyText.length,
+                            hasErrKeyword: /ERR_|无法访问|无法连接|network|proxy|超时/i.test(bodyText + ' ' + (document.title || ''))
+                        };
+                    }""")
+                    print(f"      iframe诊断: href={frame_diag.get('href','')}, title={frame_diag.get('title','')}, textLen={frame_diag.get('textLen',0)}")
+                    if frame_diag.get("textLen", 0) == 0 or frame_diag.get("hasErrKeyword"):
+                        raise RuntimeError("第2步 iframe 内容为空或疑似网络/代理异常，请检查 VPN/代理并重试")
+
                     # 在 iframe 内填充名称
                     print("   📝 名称: " + data.get("group_name", "测试分群"))
                     try:
@@ -361,6 +926,7 @@ async def fill_step2(page, data: dict):
                     if data.get("main_operating_area"):
                         print(f"   🏢 主消费营运区: {data['main_operating_area']}")
                         try:
+                            area_escaped = escape_js_string(data["main_operating_area"])
                             clicked = await frame.evaluate('''() => {
                                 const btns = document.querySelectorAll('button');
                                 for (const btn of btns) {
@@ -371,6 +937,20 @@ async def fill_step2(page, data: dict):
                                 }
                                 return 'not_found';
                             }''')
+                            if clicked == 'not_found':
+                                # 兜底1：更宽松文本定位（a/div/span）
+                                clicked = await frame.evaluate('''() => {
+                                    const els = document.querySelectorAll('a, span, div');
+                                    for (const el of els) {
+                                        const t = (el.textContent || '').trim();
+                                        if (t === '选择数据' || t.includes('选择数据')) {
+                                            el.click();
+                                            return 'clicked';
+                                        }
+                                    }
+                                    return 'not_found';
+                                }''')
+
                             if clicked == 'clicked':
                                 print("      ✅ 已点击选择数据按钮")
                                 await asyncio.sleep(2)
@@ -440,7 +1020,30 @@ async def fill_step2(page, data: dict):
                                 else:
                                     print(f"      ⚠️ 仍未找到: {area}")
                             else:
-                                print("      ⚠️ 未找到选择数据按钮")
+                                # 兜底2：某些页面树已默认展开，直接尝试勾选
+                                print("      ⚠️ 未找到选择数据按钮，尝试直接在当前树中勾选...")
+                                area = data['main_operating_area']
+                                selected_direct = await frame.evaluate("""
+                                () => {
+                                    const targetArea = '""" + area_escaped + """';
+                                    const allNodes = document.querySelectorAll('.ant-tree-node-content-wrapper, .ant-tree-title, [title]');
+                                    for (const node of allNodes) {
+                                        if ((node.textContent || '').includes(targetArea)) {
+                                            const parent = node.closest('.ant-tree-treenode') || node.parentElement;
+                                            const checkbox = parent ? parent.querySelector('.ant-checkbox') : null;
+                                            if (checkbox) {
+                                                checkbox.click();
+                                                return 'checked';
+                                            }
+                                        }
+                                    }
+                                    return 'not_found';
+                                }
+                                """)
+                                if selected_direct == "checked":
+                                    print(f"      ✅ 已直接勾选营运区: {area}")
+                                else:
+                                    print("      ⚠️ 直接勾选也失败，请检查第2步页面是否空白/未加载完整")
                         except Exception as e:
                             print(f"      ⚠️ 主消费营运区操作失败: {e}")
                     
@@ -460,12 +1063,19 @@ async def fill_step2(page, data: dict):
                 print("   ⚠️ 未找到 iframe 元素")
         except Exception as e:
             print(f"   ⚠️ iframe 操作失败: {e}")
+            step2_error = str(e)
     else:
         print("   ⚠️ 未检测到 iframe，使用普通方式填充")
         await fill_input(page, "名称", data.get("group_name", "测试分群"))
         await select_radio(page, "更新方式", data.get("update_type", "自动更新"))
         if data.get("coupon_ids"):
             await fill_input(page, "券规则ID", data["coupon_ids"])
+
+    # 严格模式下，第2步异常直接终止当前计划；默认先放行便于联调全流程。
+    if step2_error:
+        if strict_step2:
+            raise RuntimeError(f"第2步失败: {step2_error}")
+        print(f"   ⚠️ 第2步异常已记录，当前为非严格模式，继续后续流程: {step2_error}")
     
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step2-modal-filled.png')
     
@@ -490,26 +1100,33 @@ async def fill_step2(page, data: dict):
     print("\n   ✅ 第2步完成")
     
     print("   ⏭️  点击下一步...")
-    try:
-        await page.evaluate('''() => {
-            const btns = document.querySelectorAll('button');
-            for (const btn of btns) {
-                if (btn.textContent.includes('下一步')) {
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
-        }''')
-        print("      ✅ JavaScript点击成功")
-    except Exception as e:
-        print(f"      ⚠️ 点击失败: {e}")
+    clicked = await click_button_with_text(page, "下一步")
+    if not clicked:
+        raise RuntimeError("第2步完成后未能点击“下一步”")
+    print("      ✅ 点击成功")
     
     await wait_and_log(page, 2, "跳转到第3步...")
 
+async def skip_step2(page):
+    """跳过第2步内容，仅点击下一步进入第3步。"""
+    print("\n📋 第2步：目标分群（跳过模式）")
+    print("=" * 50)
+    await wait_and_log(page, 2, "等待第2步加载...")
+    await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step2-skipped.png')
+
+    print("   ⏭️  跳过第2步内容，直接点击下一步...")
+    clicked = await click_button_with_text(page, "下一步")
+
+    if not clicked:
+        raise RuntimeError("跳过第2步失败：未找到可点击的“下一步”按钮")
+
+    print("      ✅ 已进入第3步")
+    await wait_and_log(page, 2, "跳转到第3步...")
+    return {"第2步-跳过下一步按钮": True}
+
 # ============ 第3步：触达内容 ============
 
-async def fill_step3(page, data: dict):
+async def fill_step3(page, data: dict, manual_executor_mode: bool = False, executor_check_override: str = ""):
     """填充第3步：触达内容/短信内容"""
     print("\n📋 第3步：短信内容")
     print("="*50)
@@ -517,86 +1134,290 @@ async def fill_step3(page, data: dict):
     await wait_and_log(page, 2, "等待第3步加载...")
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step3-before.png')
     
+    results = {}
     print("   📝 短信内容...")
     sms_content = data.get("sms_content", "测试短信内容")
-    
     try:
-        await page.evaluate(f'''() => {{
-            const labels = document.querySelectorAll('label, .label, span');
-            for (const label of labels) {{
-                if (label.textContent.includes('短信内容')) {{
-                    const container = label.closest('.el-form-item, .ant-form-item, .sms-content-input-container') || label.parentElement;
-                    const textarea = container ? container.querySelector('textarea') : null;
-                    if (textarea) {{
-                        textarea.value = '{sms_content}';
-                        textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        return true;
-                    }}
-                }}
-            }}
-            const textareas = document.querySelectorAll('textarea');
-            if (textareas.length > 0) {{
-                textareas[0].value = '{sms_content}';
-                textareas[0].dispatchEvent(new Event('input', {{ bubbles: true }}));
-                return true;
-            }}
-            return false;
-        }}''')
+        sms_ok = await page.evaluate(
+            """(content) => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                };
+                const tryWrite = (el) => {
+                    if (!el || !isVisible(el)) return false;
+                    el.focus();
+                    el.value = content;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.blur();
+                    return (el.value || '').includes(content.slice(0, 8));
+                };
+                const labels = Array.from(document.querySelectorAll('label, .label, span, div'));
+                for (const n of labels) {
+                    const txt = (n.textContent || '').replace(/\\s+/g, '');
+                    if (!txt.includes('短信内容')) continue;
+                    const item = n.closest('.item, .el-form-item, .ant-form-item') || n.parentElement;
+                    if (!item) continue;
+                    // 优先 contenteditable 富文本输入框
+                    const editable = item.querySelector('.editable[contenteditable="true"], [contenteditable="true"].editable, [contenteditable="true"]');
+                    if (editable && isVisible(editable)) {
+                        editable.focus();
+                        editable.innerText = content;
+                        editable.dispatchEvent(new Event('input', { bubbles: true }));
+                        editable.dispatchEvent(new Event('keyup', { bubbles: true }));
+                        editable.dispatchEvent(new Event('change', { bubbles: true }));
+                        editable.blur();
+                        const rb = (editable.innerText || editable.textContent || '').trim();
+                        if (rb.includes(content.slice(0, 8))) return true;
+                    }
+                    const area = item.querySelector('textarea');
+                    if (tryWrite(area)) return true;
+                }
+                const allAreas = Array.from(document.querySelectorAll('textarea'));
+                for (const a of allAreas) {
+                    if (tryWrite(a)) return true;
+                }
+                return false;
+            }""",
+            sms_content
+        )
+        if not sms_ok:
+            raise RuntimeError("未找到可写入的短信内容输入框")
         print(f"      ✅ 已填充: {sms_content[:30]}...")
+        results["第3步-短信内容"] = True
     except Exception as e:
         print(f"      ⚠️ 填充失败: {e}")
+        results["第3步-短信内容"] = False
+
+    # 新增字段：结束时间
+    step3_end_time = data.get("step3_end_time") or data.get("end_time")
+    print(f"   📅 结束时间: {step3_end_time}")
+    end_ok = await fill_step3_end_time(page, step3_end_time)
+    print(f"      {'✅' if end_ok else '⚠️'} 结束时间{'已填充' if end_ok else '未匹配到字段'}")
+    results["第3步-结束时间"] = end_ok
+
+    # 新增字段：执行员工（多选）
+    executor_vals = data.get("executor_employees", "")
+    mode_ok = await set_step3_distribution_mode(page, "指定门店分配")
+    print(f"   ⚙️ 分配方式: {'指定门店分配' if mode_ok else '未找到分配方式控件'}")
+    print(f"   👥 执行员工: {executor_vals}")
+    if manual_executor_mode:
+        print("      ⏸️ 手动模式：请在浏览器中手工勾选执行员工后，回到终端按回车继续...")
+        await asyncio.to_thread(input, "Press Enter to continue after manual executor selection...")
+        debug_data = await dump_executor_debug(page)
+        targets = split_multi_values(executor_check_override) if executor_check_override else split_multi_values(executor_vals)
+        haystack = " ".join([
+            debug_data.get("inputValue", ""),
+            " ".join(debug_data.get("tags", [])),
+            " ".join([n.get("text", "") for n in debug_data.get("checked", []) if isinstance(n, dict)]),
+        ])
+        manual_ok = all(t in haystack for t in targets)
+        if not manual_ok:
+            print(f"      ⚠️ 手动执行员工校验失败：当前未匹配目标 {targets}")
+        else:
+            print("      ✅ 手动执行员工校验通过")
+        results["第3步-执行员工"] = manual_ok
+    else:
+        exec_ok = await fill_step3_executor(page, executor_vals)
+        print(f"      {'✅' if exec_ok else '⚠️'} 执行员工{'已选择' if exec_ok else '未完整选择'}")
+        results["第3步-执行员工"] = exec_ok
+
+    # 新增字段：发送内容
+    send_content = data.get("send_content", "")
+    print(f"   📝 发送内容: {send_content}")
+    send_ok = await fill_step3_send_content(page, send_content)
+    print(f"      {'✅' if send_ok else '⚠️'} 发送内容{'已填充' if send_ok else '未匹配到字段'}")
+    results["第3步-发送内容"] = send_ok
     
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step3-after.png')
     
     print("\n   ✅ 第3步完成")
     
     print("   💾 点击保存...")
+    clicked = False
     try:
-        await page.evaluate('''() => {
-            const btns = document.querySelectorAll('button');
-            for (const btn of btns) {
-                if (btn.textContent.includes('保存') && !btn.textContent.includes('取消')) {
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
-        }''')
-        print("      ✅ JavaScript点击保存成功")
-    except Exception as e:
-        print(f"      ⚠️ 点击失败: {e}")
+        # 优先点击你提供的主保存按钮样式，避免误点其他“保存”。
+        save_btn = page.locator("button.el-button--primary.el-button--small").filter(has_text="保存").first
+        if await save_btn.count() > 0 and await save_btn.is_visible():
+            await save_btn.click(force=True)
+            clicked = True
+    except:
+        clicked = False
+
+    if not clicked:
+        clicked = await click_button_with_text(page, "保存", exclude_text="取消")
+    if not clicked:
+        raise RuntimeError("第3步未能点击“保存”")
+    print("      ✅ 点击保存成功")
+    results["第3步-保存按钮"] = True
     
     await wait_and_log(page, 2, "保存中...")
+    # 保存结果校验：出现成功提示或页面跳转离开编辑页
+    current_url = page.url
+    toast_success = False
+    try:
+        toast = page.locator(".el-message__content, .ant-message-custom-content").filter(has_text="成功").first
+        if await toast.count() > 0:
+            await toast.wait_for(timeout=2500)
+            toast_success = True
+    except:
+        toast_success = False
+    moved = ("marketingTemplate/use" not in page.url) or ("limitList" in page.url)
+    if not toast_success and not moved:
+        print(f"      ⚠️ 保存后未检测到成功提示/跳转，当前URL={current_url}")
+    return results
+
+async def dump_executor_debug(page):
+    """打印执行员工级联选择的调试信息（无需 DevTools）。"""
+    data = await page.evaluate("""() => {
+        const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
+        let item = null;
+        for (const label of labels) {
+            const txt = (label.textContent || '').replace(/\\s+/g, '');
+            if (txt.includes('执行员工')) {
+                item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
+                break;
+            }
+        }
+        const root = item ? item.querySelector('.el-cascader') : null;
+        const panel = document.querySelector('.el-cascader-panel');
+        const checked = panel
+            ? Array.from(panel.querySelectorAll('.el-cascader-node'))
+                .filter(n => n.querySelector('.el-checkbox__input.is-checked'))
+                .map(n => ({
+                    text: (n.querySelector('.el-cascader-node__label')?.textContent || '').trim(),
+                    id: n.id || '',
+                    cls: n.className || ''
+                }))
+            : [];
+
+        const inputValue = root?.querySelector('input.el-input__inner')?.value || '';
+        const tags = root
+            ? Array.from(root.querySelectorAll('.el-tag .el-tag__content, .el-cascader__tags span'))
+                .map(n => (n.textContent || '').trim())
+                .filter(Boolean)
+            : [];
+        return { checked, inputValue, tags };
+    }""")
+    print("   🧪 执行员工调试信息:")
+    print(f"      inputValue: {data.get('inputValue', '')}")
+    print(f"      tags: {data.get('tags', [])}")
+    print(f"      checkedNodes: {data.get('checked', [])}")
+    return data
+
+# ============ 浏览器连接 ============
+
+async def connect_browser(p, connect_cdp: bool, cdp_endpoint: str):
+    """连接浏览器：本地启动或接管已有 Chrome(CDP)。"""
+    if connect_cdp:
+        print(f"   🔌 通过 CDP 接管已有浏览器: {cdp_endpoint}")
+        browser = await p.chromium.connect_over_cdp(cdp_endpoint)
+        if not browser.contexts:
+            # CDP 模式下通常至少有 1 个默认上下文，这里兜底。
+            await browser.new_context()
+        return browser
+
+    print("   🚀 启动新浏览器会话")
+    return await p.chromium.launch(
+        headless=HEADLESS,
+        slow_mo=SLOW_MO,
+        args=[
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-infobars',
+            '--disable-blink-features=AutomationControlled'
+        ]
+    )
+
+async def ensure_login(browser, connect_cdp: bool):
+    """确保登录状态。CDP 模式默认复用已有登录，不再强制扫码。"""
+    if connect_cdp:
+        print("   ✅ CDP 模式：复用当前 Chrome 登录态")
+        return
+
+    login_page = await browser.new_page()
+    await login_page.goto("https://precision.dslyy.com/admin")
+    await asyncio.sleep(3)
+
+    if 'login' in login_page.url or 'sso' in login_page.url:
+        print("   📱 请用企业微信扫码登录...")
+        logged_in = False
+        for i in range(60):
+            await asyncio.sleep(5)
+            if 'admin' in login_page.url and 'login' not in login_page.url:
+                print("   ✅ 登录成功")
+                logged_in = True
+                break
+            print(f"   等待中... ({i + 1}/60)")
+
+        if not logged_in:
+            print("   ❌ 登录超时")
+            sys.exit(1)
+    else:
+        print("   ✅ 已登录")
+
+    await login_page.close()
 
 # ============ 并发处理 ============
 
-async def process_single_plan(browser, plan: dict, plan_index: int, semaphore: asyncio.Semaphore) -> bool:
+async def process_single_plan(
+    browser,
+    plan: dict,
+    plan_index: int,
+    semaphore: asyncio.Semaphore,
+    connect_cdp: bool = False,
+    strict_step2: bool = False,
+    skip_step2_mode: bool = False,
+    manual_executor_mode: bool = False,
+    executor_check_override: str = ""
+) -> bool:
     """使用信号量控制并发，处理单个计划"""
     async with semaphore:
         print(f"\n{'='*60}")
         print(f"📋 计划 {plan_index}: {plan['name']}")
         print(f"{'='*60}")
-        
-        context = await browser.new_context()
+
+        context = browser.contexts[0] if connect_cdp and browser.contexts else await browser.new_context()
+        owns_context = not (connect_cdp and browser.contexts)
         page = await context.new_page()
-        
+        field_results = {}
+
         for attempt in range(MAX_RETRIES):
             try:
                 await page.goto(BASE_URL)
                 await wait_and_log(page, 2, "页面加载中...")
-                
-                await fill_step1(page, plan)
-                await fill_step2(page, plan)
-                await fill_step3(page, plan)
+
+                field_results.update(await fill_step1(page, plan))
+                if skip_step2_mode:
+                    field_results.update(await skip_step2(page))
+                else:
+                    await fill_step2(page, plan, strict_step2=strict_step2)
+                field_results.update(await fill_step3(
+                    page,
+                    plan,
+                    manual_executor_mode=manual_executor_mode,
+                    executor_check_override=executor_check_override
+                ))
                 
                 print(f"\n   ✅ 计划 {plan_index} 完成！")
-                await context.close()
+                print("   📌 字段结果清单:")
+                for k in sorted(field_results.keys()):
+                    mark = "✅" if field_results[k] else "❌"
+                    print(f"      {mark} {k}")
+                await page.close()
+                if owns_context:
+                    await context.close()
                 return (plan_index, True, plan['name'])
-            
+
             except Exception as e:
                 print(f"\n   ❌ 计划 {plan_index} 失败 (尝试 {attempt+1}/{MAX_RETRIES})")
                 print(f"      错误: {e}")
-                
+
                 if attempt < MAX_RETRIES - 1:
                     print("      🔄 重试中...")
                     await asyncio.sleep(3)
@@ -610,6 +1431,11 @@ async def process_single_plan(browser, plan: dict, plan_index: int, semaphore: a
                         await page.close()
                     except:
                         pass
+                    if owns_context:
+                        try:
+                            await context.close()
+                        except:
+                            pass
                     return (plan_index, False, plan['name'])
 
 # ============ 主流程 ============
@@ -622,6 +1448,13 @@ async def main():
     parser.add_argument('--start', type=int, help='开始行号（从1开始）')
     parser.add_argument('--end', type=int, help='结束行号')
     parser.add_argument('--concurrent', type=int, default=MAX_CONCURRENT, help='并发数')
+    parser.add_argument('--connect-cdp', action='store_true', help='通过 CDP 接管已登录 Chrome（推荐内网场景）')
+    parser.add_argument('--cdp-endpoint', type=str, default=DEFAULT_CDP_ENDPOINT, help='CDP 地址，默认 http://127.0.0.1:9222')
+    parser.add_argument('--hold-seconds', type=int, default=0, help='完成后保留浏览器秒数，默认 0')
+    parser.add_argument('--strict-step2', action='store_true', help='开启第2步严格校验（异常直接失败）')
+    parser.add_argument('--skip-step2', action='store_true', help='跳过第2步内容（仅联调第1步和第3步）')
+    parser.add_argument('--manual-executor', action='store_true', help='第3步执行员工改为手动勾选（终端回车后继续）')
+    parser.add_argument('--executor-check-only', type=str, default='', help='仅校验指定执行员工目标（例如 湖北省区）')
     args = parser.parse_args()
     
     # 加载数据
@@ -642,6 +1475,9 @@ async def main():
     print("="*60)
     print(f"   时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"   计划数: {len(plans)}")
+    if args.connect_cdp and args.concurrent > 1:
+        print("   ⚠️ CDP 接管模式下强制串行，已将并发数调整为 1")
+        args.concurrent = 1
     print(f"   并发数: {args.concurrent}")
     print("="*60)
     
@@ -652,52 +1488,27 @@ async def main():
     )
     
     async with async_playwright() as p:
-        # 添加启动参数禁用权限提示
-        browser = await p.chromium.launch(
-            headless=HEADLESS, 
-            slow_mo=SLOW_MO,
-            args=[
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-infobars',
-                '--disable-blink-features=AutomationControlled'
-            ]
-        )
-        
-        # 登录（只需一次）
-        login_page = await browser.new_page()
-        await login_page.goto("https://precision.dslyy.com/admin")
-        await asyncio.sleep(3)
-        
-        if 'login' in login_page.url or 'sso' in login_page.url:
-            print("   📱 请用企业微信扫码登录...")
-            logged_in = False
-            for i in range(60):
-                await asyncio.sleep(5)
-                if 'admin' in login_page.url and 'login' not in login_page.url:
-                    print("   ✅ 登录成功")
-                    logged_in = True
-                    break
-                print(f"   等待中... ({i+1}/60)")
-            
-            if not logged_in:
-                print("   ❌ 登录超时")
-                sys.exit(1)
-        else:
-            print("   ✅ 已登录")
-        
-        await login_page.close()
-        
+        browser = await connect_browser(p, args.connect_cdp, args.cdp_endpoint)
+        await ensure_login(browser, args.connect_cdp)
+
         # 并发处理
         semaphore = asyncio.Semaphore(args.concurrent)
         tasks = []
-        
+
         for i in range(len(plans)):
-            task = process_single_plan(browser, plans[i], i + 1, semaphore)
+            task = process_single_plan(
+                browser,
+                plans[i],
+                i + 1,
+                semaphore,
+                args.connect_cdp,
+                args.strict_step2,
+                args.skip_step2,
+                args.manual_executor,
+                args.executor_check_only
+            )
             tasks.append(task)
-        
+
         # 等待所有任务完成
         results = await asyncio.gather(*tasks)
         
@@ -744,11 +1555,12 @@ async def main():
             print("\n   失败的计划:")
             for idx, name in failed_plans:
                 print(f"      {idx}. {name}")
-        
+
         print("="*60)
-        
-        print("\n⏸️  浏览器保持打开  按 Ctrl+C 退出...")
-        await asyncio.sleep(300)
+
+        if args.hold_seconds > 0:
+            print(f"\n⏸️  浏览器保持打开 {args.hold_seconds} 秒...")
+            await asyncio.sleep(args.hold_seconds)
 
 if __name__ == "__main__":
     asyncio.run(main())
