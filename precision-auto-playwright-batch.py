@@ -455,6 +455,42 @@ async def fill_step3_send_content(page, content: str) -> bool:
         content
     )
 
+async def ensure_step3_saved(page) -> bool:
+    """确保第3步保存真正提交：处理确认弹窗并等待成功提示。"""
+    # 某些页面点击“保存”后会弹二次确认，先尝试确认。
+    confirm_selectors = [
+        '.el-message-box__btns button:has-text("确定")',
+        '.el-message-box__btns button:has-text("确认")',
+        '.el-dialog__footer button:has-text("确定")',
+        '.el-dialog__footer button:has-text("确认")',
+        '.el-dialog__footer button:has-text("提交")',
+    ]
+    for sel in confirm_selectors:
+        try:
+            btn = page.locator(sel).first
+            if await btn.count() > 0 and await btn.is_visible():
+                await btn.click(force=True)
+                await asyncio.sleep(0.2)
+                break
+        except:
+            pass
+
+    # 等待成功提示；同屏失败提示也要拦截。
+    try:
+        toast = page.locator(".el-message__content, .ant-message-custom-content").first
+        await toast.wait_for(timeout=7000)
+        msg = ((await toast.text_content()) or "").strip()
+        if any(k in msg for k in ["成功", "已保存", "保存完成"]):
+            return True
+        if any(k in msg for k in ["失败", "错误", "重复", "不能为空", "请先", "未通过"]):
+            raise RuntimeError(f"保存失败提示: {msg}")
+    except PlaywrightTimeout:
+        pass
+
+    # 无 toast 时，回退到 URL 变化判定。
+    moved = ("marketingTemplate/use" not in page.url) or ("limitList" in page.url)
+    return moved
+
 async def set_step3_distribution_mode(page, mode_text: str = "指定门店分配") -> bool:
     """第3步分配方式：点击单选文本。"""
     return await page.evaluate(
@@ -1255,19 +1291,10 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     results["第3步-保存按钮"] = True
     
     await wait_and_log(page, 2, "保存中...")
-    # 保存结果校验：出现成功提示或页面跳转离开编辑页
-    current_url = page.url
-    toast_success = False
-    try:
-        toast = page.locator(".el-message__content, .ant-message-custom-content").filter(has_text="成功").first
-        if await toast.count() > 0:
-            await toast.wait_for(timeout=2500)
-            toast_success = True
-    except:
-        toast_success = False
-    moved = ("marketingTemplate/use" not in page.url) or ("limitList" in page.url)
-    if not toast_success and not moved:
-        print(f"      ⚠️ 保存后未检测到成功提示/跳转，当前URL={current_url}")
+    saved_ok = await ensure_step3_saved(page)
+    if not saved_ok:
+        raise RuntimeError(f"保存未真正提交（未检测到成功提示/跳转），当前URL={page.url}")
+    print("      ✅ 已检测到保存成功")
     return results
 
 async def dump_executor_debug(page):
