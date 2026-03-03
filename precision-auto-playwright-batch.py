@@ -1444,8 +1444,15 @@ async def process_single_plan(
             except Exception as e:
                 print(f"\n   ❌ 计划 {plan_index} 失败 (尝试 {attempt+1}/{MAX_RETRIES})")
                 print(f"      错误: {e}")
+                err_text = str(e)
+                non_retryable = any(k in err_text for k in [
+                    "目标不可重复",
+                    "保存失败提示",
+                ])
+                if "目标不可重复" in err_text:
+                    print("      ℹ️ 业务校验失败：当前页面存在重复目标，需先人工去重后再执行。")
 
-                if attempt < MAX_RETRIES - 1:
+                if (attempt < MAX_RETRIES - 1) and (not non_retryable):
                     print("      🔄 重试中...")
                     await asyncio.sleep(3)
                 else:
