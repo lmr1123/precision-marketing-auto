@@ -586,6 +586,48 @@ async def fill_step3_send_content(page, content: str) -> bool:
         content
     )
 
+async def fill_step3_sms_content(page, content: str) -> bool:
+    """第3步短信内容：仅写入可见短信编辑器，并校验长度计数>0。"""
+    return await page.evaluate(
+        """(content) => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const toInt = (s) => {
+                const m = String(s || '').match(/(\\d+)\\s*\\//);
+                return m ? parseInt(m[1], 10) : NaN;
+            };
+            const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item'))
+                .filter(it => isVisible(it) && /短信内容/.test((it.textContent || '').replace(/\\s+/g, '')));
+            for (const item of items) {
+                const editable = item.querySelector('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]');
+                if (!editable || !isVisible(editable)) continue;
+                editable.focus();
+                editable.innerHTML = '';
+                const line = document.createElement('div');
+                line.textContent = content;
+                editable.appendChild(line);
+                editable.dispatchEvent(new Event('input', { bubbles: true }));
+                editable.dispatchEvent(new Event('keyup', { bubbles: true }));
+                editable.dispatchEvent(new Event('change', { bubbles: true }));
+                editable.dispatchEvent(new Event('blur', { bubbles: true }));
+                editable.blur();
+                const rb = (editable.innerText || editable.textContent || '').trim();
+                const lengthEl = item.querySelector('.length');
+                const lenText = lengthEl ? (lengthEl.textContent || '') : '';
+                const lenVal = toInt(lenText);
+                if (rb.includes(content.slice(0, 4)) && (!Number.isNaN(lenVal) ? lenVal > 0 : rb.length > 0)) {
+                    return true;
+                }
+            }
+            return false;
+        }""",
+        content
+    )
+
 def extract_api_code_message(text: str):
     """从接口响应体中提取 code/message。"""
     if not text:
@@ -1421,52 +1463,7 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
         print(f"      ⚠️ 短信文案已自动清洗非法字符: {sms_content} -> {sms_content_clean}")
     sms_content = sms_content_clean
     try:
-        sms_ok = await page.evaluate(
-            """(content) => {
-                const isVisible = (el) => {
-                    if (!el) return false;
-                    const style = window.getComputedStyle(el);
-                    const rect = el.getBoundingClientRect();
-                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-                };
-                const tryWrite = (el) => {
-                    if (!el || !isVisible(el)) return false;
-                    el.focus();
-                    el.value = content;
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                    el.blur();
-                    return (el.value || '').includes(content.slice(0, 8));
-                };
-                const labels = Array.from(document.querySelectorAll('label, .label, span, div'));
-                for (const n of labels) {
-                    const txt = (n.textContent || '').replace(/\\s+/g, '');
-                    if (!txt.includes('短信内容')) continue;
-                    const item = n.closest('.item, .el-form-item, .ant-form-item') || n.parentElement;
-                    if (!item) continue;
-                    // 优先 contenteditable 富文本输入框
-                    const editable = item.querySelector('.editable[contenteditable="true"], [contenteditable="true"].editable, [contenteditable="true"]');
-                    if (editable && isVisible(editable)) {
-                        editable.focus();
-                        editable.innerText = content;
-                        editable.dispatchEvent(new Event('input', { bubbles: true }));
-                        editable.dispatchEvent(new Event('keyup', { bubbles: true }));
-                        editable.dispatchEvent(new Event('change', { bubbles: true }));
-                        editable.blur();
-                        const rb = (editable.innerText || editable.textContent || '').trim();
-                        if (rb.includes(content.slice(0, 8))) return true;
-                    }
-                    const area = item.querySelector('textarea');
-                    if (tryWrite(area)) return true;
-                }
-                const allAreas = Array.from(document.querySelectorAll('textarea'));
-                for (const a of allAreas) {
-                    if (tryWrite(a)) return true;
-                }
-                return false;
-            }""",
-            sms_content
-        )
+        sms_ok = await fill_step3_sms_content(page, sms_content)
         if not sms_ok:
             raise RuntimeError("未找到可写入的短信内容输入框")
         print(f"      ✅ 已填充: {sms_content[:30]}...")
