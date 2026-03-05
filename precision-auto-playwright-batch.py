@@ -850,6 +850,29 @@ async def copy_channel_info_if_available(page) -> bool:
     except Exception:
         return False
 
+async def read_step3_sms_text(page) -> str:
+    """读取第3步短信内容编辑器文本（用于保存前后回读）。"""
+    try:
+        txt = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item'))
+              .filter(it => isVisible(it) && /短信内容/.test((it.textContent || '').replace(/\\s+/g, '')));
+            for (const item of items) {
+                const editable = item.querySelector('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]');
+                if (!editable || !isVisible(editable)) continue;
+                return (editable.innerText || editable.textContent || '').trim();
+            }
+            return '';
+        }""")
+        return (txt or "").strip()
+    except Exception:
+        return ""
+
 async def set_step3_distribution_mode(page, mode_text: str = "指定门店分配") -> bool:
     """第3步分配方式：点击单选文本。"""
     return await page.evaluate(
@@ -1595,17 +1618,16 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     results["第3步-发送内容"] = send_ok
 
     # 通知配置场景：将当前配置复制到其他地区，避免部分地区短信为空导致 P1114。
-    copied = await copy_channel_info_if_available(page)
-    if copied:
-        print("   📎 渠道信息复制: ✅ 已执行复制")
-    else:
-        print("   📎 渠道信息复制: ⚠️ 未检测到可复制入口")
+    # 默认不自动执行“渠道信息复制”，避免在部分页面触发内容重置副作用。
+    print("   📎 渠道信息复制: ⏭️ 默认关闭（避免副作用）")
     
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step3-after.png')
     
     print("\n   ✅ 第3步完成")
     
     print("   💾 点击保存...")
+    sms_before_save = await read_step3_sms_text(page)
+    print(f"      🧪 保存前短信回读长度: {len(sms_before_save)}")
     loop = asyncio.get_running_loop()
     save_resp_task = loop.create_future()
 
@@ -1636,6 +1658,8 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     results["第3步-保存按钮"] = True
     
     await wait_and_log(page, 2, "保存中...")
+    sms_after_click = await read_step3_sms_text(page)
+    print(f"      🧪 点击保存后短信回读长度: {len(sms_after_click)}")
     saved_ok = await ensure_step3_saved(page, save_resp_task=save_resp_task)
     try:
         page.remove_listener("response", _on_response)
