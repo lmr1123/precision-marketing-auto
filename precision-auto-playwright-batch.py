@@ -587,46 +587,54 @@ async def fill_step3_send_content(page, content: str) -> bool:
     )
 
 async def fill_step3_sms_content(page, content: str) -> bool:
-    """第3步短信内容：仅写入可见短信编辑器，并校验长度计数>0。"""
-    return await page.evaluate(
-        """(content) => {
-            const isVisible = (el) => {
-                if (!el) return false;
-                const style = window.getComputedStyle(el);
-                const rect = el.getBoundingClientRect();
-                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-            };
-            const toInt = (s) => {
-                const m = String(s || '').match(/(\\d+)\\s*\\//);
-                return m ? parseInt(m[1], 10) : NaN;
-            };
-            const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item'))
-                .filter(it => isVisible(it) && /短信内容/.test((it.textContent || '').replace(/\\s+/g, '')));
-            for (const item of items) {
-                const editable = item.querySelector('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]');
-                if (!editable || !isVisible(editable)) continue;
-                editable.focus();
-                editable.innerHTML = '';
-                const line = document.createElement('div');
-                line.textContent = content;
-                editable.appendChild(line);
-                editable.dispatchEvent(new Event('input', { bubbles: true }));
-                editable.dispatchEvent(new Event('keyup', { bubbles: true }));
-                editable.dispatchEvent(new Event('change', { bubbles: true }));
-                editable.dispatchEvent(new Event('blur', { bubbles: true }));
-                editable.blur();
-                const rb = (editable.innerText || editable.textContent || '').trim();
-                const lengthEl = item.querySelector('.length');
-                const lenText = lengthEl ? (lengthEl.textContent || '') : '';
-                const lenVal = toInt(lenText);
-                if (rb.includes(content.slice(0, 4)) && (!Number.isNaN(lenVal) ? lenVal > 0 : rb.length > 0)) {
-                    return true;
-                }
-            }
-            return false;
+    """第3步短信内容：固定写入“短信内容(必填)”对应编辑器，并校验长度>0。"""
+    item = page.locator('.item', has=page.locator('span.label.required', has_text='短信内容')).first
+    if await item.count() == 0:
+        item = page.locator('.item', has_text='短信内容').first
+        if await item.count() == 0:
+            return False
+    editable = item.locator('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]').first
+    if await editable.count() == 0:
+        return False
+    try:
+        await editable.scroll_into_view_if_needed()
+        await editable.click(force=True)
+    except:
+        pass
+    ok = await editable.evaluate(
+        """(el, text) => {
+            el.focus();
+            el.innerHTML = '';
+            el.textContent = '';
+            const line = document.createElement('div');
+            line.textContent = text;
+            el.appendChild(line);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('keyup', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+            el.blur();
+            const rb = (el.innerText || el.textContent || '').trim();
+            return rb.includes(text.slice(0, 4)) && rb.length > 0;
         }""",
         content
     )
+    if not ok:
+        return False
+    rb = ((await editable.inner_text()) or "").strip()
+    if not rb:
+        return False
+    # 结合长度控件做二次校验（如果存在）
+    try:
+        length_el = item.locator(".length").first
+        if await length_el.count() > 0:
+            length_text = ((await length_el.text_content()) or "").strip()
+            m = re.search(r"(\\d+)\\s*/", length_text)
+            if m and int(m.group(1)) <= 0:
+                return False
+    except:
+        pass
+    return True
 
 def extract_api_code_message(text: str):
     """从接口响应体中提取 code/message。"""
@@ -853,23 +861,16 @@ async def copy_channel_info_if_available(page) -> bool:
 async def read_step3_sms_text(page) -> str:
     """读取第3步短信内容编辑器文本（用于保存前后回读）。"""
     try:
-        txt = await page.evaluate("""() => {
-            const isVisible = (el) => {
-                if (!el) return false;
-                const s = window.getComputedStyle(el);
-                const r = el.getBoundingClientRect();
-                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-            };
-            const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item'))
-              .filter(it => isVisible(it) && /短信内容/.test((it.textContent || '').replace(/\\s+/g, '')));
-            for (const item of items) {
-                const editable = item.querySelector('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]');
-                if (!editable || !isVisible(editable)) continue;
-                return (editable.innerText || editable.textContent || '').trim();
-            }
-            return '';
-        }""")
-        return (txt or "").strip()
+        item = page.locator('.item', has=page.locator('span.label.required', has_text='短信内容')).first
+        if await item.count() == 0:
+            item = page.locator('.item', has_text='短信内容').first
+            if await item.count() == 0:
+                return ""
+        editable = item.locator('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]').first
+        if await editable.count() == 0:
+            return ""
+        txt = (await editable.inner_text()) or ""
+        return txt.strip()
     except Exception:
         return ""
 
@@ -1627,6 +1628,11 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     
     print("   💾 点击保存...")
     sms_before_save = await read_step3_sms_text(page)
+    if len(sms_before_save) == 0 and sms_content:
+        print("      ⚠️ 保存前短信为空，执行一次重填...")
+        refill_ok = await fill_step3_sms_content(page, sms_content)
+        print(f"      {'✅' if refill_ok else '⚠️'} 重填短信{'成功' if refill_ok else '失败'}")
+        sms_before_save = await read_step3_sms_text(page)
     print(f"      🧪 保存前短信回读长度: {len(sms_before_save)}")
     loop = asyncio.get_running_loop()
     save_resp_task = loop.create_future()
