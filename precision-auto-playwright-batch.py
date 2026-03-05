@@ -1245,6 +1245,9 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
         await asyncio.to_thread(input, "Press Enter to continue after manual executor selection...")
         debug_data = await dump_executor_debug(page)
         targets = split_multi_values(executor_check_override) if executor_check_override else split_multi_values(executor_vals)
+        overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
+        if overlap_msg:
+            raise RuntimeError(overlap_msg)
         haystack = " ".join([
             debug_data.get("inputValue", ""),
             " ".join(debug_data.get("tags", [])),
@@ -1260,6 +1263,11 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
         exec_ok = await fill_step3_executor(page, executor_vals)
         print(f"      {'✅' if exec_ok else '⚠️'} 执行员工{'已选择' if exec_ok else '未完整选择'}")
         results["第3步-执行员工"] = exec_ok
+        debug_data = await dump_executor_debug(page)
+        targets = split_multi_values(executor_vals)
+        overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
+        if overlap_msg:
+            raise RuntimeError(overlap_msg)
 
     # 新增字段：发送内容
     send_content = data.get("send_content", "")
@@ -1334,6 +1342,22 @@ async def dump_executor_debug(page):
     print(f"      tags: {data.get('tags', [])}")
     print(f"      checkedNodes: {data.get('checked', [])}")
     return data
+
+def detect_executor_overlap_conflict(debug_data: dict, targets: list) -> str:
+    """检测执行员工选择是否存在“全国 + 子区域”重叠冲突。"""
+    if not isinstance(debug_data, dict):
+        return ""
+    checked = debug_data.get("checked", []) or []
+    tags = debug_data.get("tags", []) or []
+    checked_texts = [str(n.get("text", "")).strip() for n in checked if isinstance(n, dict)]
+    has_country_checked = any(t == "全国" for t in checked_texts)
+    # tags 里出现“全国 / xxx”代表选择了全国下的子层级路径
+    has_child_path = any("全国 /" in str(t) for t in tags)
+    targets = targets or []
+    target_has_country = any("全国" == str(t).strip() for t in targets)
+    if has_country_checked and has_child_path and not target_has_country:
+        return "执行员工疑似重叠：已勾选“全国”同时又勾选其子区域（如 大区/省区/门店），保存会触发“目标不可重复”"
+    return ""
 
 # ============ 浏览器连接 ============
 
