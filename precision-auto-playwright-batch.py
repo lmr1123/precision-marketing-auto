@@ -389,16 +389,16 @@ def sanitize_sms_content(content: str) -> str:
 async def fill_step3_end_time(page, end_time: str) -> bool:
     """第3步结束时间：填入并确认日期面板。"""
     date_part, _ = split_datetime(end_time)
-    item = page.locator(".item:visible", has_text="结束时间").first
+    item = page.locator(".item", has_text="结束时间").first
     input_el = None
     if await item.count() > 0:
-        cand = item.locator('input[placeholder*="结束"], input[placeholder*="请选择结束"], input.el-input__inner').first
-        if await cand.count() > 0 and await cand.is_visible():
+        cand = item.locator('input[placeholder*="结束"], input[placeholder*="请选择结束"], input[placeholder*="日期"], input.el-input__inner, input').first
+        if await cand.count() > 0:
             input_el = cand
 
     # 兜底1：全局可见 placeholder
     if input_el is None:
-        cand = page.locator('input[placeholder*="请选择结束日期"]:visible, input[placeholder*="结束日期"]:visible').first
+        cand = page.locator('input[placeholder*="请选择结束日期"], input[placeholder*="结束日期"], input[placeholder*="请选择结束"]').first
         if await cand.count() > 0:
             input_el = cand
 
@@ -445,6 +445,7 @@ async def fill_step3_end_time(page, end_time: str) -> bool:
 
     # 优先走组件面板路径，确保 ElementUI 内部值同步。
     try:
+        await input_el.scroll_into_view_if_needed()
         await input_el.click(force=True)
         panel = page.locator('.el-picker-panel.el-date-picker:visible').first
         await panel.wait_for(timeout=2500)
