@@ -30,6 +30,7 @@ import csv
 import argparse
 import subprocess
 import re
+import json
 from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
@@ -455,7 +456,21 @@ async def fill_step3_send_content(page, content: str) -> bool:
         content
     )
 
-async def ensure_step3_saved(page) -> bool:
+def extract_api_code_message(text: str):
+    """从接口响应体中提取 code/message。"""
+    if not text:
+        return "", ""
+    try:
+        data = json.loads(text)
+    except Exception:
+        return "", ""
+    if isinstance(data, dict):
+        code = data.get("code", data.get("status", ""))
+        msg = data.get("msg", data.get("message", data.get("errorMsg", "")))
+        return str(code), str(msg)
+    return "", ""
+
+async def ensure_step3_saved(page, save_resp_task=None) -> bool:
     """确保第3步保存真正提交：处理确认弹窗并等待成功提示。"""
     # 某些页面点击“保存”后会弹二次确认，先尝试确认。
     confirm_selectors = [
@@ -475,6 +490,18 @@ async def ensure_step3_saved(page) -> bool:
         except:
             pass
 
+    # 读取保存接口响应，输出 status/code/message 便于后端定位。
+    api_diag = ""
+    if save_resp_task is not None:
+        try:
+            resp = await save_resp_task
+            body = await resp.text()
+            code, msg = extract_api_code_message(body)
+            api_diag = f"url={resp.url}, status={resp.status}, code={code}, msg={msg}"
+            print(f"      🧪 保存接口响应: {api_diag}")
+        except Exception:
+            api_diag = ""
+
     # 等待成功提示；同屏失败提示也要拦截。
     try:
         toast = page.locator(".el-message__content, .ant-message-custom-content").first
@@ -483,12 +510,15 @@ async def ensure_step3_saved(page) -> bool:
         if any(k in msg for k in ["成功", "已保存", "保存完成"]):
             return True
         if any(k in msg for k in ["失败", "错误", "重复", "不能为空", "请先", "未通过"]):
-            raise RuntimeError(f"保存失败提示: {msg}")
+            suffix = f" | {api_diag}" if api_diag else ""
+            raise RuntimeError(f"保存失败提示: {msg}{suffix}")
     except PlaywrightTimeout:
         pass
 
     # 无 toast 时，回退到 URL 变化判定。
     moved = ("marketingTemplate/use" not in page.url) or ("limitList" in page.url)
+    if (not moved) and api_diag:
+        print(f"      ⚠️ 未检测到成功跳转，接口信息: {api_diag}")
     return moved
 
 async def set_step3_distribution_mode(page, mode_text: str = "指定门店分配") -> bool:
@@ -1281,6 +1311,19 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     print("\n   ✅ 第3步完成")
     
     print("   💾 点击保存...")
+    save_resp_task = asyncio.create_task(
+        page.wait_for_response(
+            lambda r: (
+                r.request.method in ("POST", "PUT")
+                and (
+                    "marketingTemplate" in r.url
+                    or "template" in r.url.lower()
+                    or "save" in r.url.lower()
+                )
+            ),
+            timeout=12000
+        )
+    )
     clicked = False
     try:
         # 优先点击你提供的主保存按钮样式，避免误点其他“保存”。
@@ -1294,12 +1337,13 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     if not clicked:
         clicked = await click_button_with_text(page, "保存", exclude_text="取消")
     if not clicked:
+        save_resp_task.cancel()
         raise RuntimeError("第3步未能点击“保存”")
     print("      ✅ 点击保存成功")
     results["第3步-保存按钮"] = True
     
     await wait_and_log(page, 2, "保存中...")
-    saved_ok = await ensure_step3_saved(page)
+    saved_ok = await ensure_step3_saved(page, save_resp_task=save_resp_task)
     if not saved_ok:
         raise RuntimeError(f"保存未真正提交（未检测到成功提示/跳转），当前URL={page.url}")
     print("      ✅ 已检测到保存成功")
