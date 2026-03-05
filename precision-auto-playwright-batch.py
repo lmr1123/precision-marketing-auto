@@ -494,11 +494,14 @@ async def ensure_step3_saved(page, save_resp_task=None) -> bool:
     api_diag = ""
     if save_resp_task is not None:
         try:
-            resp = await save_resp_task
-            body = await resp.text()
-            code, msg = extract_api_code_message(body)
-            api_diag = f"url={resp.url}, status={resp.status}, code={code}, msg={msg}"
-            print(f"      🧪 保存接口响应: {api_diag}")
+            resp = await asyncio.wait_for(save_resp_task, timeout=12)
+            if resp is not None:
+                body = await resp.text()
+                code, msg = extract_api_code_message(body)
+                api_diag = f"url={resp.url}, status={resp.status}, code={code}, msg={msg}"
+                print(f"      🧪 保存接口响应: {api_diag}")
+        except asyncio.TimeoutError:
+            pass
         except Exception:
             api_diag = ""
 
@@ -1311,19 +1314,25 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     print("\n   ✅ 第3步完成")
     
     print("   💾 点击保存...")
-    save_resp_task = asyncio.create_task(
-        page.wait_for_response(
-            lambda r: (
+    loop = asyncio.get_running_loop()
+    save_resp_task = loop.create_future()
+
+    def _on_response(r):
+        try:
+            matched = (
                 r.request.method in ("POST", "PUT")
                 and (
                     "marketingTemplate" in r.url
                     or "template" in r.url.lower()
                     or "save" in r.url.lower()
                 )
-            ),
-            timeout=12000
-        )
-    )
+            )
+            if matched and (not save_resp_task.done()):
+                save_resp_task.set_result(r)
+        except Exception:
+            pass
+
+    page.on("response", _on_response)
     clicked = False
     try:
         # 优先点击你提供的主保存按钮样式，避免误点其他“保存”。
@@ -1337,13 +1346,18 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     if not clicked:
         clicked = await click_button_with_text(page, "保存", exclude_text="取消")
     if not clicked:
-        save_resp_task.cancel()
+        if not save_resp_task.done():
+            save_resp_task.set_result(None)
         raise RuntimeError("第3步未能点击“保存”")
     print("      ✅ 点击保存成功")
     results["第3步-保存按钮"] = True
     
     await wait_and_log(page, 2, "保存中...")
     saved_ok = await ensure_step3_saved(page, save_resp_task=save_resp_task)
+    try:
+        page.remove_listener("response", _on_response)
+    except Exception:
+        pass
     if not saved_ok:
         raise RuntimeError(f"保存未真正提交（未检测到成功提示/跳转），当前URL={page.url}")
     print("      ✅ 已检测到保存成功")
