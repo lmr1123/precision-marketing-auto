@@ -542,11 +542,25 @@ async def fill_step3_send_content(page, content: str) -> bool:
             const tryWriteEditable = (el) => {
                 if (!el || !isVisible(el) || el.getAttribute('contenteditable') !== 'true') return false;
                 el.focus();
+                // 先全选删除，确保清掉默认值“测试”等旧文案
+                try {
+                    const sel = window.getSelection();
+                    const range = document.createRange();
+                    range.selectNodeContents(el);
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                    document.execCommand('delete');
+                } catch (e) {}
                 el.innerHTML = '';
-                el.innerText = content;
+                el.textContent = '';
+                // 以富文本常见结构写入，兼容 <div>...</div> 编辑器
+                const line = document.createElement('div');
+                line.textContent = content;
+                el.appendChild(line);
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('keyup', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
                 el.blur();
                 const rb = (el.innerText || el.textContent || '').trim();
                 return rb.includes(content.slice(0, 8));
@@ -566,18 +580,7 @@ async def fill_step3_send_content(page, content: str) -> bool:
                 const input = item.querySelector("input[type='text'], input:not([type])");
                 if (tryWrite(input)) return true;
             }
-
-            // 兜底：任意可见 contenteditable 编辑器
-            const edits = Array.from(document.querySelectorAll('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"], [contenteditable="true"]'));
-            for (const e of edits) {
-                if (tryWriteEditable(e)) return true;
-            }
-
-            // 次兜底：第一个可见 textarea
-            const areas = Array.from(document.querySelectorAll('textarea'));
-            for (const a of areas) {
-                if (tryWrite(a)) return true;
-            }
+            // 不再全局兜底，避免误写到非“发送内容”字段
             return false;
         }""",
         content
