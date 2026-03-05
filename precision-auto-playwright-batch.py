@@ -642,6 +642,40 @@ def extract_api_code_message(text: str):
         return str(code), str(msg)
     return "", ""
 
+def summarize_content_fields_from_payload(post_data: str) -> str:
+    """解析保存请求体，摘要短信/内容相关字段长度，便于定位长度=0原因。"""
+    if not post_data:
+        return ""
+    try:
+        obj = json.loads(post_data)
+    except Exception:
+        return ""
+
+    def collect_strings(node, path=""):
+        out = []
+        if isinstance(node, dict):
+            for k, v in node.items():
+                p = f"{path}.{k}" if path else k
+                out.extend(collect_strings(v, p))
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                p = f"{path}[{i}]"
+                out.extend(collect_strings(v, p))
+        elif isinstance(node, str):
+            key = path.lower()
+            if any(x in key for x in ["sms", "content", "message", "text", "msg"]):
+                out.append((path, len(node.strip())))
+        return out
+
+    fields = collect_strings(obj)
+    if not fields:
+        return ""
+    zero_fields = [f"{p}=0" for p, l in fields if l == 0][:8]
+    non_zero_fields = [f"{p}={l}" for p, l in fields if l > 0][:8]
+    req_items = obj.get("multiChannelItemReq", [])
+    req_count = len(req_items) if isinstance(req_items, list) else 0
+    return f"multiChannelItemReq={req_count}, zeroFields={zero_fields}, nonZeroSample={non_zero_fields}"
+
 async def ensure_step3_saved(page, save_resp_task=None) -> bool:
     """确保第3步保存真正提交：处理确认弹窗并等待成功提示。"""
     # 某些页面点击“保存”后会弹二次确认，先尝试确认。
@@ -683,6 +717,9 @@ async def ensure_step3_saved(page, save_resp_task=None) -> bool:
                     post_excerpt = post_excerpt[:220] + "..."
                 api_diag = f"url={resp.url}, status={resp.status}, code={code}, msg={msg}, reqLen={len(post_data or '')}, req={post_excerpt}"
                 print(f"      🧪 保存接口响应: {api_diag}")
+                content_diag = summarize_content_fields_from_payload(post_data)
+                if content_diag:
+                    print(f"      🧪 请求体内容字段诊断: {content_diag}")
         except asyncio.TimeoutError:
             pass
         except Exception:
@@ -786,6 +823,32 @@ async def click_step3_save_button(page) -> bool:
 
     # 策略3：按文本兜底
     return await click_button_with_text(page, "保存", exclude_text="取消")
+
+async def copy_channel_info_if_available(page) -> bool:
+    """若页面存在“渠道信息复制”入口，执行复制并确认。"""
+    try:
+        clicked = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const blocks = Array.from(document.querySelectorAll('div,section')).filter(n => (n.textContent || '').includes('渠道信息复制'));
+            for (const b of blocks) {
+                const btn = Array.from(b.querySelectorAll('button')).find(x => isVisible(x) && (x.textContent || '').includes('复制'));
+                if (btn) { btn.click(); return true; }
+            }
+            return false;
+        }""")
+        if not clicked:
+            return False
+        await asyncio.sleep(0.4)
+        await click_button_with_text(page, "确定")
+        await asyncio.sleep(0.3)
+        return True
+    except Exception:
+        return False
 
 async def set_step3_distribution_mode(page, mode_text: str = "指定门店分配") -> bool:
     """第3步分配方式：点击单选文本。"""
@@ -1530,6 +1593,13 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     send_ok = await fill_step3_send_content(page, send_content)
     print(f"      {'✅' if send_ok else '⚠️'} 发送内容{'已填充' if send_ok else '未匹配到字段'}")
     results["第3步-发送内容"] = send_ok
+
+    # 通知配置场景：将当前配置复制到其他地区，避免部分地区短信为空导致 P1114。
+    copied = await copy_channel_info_if_available(page)
+    if copied:
+        print("   📎 渠道信息复制: ✅ 已执行复制")
+    else:
+        print("   📎 渠道信息复制: ⚠️ 未检测到可复制入口")
     
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step3-after.png')
     
