@@ -1317,18 +1317,24 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                     if frame_diag.get("textLen", 0) == 0 or frame_diag.get("hasErrKeyword"):
                         raise RuntimeError("第2步 iframe 内容为空或疑似网络/代理异常，请检查 VPN/代理并重试")
 
-                    # 在 iframe 内填充名称
+                    # 在 iframe 内填充名称（回读校验）
                     print("   📝 名称: " + data.get("group_name", "测试分群"))
                     try:
+                        group_name_val = data.get("group_name", "测试分群")
                         name_input = frame.locator('input[placeholder*="名称"], input[placeholder*="请输入"]').first
                         if await name_input.count() > 0:
-                            await name_input.fill(data.get("group_name", "测试分群"))
-                            print("      ✅ 已填充名称")
-                            results["第2步-分群名称"] = True
+                            await name_input.fill(group_name_val)
+                            await asyncio.sleep(0.2)
+                            rb = (await name_input.input_value()).strip()
+                            if group_name_val in rb:
+                                print("      ✅ 已填充名称")
+                                results["第2步-分群名称"] = True
+                            else:
+                                print(f"      ⚠️ 名称回读不一致: {rb}")
                     except Exception as e:
                         print(f"      ⚠️ 填充名称失败: {e}")
                     
-                    # 在 iframe 内选择更新方式 - 用 JavaScript 绕过可见性检查
+                    # 在 iframe 内选择更新方式（回读校验）
                     print("   ⚪ 更新方式: " + data.get("update_type", "自动更新"))
                     try:
                         if "自动" in data.get("update_type", ""):
@@ -1341,8 +1347,18 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     }
                                 }
                             }''')
-                            print("      ✅ 已选择自动更新")
-                            results["第2步-更新方式"] = True
+                            await asyncio.sleep(0.2)
+                            update_ok = await frame.evaluate("""() => {
+                                const checked = document.querySelector('.ant-radio-wrapper-checked, .el-radio.is-checked');
+                                if (!checked) return false;
+                                const txt = (checked.textContent || '').replace(/\\s+/g, '');
+                                return txt.includes('自动更新');
+                            }""")
+                            if update_ok:
+                                print("      ✅ 已选择自动更新")
+                                results["第2步-更新方式"] = True
+                            else:
+                                print("      ⚠️ 更新方式回读失败（未选中自动更新）")
                     except Exception as e:
                         print(f"      ⚠️ 更新方式选择失败: {e}")
                     
@@ -1441,7 +1457,15 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             }
                                         }
                                     }''')
-                                    results["第2步-主消费营运区"] = True
+                                    await asyncio.sleep(0.5)
+                                    area_ok = await frame.evaluate("""(areaName) => {
+                                        const bodyTxt = (document.body && document.body.innerText) ? document.body.innerText : '';
+                                        return bodyTxt.includes(areaName);
+                                    }""", area)
+                                    if area_ok:
+                                        results["第2步-主消费营运区"] = True
+                                    else:
+                                        print(f"      ⚠️ 营运区回读失败: {area}")
                                 else:
                                     print(f"      ⚠️ 仍未找到: {area}")
                             else:
@@ -1467,21 +1491,34 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 """)
                                 if selected_direct == "checked":
                                     print(f"      ✅ 已直接勾选营运区: {area}")
-                                    results["第2步-主消费营运区"] = True
+                                    await asyncio.sleep(0.3)
+                                    area_ok = await frame.evaluate("""(areaName) => {
+                                        const bodyTxt = (document.body && document.body.innerText) ? document.body.innerText : '';
+                                        return bodyTxt.includes(areaName);
+                                    }""", area)
+                                    if area_ok:
+                                        results["第2步-主消费营运区"] = True
+                                    else:
+                                        print(f"      ⚠️ 营运区回读失败: {area}")
                                 else:
                                     print("      ⚠️ 直接勾选也失败，请检查第2步页面是否空白/未加载完整")
                         except Exception as e:
                             print(f"      ⚠️ 主消费营运区操作失败: {e}")
                     
-                    # 在 iframe 内填充券规则ID
+                    # 在 iframe 内填充券规则ID（回读校验）
                     if data.get("coupon_ids"):
                         print(f"   🎫 券规则ID: {data['coupon_ids']}")
                         try:
                             coupon_input = frame.locator('input[placeholder*="券规则"]').first
                             if await coupon_input.count() > 0:
                                 await coupon_input.fill(data["coupon_ids"])
-                                print("      ✅ 已填充券规则ID")
-                                results["第2步-券规则ID"] = True
+                                await asyncio.sleep(0.2)
+                                rb = (await coupon_input.input_value()).strip()
+                                if data["coupon_ids"] in rb:
+                                    print("      ✅ 已填充券规则ID")
+                                    results["第2步-券规则ID"] = True
+                                else:
+                                    print(f"      ⚠️ 券规则ID回读不一致: {rb}")
                         except Exception as e:
                             print(f"      ⚠️ 券规则ID填充失败: {e}")
                 else:
