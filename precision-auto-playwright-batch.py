@@ -1241,6 +1241,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
         "第2步-主消费营运区": False,
         "第2步-券规则ID": False,
         "第2步-预跑按钮": False,
+        "第2步-弹窗确认": False,
         "第2步-下一步按钮": False,
     }
     
@@ -1563,6 +1564,36 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 print("      ⚠️ 券规则ID回读不一致")
                         except Exception as e:
                             print(f"      ⚠️ 券规则ID填充失败: {e}")
+
+                    # 弹窗内确认提交（关键步骤）
+                    print("   ✅ 弹窗内确认保存分群...")
+                    try:
+                        confirmed = await frame.evaluate("""() => {
+                            const norm = (s) => (s || '').replace(/\\s+/g, '');
+                            const btns = Array.from(document.querySelectorAll('button'));
+                            const hit = btns.find(b => {
+                                const t = norm(b.textContent);
+                                return t.includes('确定') || t.includes('完成') || t.includes('保存') || t.includes('提交');
+                            });
+                            if (hit) { hit.click(); return true; }
+                            return false;
+                        }""")
+                        if confirmed:
+                            await asyncio.sleep(0.8)
+                            # 校验 iframe 弹窗已关闭或变化
+                            iframe_count_after = await page.locator("iframe").count()
+                            if iframe_count_after == 0:
+                                print("      ✅ 弹窗已关闭")
+                            else:
+                                print(f"      ⚠️ 弹窗可能未关闭（iframe={iframe_count_after}），继续尝试主页面确认按钮")
+                                await click_button_with_text(page, "确定")
+                                await click_button_with_text(page, "完成")
+                                await asyncio.sleep(0.5)
+                            results["第2步-弹窗确认"] = True
+                        else:
+                            print("      ⚠️ 未找到弹窗内确认按钮")
+                    except Exception as e:
+                        print(f"      ⚠️ 弹窗确认失败: {e}")
                 else:
                     print("   ⚠️ 无法获取 frame 内容")
             else:
@@ -1588,7 +1619,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
 
     # 严格模式下，字段级回读失败也要终止，避免“日志看着成功”。
     if strict_step2:
-        required_keys = ["第2步-编辑按钮", "第2步-分群名称", "第2步-更新方式", "第2步-主消费营运区", "第2步-券规则ID"]
+        required_keys = ["第2步-编辑按钮", "第2步-分群名称", "第2步-更新方式", "第2步-主消费营运区", "第2步-券规则ID", "第2步-弹窗确认"]
         failed = [k for k in required_keys if not results.get(k, False)]
         if failed:
             raise RuntimeError(f"第2步字段回读未通过: {failed}")
@@ -1615,6 +1646,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
         print(f"      ⚠️ 预跑点击失败: {e}")
     
     print("\n   ✅ 第2步完成")
+    await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step2-after-main.png')
     
     print("   ⏭️  点击下一步...")
     clicked = await click_button_with_text(page, "下一步")
