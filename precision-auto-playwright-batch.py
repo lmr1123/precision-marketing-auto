@@ -1236,6 +1236,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
     print("="*50)
     results = {
         "第2步-编辑按钮": False,
+        "第2步-弹窗可见": False,
+        "第2步-主页面回读": False,
         "第2步-分群名称": False,
         "第2步-更新方式": False,
         "第2步-主消费营运区": False,
@@ -1284,11 +1286,14 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
         const iframes = document.querySelectorAll('iframe');
         const info = [];
         iframes.forEach((iframe, i) => {
+            const rect = iframe.getBoundingClientRect();
+            const style = window.getComputedStyle(iframe);
             info.push({
                 index: i,
                 src: iframe.src || '',
                 id: iframe.id || '',
-                name: iframe.name || ''
+                name: iframe.name || '',
+                visible: style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0
             });
         });
         return info;
@@ -1304,10 +1309,25 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
     step2_error = None
 
     if iframe_info:
+        visible_iframes = [x for x in iframe_info if x.get("visible")]
+        print(f"      可见 iframe: {len(visible_iframes)}")
+        await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step2-modal-visible-check.png')
+        if len(visible_iframes) == 0 and strict_step2:
+            raise RuntimeError("第2步失败：检测到 iframe 但均不可见（疑似未真正打开弹窗）")
+        if len(visible_iframes) > 0:
+            results["第2步-弹窗可见"] = True
+
         print("   🔧 在 iframe 内执行操作...")
         try:
-            # 获取 frame 对象
+            # 优先获取可见 iframe 对应 frame 对象
             frame_handle = await page.query_selector('iframe')
+            if visible_iframes:
+                for idx, it in enumerate(iframe_info):
+                    if it.get("visible"):
+                        candidate = page.locator("iframe").nth(idx)
+                        if await candidate.count() > 0:
+                            frame_handle = await candidate.element_handle()
+                            break
             if frame_handle:
                 frame = await frame_handle.content_frame()
                 if frame:
@@ -1594,6 +1614,25 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                             print("      ⚠️ 未找到弹窗内确认按钮")
                     except Exception as e:
                         print(f"      ⚠️ 弹窗确认失败: {e}")
+
+                    # 主页面回读：确认分群信息已带回（名称或营运区至少一项出现）
+                    try:
+                        await asyncio.sleep(0.6)
+                        group_name_val = data.get("group_name", "")
+                        area_val = data.get("main_operating_area", "")
+                        main_readback_ok = await page.evaluate("""(groupName, areaName) => {
+                            const bodyText = (document.body && document.body.innerText) ? document.body.innerText : '';
+                            const hasGroup = groupName ? bodyText.includes(groupName) : false;
+                            const hasArea = areaName ? bodyText.includes(areaName) : false;
+                            return hasGroup || hasArea;
+                        }""", group_name_val, area_val)
+                        if main_readback_ok:
+                            print("      ✅ 主页面回读通过（分群信息已带回）")
+                            results["第2步-主页面回读"] = True
+                        else:
+                            print("      ⚠️ 主页面回读失败（未检测到分群名称/营运区）")
+                    except Exception as e:
+                        print(f"      ⚠️ 主页面回读异常: {e}")
                 else:
                     print("   ⚠️ 无法获取 frame 内容")
             else:
@@ -1619,7 +1658,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
 
     # 严格模式下，字段级回读失败也要终止，避免“日志看着成功”。
     if strict_step2:
-        required_keys = ["第2步-编辑按钮", "第2步-分群名称", "第2步-更新方式", "第2步-主消费营运区", "第2步-券规则ID", "第2步-弹窗确认"]
+        required_keys = ["第2步-编辑按钮", "第2步-弹窗可见", "第2步-分群名称", "第2步-更新方式", "第2步-主消费营运区", "第2步-券规则ID", "第2步-弹窗确认", "第2步-主页面回读"]
         failed = [k for k in required_keys if not results.get(k, False)]
         if failed:
             raise RuntimeError(f"第2步字段回读未通过: {failed}")
