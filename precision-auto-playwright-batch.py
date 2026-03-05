@@ -517,74 +517,42 @@ async def fill_step3_end_time(page, end_time: str) -> bool:
     return False
 
 async def fill_step3_send_content(page, content: str) -> bool:
-    """第3步发送内容：优先写入 contenteditable 编辑器。"""
-    return await page.evaluate(
-        """(content) => {
-            const isVisible = (el) => {
-                if (!el) return false;
-                const style = window.getComputedStyle(el);
-                const rect = el.getBoundingClientRect();
-                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-            };
-
-            const tryWrite = (el) => {
-                if (!el || !isVisible(el) || el.readOnly || el.disabled) return false;
-                const ph = (el.getAttribute('placeholder') || '').toLowerCase();
-                if (ph.includes('search')) return false;
-                el.focus();
-                el.value = content;
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-                el.blur();
-                return (el.value || '').includes(content.slice(0, 8));
-            };
-
-            const tryWriteEditable = (el) => {
-                if (!el || !isVisible(el) || el.getAttribute('contenteditable') !== 'true') return false;
-                el.focus();
-                // 先全选删除，确保清掉默认值“测试”等旧文案
-                try {
-                    const sel = window.getSelection();
-                    const range = document.createRange();
-                    range.selectNodeContents(el);
-                    sel.removeAllRanges();
-                    sel.addRange(range);
-                    document.execCommand('delete');
-                } catch (e) {}
-                el.innerHTML = '';
-                el.textContent = '';
-                // 以富文本常见结构写入，兼容 <div>...</div> 编辑器
-                const line = document.createElement('div');
-                line.textContent = content;
-                el.appendChild(line);
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('keyup', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-                el.dispatchEvent(new Event('blur', { bubbles: true }));
-                el.blur();
-                const rb = (el.innerText || el.textContent || '').trim();
-                return rb.includes(content.slice(0, 8));
-            };
-
-            // 优先：发送内容同一块内的 contenteditable 编辑器
-            const labels = Array.from(document.querySelectorAll('label, .label, span, div'));
-            for (const n of labels) {
-                const txt = (n.textContent || '').replace(/\\s+/g, '');
-                if (!txt.includes('发送内容')) continue;
-                const item = n.closest('.item, .el-form-item, .ant-form-item') || n.parentElement;
-                if (!item) continue;
-                const editable = item.querySelector('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"], [contenteditable="true"]');
-                if (tryWriteEditable(editable)) return true;
-                const area = item.querySelector('textarea');
-                if (tryWrite(area)) return true;
-                const input = item.querySelector("input[type='text'], input:not([type])");
-                if (tryWrite(input)) return true;
-            }
-            // 不再全局兜底，避免误写到非“发送内容”字段
-            return false;
+    """第3步发送内容：固定写入“发送内容”对应编辑器，并清除默认值。"""
+    item = page.locator('.item', has=page.locator('span.label', has_text='发送内容')).first
+    if await item.count() == 0:
+        item = page.locator('.item', has_text='发送内容').first
+        if await item.count() == 0:
+            return False
+    editable = item.locator('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]').first
+    if await editable.count() == 0:
+        return False
+    try:
+        await editable.scroll_into_view_if_needed()
+        await editable.click(force=True)
+    except:
+        pass
+    ok = await editable.evaluate(
+        """(el, text) => {
+            el.focus();
+            el.innerHTML = '';
+            el.textContent = '';
+            const line = document.createElement('div');
+            line.textContent = text;
+            el.appendChild(line);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('keyup', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+            el.blur();
+            const rb = (el.innerText || el.textContent || '').trim();
+            return rb.includes(text.slice(0, 4)) && rb.length > 0;
         }""",
         content
     )
+    if not ok:
+        return False
+    rb = ((await editable.inner_text()) or "").strip()
+    return len(rb) > 0 and (content[:4] in rb if len(content) >= 4 else content in rb)
 
 async def fill_step3_sms_content(page, content: str) -> bool:
     """第3步短信内容：固定写入“短信内容(必填)”对应编辑器，并校验长度>0。"""
@@ -864,6 +832,22 @@ async def read_step3_sms_text(page) -> str:
         item = page.locator('.item', has=page.locator('span.label.required', has_text='短信内容')).first
         if await item.count() == 0:
             item = page.locator('.item', has_text='短信内容').first
+            if await item.count() == 0:
+                return ""
+        editable = item.locator('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]').first
+        if await editable.count() == 0:
+            return ""
+        txt = (await editable.inner_text()) or ""
+        return txt.strip()
+    except Exception:
+        return ""
+
+async def read_step3_send_text(page) -> str:
+    """读取第3步发送内容编辑器文本。"""
+    try:
+        item = page.locator('.item', has=page.locator('span.label', has_text='发送内容')).first
+        if await item.count() == 0:
+            item = page.locator('.item', has_text='发送内容').first
             if await item.count() == 0:
                 return ""
         editable = item.locator('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]').first
@@ -1634,6 +1618,13 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
         print(f"      {'✅' if refill_ok else '⚠️'} 重填短信{'成功' if refill_ok else '失败'}")
         sms_before_save = await read_step3_sms_text(page)
     print(f"      🧪 保存前短信回读长度: {len(sms_before_save)}")
+    send_before_save = await read_step3_send_text(page)
+    if len(send_before_save) == 0 and send_content:
+        print("      ⚠️ 保存前发送内容为空，执行一次重填...")
+        refill_send_ok = await fill_step3_send_content(page, send_content)
+        print(f"      {'✅' if refill_send_ok else '⚠️'} 重填发送内容{'成功' if refill_send_ok else '失败'}")
+        send_before_save = await read_step3_send_text(page)
+    print(f"      🧪 保存前发送内容回读长度: {len(send_before_save)}")
     loop = asyncio.get_running_loop()
     save_resp_task = loop.create_future()
 
@@ -1666,6 +1657,8 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     await wait_and_log(page, 2, "保存中...")
     sms_after_click = await read_step3_sms_text(page)
     print(f"      🧪 点击保存后短信回读长度: {len(sms_after_click)}")
+    send_after_click = await read_step3_send_text(page)
+    print(f"      🧪 点击保存后发送内容回读长度: {len(send_after_click)}")
     saved_ok = await ensure_step3_saved(page, save_resp_task=save_resp_task)
     try:
         page.remove_listener("response", _on_response)
