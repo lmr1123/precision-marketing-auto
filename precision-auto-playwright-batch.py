@@ -371,42 +371,45 @@ def split_multi_values(raw: str) -> list:
 async def fill_step3_end_time(page, end_time: str) -> bool:
     """第3步结束时间：填入并确认日期面板。"""
     date_part, _ = split_datetime(end_time)
-    item = page.locator(".item", has_text="结束时间").first
+    item = page.locator(".item:visible", has_text="结束时间").first
     if await item.count() == 0:
         return False
-    done = await item.evaluate(
-        """(node, dateText) => {
-            const input = node.querySelector('input[placeholder*="结束"], input.el-input__inner, input');
-            if (!input) return false;
-            input.click();
-            input.value = dateText;
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            input.blur();
-            return true;
-        }""",
-        date_part
-    )
-    if not done:
-        # 兜底：按 placeholder 直接填写
-        try:
-            input_el = item.get_by_placeholder("请选择结束日期").first
-            if await input_el.count() > 0:
-                await fill_with_retry(input_el, date_part)
-                await asyncio.sleep(0.1)
-                await click_button_with_text(page, "确定")
-                await asyncio.sleep(0.2)
-                val = (await input_el.input_value()).strip()
-                return date_part in val
-        except:
-            pass
-        return False
-    await asyncio.sleep(0.2)
-    await click_button_with_text(page, "确定")
-    await asyncio.sleep(0.2)
-    input_el = item.locator('input[placeholder*="结束"], input.el-input__inner, input').first
+    input_el = item.locator('input[placeholder*="结束"], input[placeholder*="请选择"], input.el-input__inner, input').first
     if await input_el.count() == 0:
         return False
+
+    # 优先走组件面板路径，确保 ElementUI 内部值同步。
+    try:
+        await input_el.click(force=True)
+        panel = page.locator('.el-picker-panel.el-date-picker:visible').first
+        await panel.wait_for(timeout=2500)
+        date_input = panel.get_by_placeholder("选择日期").first
+        if await date_input.count() > 0:
+            await fill_with_retry(date_input, date_part)
+            await date_input.press("Enter")
+        panel_confirm = panel.locator('.el-picker-panel__footer button:has-text("确定")').first
+        if await panel_confirm.count() > 0 and await panel_confirm.is_visible():
+            await panel_confirm.click(force=True)
+        else:
+            await click_button_with_text(page, "确定")
+    except Exception:
+        # 兜底：直接在字段输入并触发 Enter/blur/change
+        await fill_with_retry(input_el, date_part)
+        await input_el.press("Enter")
+        await input_el.blur()
+        await item.evaluate("""(node) => {
+            const input = node.querySelector('input');
+            if (!input) return;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new Event('blur', { bubbles: true }));
+        }""")
+
+    await asyncio.sleep(0.3)
+    # 再次触发失焦，避免“显示有值但模型为空”。
+    await input_el.click(force=True)
+    await page.keyboard.press("Tab")
+    await asyncio.sleep(0.2)
     val = (await input_el.input_value()).strip()
     return date_part in val
 
@@ -523,6 +526,7 @@ async def ensure_step3_saved(page, save_resp_task=None) -> bool:
     if (not moved) and api_diag:
         print(f"      ⚠️ 未检测到成功跳转，接口信息: {api_diag}")
     if not moved:
+        await asyncio.sleep(0.6)
         # 输出页面可见校验信息，帮助定位“为何点了保存但未提交”
         try:
             blockers = await page.evaluate("""() => {
