@@ -1172,7 +1172,7 @@ async def set_send_time(page, send_time: str):
 
 # ============ 第1步：基础信息 ============
 
-async def fill_step1(page, data: dict):
+async def fill_step1(page, data: dict, auto_next: bool = True):
     """填充第1步"""
     print("\n📋 第1步：基础信息")
     print("="*50)
@@ -1218,14 +1218,16 @@ async def fill_step1(page, data: dict):
     print("\n   ✅ 第1步完成")
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step1-after.png')
     
-    print("   ⏭️  点击下一步...")
-    clicked = await click_button_with_text(page, "下一步")
-    if not clicked:
-        raise RuntimeError("第1步完成后未能点击“下一步”")
-    print("      ✅ 点击成功")
-    results["第1步-下一步按钮"] = True
-    
-    await wait_and_log(page, 3, "等待页面跳转...")
+    if auto_next:
+        print("   ⏭️  点击下一步...")
+        clicked = await click_button_with_text(page, "下一步")
+        if not clicked:
+            raise RuntimeError("第1步完成后未能点击“下一步”")
+        print("      ✅ 点击成功")
+        results["第1步-下一步按钮"] = True
+        await wait_and_log(page, 3, "等待页面跳转...")
+    else:
+        print("   ⏭️  第2步自动化模式：第1步暂不点击下一步，由第2步完成后统一跳转")
     return results
 
 # ============ 第2步：目标分群 ============
@@ -2021,10 +2023,11 @@ async def process_single_plan(
                 await page.goto(BASE_URL)
                 await wait_and_log(page, 2, "页面加载中...")
 
-                field_results.update(await fill_step1(page, plan))
                 if skip_step2_mode:
+                    field_results.update(await fill_step1(page, plan, auto_next=True))
                     field_results.update(await skip_step2(page))
                 else:
+                    field_results.update(await fill_step1(page, plan, auto_next=False))
                     field_results.update(await fill_step2(page, plan, strict_step2=strict_step2))
                 field_results.update(await fill_step3(
                     page,
