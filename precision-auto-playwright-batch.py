@@ -1265,6 +1265,11 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
         print(f"      ⚠️ 点击失败: {e}")
     
     await wait_and_log(page, 3, "弹窗加载中...")
+    # 强制前台，避免 CDP 下后台页“点击成功但用户没看到”
+    try:
+        await page.bring_to_front()
+    except Exception:
+        pass
     
     # 处理可能的浏览器弹窗（如本地网络权限）
     try:
@@ -1288,6 +1293,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
         return info;
     }''')
     print(f"      找到 {len(iframe_info)} 个 iframe")
+    if len(iframe_info) == 0 and strict_step2:
+        raise RuntimeError("第2步失败：未检测到分群 iframe 弹窗")
     
     # 等待弹窗/iframe 内容加载
     print("   ⏳ 等待 iframe 内容加载...")
@@ -1543,6 +1550,13 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
         if strict_step2:
             raise RuntimeError(f"第2步失败: {step2_error}")
         print(f"   ⚠️ 第2步异常已记录，当前为非严格模式，继续后续流程: {step2_error}")
+
+    # 严格模式下，字段级回读失败也要终止，避免“日志看着成功”。
+    if strict_step2:
+        required_keys = ["第2步-编辑按钮", "第2步-分群名称", "第2步-更新方式", "第2步-主消费营运区", "第2步-券规则ID"]
+        failed = [k for k in required_keys if not results.get(k, False)]
+        if failed:
+            raise RuntimeError(f"第2步字段回读未通过: {failed}")
     
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step2-modal-filled.png')
     
