@@ -479,7 +479,7 @@ async def fill_step3_end_time(page, end_time: str) -> bool:
     return date_part in val
 
 async def fill_step3_send_content(page, content: str) -> bool:
-    """第3步发送内容：优先按标签定位。"""
+    """第3步发送内容：优先写入 contenteditable 编辑器。"""
     return await page.evaluate(
         """(content) => {
             const isVisible = (el) => {
@@ -501,20 +501,41 @@ async def fill_step3_send_content(page, content: str) -> bool:
                 return (el.value || '').includes(content.slice(0, 8));
             };
 
-            // 优先：发送内容/任务详情同一块内的可见 textarea
+            const tryWriteEditable = (el) => {
+                if (!el || !isVisible(el) || el.getAttribute('contenteditable') !== 'true') return false;
+                el.focus();
+                el.innerHTML = '';
+                el.innerText = content;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('keyup', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.blur();
+                const rb = (el.innerText || el.textContent || '').trim();
+                return rb.includes(content.slice(0, 8));
+            };
+
+            // 优先：发送内容同一块内的 contenteditable 编辑器
             const labels = Array.from(document.querySelectorAll('label, .label, span, div'));
             for (const n of labels) {
                 const txt = (n.textContent || '').replace(/\\s+/g, '');
-                if (!txt.includes('发送内容') && !txt.includes('任务详情')) continue;
+                if (!txt.includes('发送内容')) continue;
                 const item = n.closest('.item, .el-form-item, .ant-form-item') || n.parentElement;
                 if (!item) continue;
+                const editable = item.querySelector('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"], [contenteditable="true"]');
+                if (tryWriteEditable(editable)) return true;
                 const area = item.querySelector('textarea');
                 if (tryWrite(area)) return true;
                 const input = item.querySelector("input[type='text'], input:not([type])");
                 if (tryWrite(input)) return true;
             }
 
-            // 兜底：第一个可见 textarea
+            // 兜底：任意可见 contenteditable 编辑器
+            const edits = Array.from(document.querySelectorAll('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"], [contenteditable="true"]'));
+            for (const e of edits) {
+                if (tryWriteEditable(e)) return true;
+            }
+
+            // 次兜底：第一个可见 textarea
             const areas = Array.from(document.querySelectorAll('textarea'));
             for (const a of areas) {
                 if (tryWrite(a)) return true;
