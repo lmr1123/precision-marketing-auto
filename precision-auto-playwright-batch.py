@@ -1324,20 +1324,37 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                     if frame_diag.get("textLen", 0) == 0 or frame_diag.get("hasErrKeyword"):
                         raise RuntimeError("第2步 iframe 内容为空或疑似网络/代理异常，请检查 VPN/代理并重试")
 
-                    # 在 iframe 内填充名称（回读校验）
+                    # 在 iframe 内填充名称（按标签就近定位 + 回读）
                     print("   📝 名称: " + data.get("group_name", "测试分群"))
                     try:
                         group_name_val = data.get("group_name", "测试分群")
-                        name_input = frame.locator('input[placeholder*="名称"], input[placeholder*="请输入"]').first
-                        if await name_input.count() > 0:
-                            await name_input.fill(group_name_val)
-                            await asyncio.sleep(0.2)
-                            rb = (await name_input.input_value()).strip()
-                            if group_name_val in rb:
-                                print("      ✅ 已填充名称")
-                                results["第2步-分群名称"] = True
-                            else:
-                                print(f"      ⚠️ 名称回读不一致: {rb}")
+                        name_ok = await frame.evaluate("""(val) => {
+                            const labels = Array.from(document.querySelectorAll('label, span, div'));
+                            const write = (inp, v) => {
+                                if (!inp) return false;
+                                inp.focus();
+                                inp.value = v;
+                                inp.dispatchEvent(new Event('input', { bubbles: true }));
+                                inp.dispatchEvent(new Event('change', { bubbles: true }));
+                                inp.blur();
+                                return (inp.value || '').includes(v);
+                            };
+                            for (const lb of labels) {
+                                const t = (lb.textContent || '').replace(/\\s+/g, '');
+                                if (!t.includes('名称')) continue;
+                                const scope = lb.closest('.ant-form-item, .el-form-item, .item') || lb.parentElement;
+                                if (!scope) continue;
+                                const inp = scope.querySelector('input');
+                                if (write(inp, val)) return true;
+                            }
+                            const fallback = document.querySelector('input[placeholder*="名称"], input[placeholder*="请输入"]');
+                            return write(fallback, val);
+                        }""", group_name_val)
+                        if name_ok:
+                            print("      ✅ 已填充名称")
+                            results["第2步-分群名称"] = True
+                        else:
+                            print("      ⚠️ 名称回读不一致")
                     except Exception as e:
                         print(f"      ⚠️ 填充名称失败: {e}")
                     
@@ -1512,20 +1529,38 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                         except Exception as e:
                             print(f"      ⚠️ 主消费营运区操作失败: {e}")
                     
-                    # 在 iframe 内填充券规则ID（回读校验）
+                    # 在 iframe 内填充券规则ID（按标签就近定位 + 回读）
                     if data.get("coupon_ids"):
                         print(f"   🎫 券规则ID: {data['coupon_ids']}")
                         try:
-                            coupon_input = frame.locator('input[placeholder*="券规则"]').first
-                            if await coupon_input.count() > 0:
-                                await coupon_input.fill(data["coupon_ids"])
-                                await asyncio.sleep(0.2)
-                                rb = (await coupon_input.input_value()).strip()
-                                if data["coupon_ids"] in rb:
-                                    print("      ✅ 已填充券规则ID")
-                                    results["第2步-券规则ID"] = True
-                                else:
-                                    print(f"      ⚠️ 券规则ID回读不一致: {rb}")
+                            coupon_val = data["coupon_ids"]
+                            coupon_ok = await frame.evaluate("""(val) => {
+                                const labels = Array.from(document.querySelectorAll('label, span, div'));
+                                const write = (inp, v) => {
+                                    if (!inp) return false;
+                                    inp.focus();
+                                    inp.value = v;
+                                    inp.dispatchEvent(new Event('input', { bubbles: true }));
+                                    inp.dispatchEvent(new Event('change', { bubbles: true }));
+                                    inp.blur();
+                                    return (inp.value || '').includes(v);
+                                };
+                                for (const lb of labels) {
+                                    const t = (lb.textContent || '').replace(/\\s+/g, '');
+                                    if (!t.includes('券规则ID') && !t.includes('券规则')) continue;
+                                    const scope = lb.closest('.ant-form-item, .el-form-item, .item') || lb.parentElement;
+                                    if (!scope) continue;
+                                    const inp = scope.querySelector('input');
+                                    if (write(inp, val)) return true;
+                                }
+                                const fallback = document.querySelector('input[placeholder*="券规则"]');
+                                return write(fallback, val);
+                            }""", coupon_val)
+                            if coupon_ok:
+                                print("      ✅ 已填充券规则ID")
+                                results["第2步-券规则ID"] = True
+                            else:
+                                print("      ⚠️ 券规则ID回读不一致")
                         except Exception as e:
                             print(f"      ⚠️ 券规则ID填充失败: {e}")
                 else:
@@ -1919,6 +1954,8 @@ async def process_single_plan(
                     "保存失败提示",
                     "保存被页面校验拦截",
                     "保存未真正提交",
+                    "第2步字段回读未通过",
+                    "第2步失败",
                 ])
                 if "目标不可重复" in err_text:
                     print("      ℹ️ 业务校验失败：当前页面存在重复目标，需先人工去重后再执行。")
