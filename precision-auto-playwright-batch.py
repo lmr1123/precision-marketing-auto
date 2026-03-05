@@ -1649,12 +1649,14 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                         await asyncio.sleep(0.6)
                         group_name_val = data.get("group_name", "")
                         area_val = data.get("main_operating_area", "")
-                        main_readback_ok = await page.evaluate("""(groupName, areaName) => {
+                        main_readback_ok = await page.evaluate("""(payload) => {
+                            const groupName = payload.groupName || '';
+                            const areaName = payload.areaName || '';
                             const bodyText = (document.body && document.body.innerText) ? document.body.innerText : '';
                             const hasGroup = groupName ? bodyText.includes(groupName) : false;
                             const hasArea = areaName ? bodyText.includes(areaName) : false;
                             return hasGroup || hasArea;
-                        }""", group_name_val, area_val)
+                        }""", {"groupName": group_name_val, "areaName": area_val})
                         if main_readback_ok:
                             print("      ✅ 主页面回读通过（分群信息已带回）")
                             results["第2步-主页面回读"] = True
