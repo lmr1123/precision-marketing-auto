@@ -477,7 +477,44 @@ async def fill_step3_end_time(page, end_time: str) -> bool:
     await page.keyboard.press("Tab")
     await asyncio.sleep(0.2)
     val = (await input_el.input_value()).strip()
-    return date_part in val
+    if date_part in val:
+        return True
+
+    # 最终兜底：JS 强制写入可见“结束时间”字段（兼容 readonly 输入）
+    hard_ok = await page.evaluate("""(dateText) => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const write = (inp) => {
+            if (!inp || !isVisible(inp)) return false;
+            inp.focus();
+            inp.value = dateText;
+            inp.setAttribute('value', dateText);
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+            inp.dispatchEvent(new Event('blur', { bubbles: true }));
+            inp.blur();
+            return true;
+        };
+        const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item'));
+        for (const it of items) {
+            const t = (it.textContent || '').replace(/\\s+/g, '');
+            if (!t.includes('结束时间')) continue;
+            const inp = it.querySelector('input[placeholder*="结束"], input[placeholder*="日期"], input.el-input__inner, input');
+            if (write(inp)) return true;
+        }
+        const fallback = document.querySelector('input[placeholder*="请选择结束日期"], input[placeholder*="结束日期"], input[placeholder*="请选择结束"]');
+        return write(fallback);
+    }""", date_part)
+    await asyncio.sleep(0.2)
+    val = (await input_el.input_value()).strip()
+    if hard_ok and date_part in val:
+        return True
+    print(f"      ⚠️ 结束时间回读失败，当前值={val}, 期望包含={date_part}")
+    return False
 
 async def fill_step3_send_content(page, content: str) -> bool:
     """第3步发送内容：优先写入 contenteditable 编辑器。"""
