@@ -531,11 +531,20 @@ async def fill_step3_send_content(page, content: str) -> bool:
         await editable.click(force=True)
     except:
         pass
+    old_text = ((await editable.inner_text()) or "").strip()
+    need_clear = len(old_text) > 0
+    print(f"      🧪 发送内容旧值长度: {len(old_text)}")
+    print(f"      🧪 发送内容是否执行清空: {'是' if need_clear else '否'}")
+
     ok = await editable.evaluate(
         """(el, text) => {
+            const oldText = (el.innerText || el.textContent || '').trim();
+            const needClear = oldText.length > 0;
             el.focus();
-            el.innerHTML = '';
-            el.textContent = '';
+            if (needClear) {
+                el.innerHTML = '';
+                el.textContent = '';
+            }
             const line = document.createElement('div');
             line.textContent = text;
             el.appendChild(line);
