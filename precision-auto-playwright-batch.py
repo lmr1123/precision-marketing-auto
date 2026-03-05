@@ -368,6 +368,24 @@ def split_multi_values(raw: str) -> list:
     vals = [v.strip() for v in re.split(r"[、,，/]", raw) if v.strip()]
     return vals
 
+def sanitize_sms_content(content: str) -> str:
+    """清洗短信内容中的高风险非法字符（按 P1106 场景）。"""
+    if not content:
+        return content
+    sanitized = content
+    # 系统明确报错包含【】；顺带处理常见全角装饰符，避免再次命中。
+    replacements = {
+        "【": "",
+        "】": "",
+        "『": "",
+        "』": "",
+        "「": "",
+        "」": "",
+    }
+    for k, v in replacements.items():
+        sanitized = sanitized.replace(k, v)
+    return sanitized.strip()
+
 async def fill_step3_end_time(page, end_time: str) -> bool:
     """第3步结束时间：填入并确认日期面板。"""
     date_part, _ = split_datetime(end_time)
@@ -1336,6 +1354,10 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     results = {}
     print("   📝 短信内容...")
     sms_content = data.get("sms_content", "测试短信内容")
+    sms_content_clean = sanitize_sms_content(sms_content)
+    if sms_content_clean != sms_content:
+        print(f"      ⚠️ 短信文案已自动清洗非法字符: {sms_content} -> {sms_content_clean}")
+    sms_content = sms_content_clean
     try:
         sms_ok = await page.evaluate(
             """(content) => {
