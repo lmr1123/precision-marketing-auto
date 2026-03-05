@@ -1251,21 +1251,27 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step2-before.png')
     
     print("   🖱️  点击分群的编辑按钮...")
-    try:
-        await page.evaluate('''() => {
-            const btns = document.querySelectorAll('button');
-            for (const btn of btns) {
-                if (btn.textContent.includes('编辑')) {
-                    btn.click();
-                    return true;
+    async def click_edit_once() -> bool:
+        try:
+            return await page.evaluate('''() => {
+                const btns = document.querySelectorAll('button');
+                for (const btn of btns) {
+                    if ((btn.textContent || '').includes('编辑')) {
+                        btn.click();
+                        return true;
+                    }
                 }
-            }
-            return false;
-        }''')
+                return false;
+            }''')
+        except:
+            return False
+
+    clicked_edit = await click_edit_once()
+    if clicked_edit:
         print("      ✅ JavaScript点击成功")
         results["第2步-编辑按钮"] = True
-    except Exception as e:
-        print(f"      ⚠️ 点击失败: {e}")
+    else:
+        print("      ⚠️ 点击编辑失败")
     
     await wait_and_log(page, 3, "弹窗加载中...")
     # 强制前台，避免 CDP 下后台页“点击成功但用户没看到”
@@ -1281,23 +1287,26 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
         pass
     
     # 检测弹窗内是否有 iframe
-    print("   🔍 检测弹窗内的 iframe...")
-    iframe_info = await page.evaluate('''() => {
-        const iframes = document.querySelectorAll('iframe');
-        const info = [];
-        iframes.forEach((iframe, i) => {
-            const rect = iframe.getBoundingClientRect();
-            const style = window.getComputedStyle(iframe);
-            info.push({
-                index: i,
-                src: iframe.src || '',
-                id: iframe.id || '',
-                name: iframe.name || '',
-                visible: style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0
+    async def read_iframe_info():
+        return await page.evaluate('''() => {
+            const iframes = document.querySelectorAll('iframe');
+            const info = [];
+            iframes.forEach((iframe, i) => {
+                const rect = iframe.getBoundingClientRect();
+                const style = window.getComputedStyle(iframe);
+                info.push({
+                    index: i,
+                    src: iframe.src || '',
+                    id: iframe.id || '',
+                    name: iframe.name || '',
+                    visible: style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0
+                });
             });
-        });
-        return info;
-    }''')
+            return info;
+        }''')
+
+    print("   🔍 检测弹窗内的 iframe...")
+    iframe_info = await read_iframe_info()
     print(f"      找到 {len(iframe_info)} 个 iframe")
     if len(iframe_info) == 0 and strict_step2:
         raise RuntimeError("第2步失败：未检测到分群 iframe 弹窗")
@@ -1309,7 +1318,25 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
     step2_error = None
 
     if iframe_info:
+        # 等待可见 iframe 稳定出现，避免“闪现即消失”被过早判失败。
         visible_iframes = [x for x in iframe_info if x.get("visible")]
+        if len(visible_iframes) == 0:
+            for _ in range(8):
+                await asyncio.sleep(0.4)
+                iframe_info = await read_iframe_info()
+                visible_iframes = [x for x in iframe_info if x.get("visible")]
+                if len(visible_iframes) > 0:
+                    break
+        # 若仍不可见，重试一次点击编辑再等待。
+        if len(visible_iframes) == 0:
+            print("      ⚠️ iframe 暂不可见，重试点击编辑...")
+            await click_edit_once()
+            for _ in range(8):
+                await asyncio.sleep(0.4)
+                iframe_info = await read_iframe_info()
+                visible_iframes = [x for x in iframe_info if x.get("visible")]
+                if len(visible_iframes) > 0:
+                    break
         print(f"      可见 iframe: {len(visible_iframes)}")
         await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step2-modal-visible-check.png')
         if len(visible_iframes) == 0 and strict_step2:
