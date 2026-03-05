@@ -372,10 +372,57 @@ async def fill_step3_end_time(page, end_time: str) -> bool:
     """第3步结束时间：填入并确认日期面板。"""
     date_part, _ = split_datetime(end_time)
     item = page.locator(".item:visible", has_text="结束时间").first
-    if await item.count() == 0:
-        return False
-    input_el = item.locator('input[placeholder*="结束"], input[placeholder*="请选择"], input.el-input__inner, input').first
-    if await input_el.count() == 0:
+    input_el = None
+    if await item.count() > 0:
+        cand = item.locator('input[placeholder*="结束"], input[placeholder*="请选择结束"], input.el-input__inner').first
+        if await cand.count() > 0 and await cand.is_visible():
+            input_el = cand
+
+    # 兜底1：全局可见 placeholder
+    if input_el is None:
+        cand = page.locator('input[placeholder*="请选择结束日期"]:visible, input[placeholder*="结束日期"]:visible').first
+        if await cand.count() > 0:
+            input_el = cand
+
+    # 兜底2：按“结束时间”文本就近寻找 input
+    if input_el is None:
+        ok = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const labels = Array.from(document.querySelectorAll('span,label,div')).filter(n => /结束时间/.test((n.textContent||'')));
+            for (const l of labels) {
+                const scope = l.closest('.item, .el-form-item, .ant-form-item') || l.parentElement;
+                if (!scope) continue;
+                const inp = scope.querySelector('input[placeholder*="结束"], input[placeholder*="日期"], input.el-input__inner');
+                if (inp && isVisible(inp)) {
+                    inp.setAttribute('data-step3-endtime-target', '1');
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        if ok:
+            cand = page.locator('input[data-step3-endtime-target="1"]').first
+            if await cand.count() > 0:
+                input_el = cand
+
+    if input_el is None:
+        debug = await page.evaluate("""() => {
+            const labels = Array.from(document.querySelectorAll('span,label,div'))
+              .map(n => (n.textContent || '').trim())
+              .filter(t => t.includes('结束时间'))
+              .slice(0, 5);
+            const placeholders = Array.from(document.querySelectorAll('input'))
+              .map(i => i.getAttribute('placeholder') || '')
+              .filter(Boolean)
+              .slice(0, 20);
+            return {labels, placeholders};
+        }""")
+        print(f"      ⚠️ 结束时间定位诊断: {debug}")
         return False
 
     # 优先走组件面板路径，确保 ElementUI 内部值同步。
