@@ -1234,6 +1234,15 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
     """填充第2步：目标分群"""
     print("\n📋 第2步：目标分群")
     print("="*50)
+    results = {
+        "第2步-编辑按钮": False,
+        "第2步-分群名称": False,
+        "第2步-更新方式": False,
+        "第2步-主消费营运区": False,
+        "第2步-券规则ID": False,
+        "第2步-预跑按钮": False,
+        "第2步-下一步按钮": False,
+    }
     
     await wait_and_log(page, 2, "等待第2步加载...")
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step2-before.png')
@@ -1251,6 +1260,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
             return false;
         }''')
         print("      ✅ JavaScript点击成功")
+        results["第2步-编辑按钮"] = True
     except Exception as e:
         print(f"      ⚠️ 点击失败: {e}")
     
@@ -1314,6 +1324,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                         if await name_input.count() > 0:
                             await name_input.fill(data.get("group_name", "测试分群"))
                             print("      ✅ 已填充名称")
+                            results["第2步-分群名称"] = True
                     except Exception as e:
                         print(f"      ⚠️ 填充名称失败: {e}")
                     
@@ -1331,6 +1342,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 }
                             }''')
                             print("      ✅ 已选择自动更新")
+                            results["第2步-更新方式"] = True
                     except Exception as e:
                         print(f"      ⚠️ 更新方式选择失败: {e}")
                     
@@ -1429,6 +1441,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             }
                                         }
                                     }''')
+                                    results["第2步-主消费营运区"] = True
                                 else:
                                     print(f"      ⚠️ 仍未找到: {area}")
                             else:
@@ -1454,6 +1467,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 """)
                                 if selected_direct == "checked":
                                     print(f"      ✅ 已直接勾选营运区: {area}")
+                                    results["第2步-主消费营运区"] = True
                                 else:
                                     print("      ⚠️ 直接勾选也失败，请检查第2步页面是否空白/未加载完整")
                         except Exception as e:
@@ -1467,6 +1481,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                             if await coupon_input.count() > 0:
                                 await coupon_input.fill(data["coupon_ids"])
                                 print("      ✅ 已填充券规则ID")
+                                results["第2步-券规则ID"] = True
                         except Exception as e:
                             print(f"      ⚠️ 券规则ID填充失败: {e}")
                 else:
@@ -1479,9 +1494,12 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
     else:
         print("   ⚠️ 未检测到 iframe，使用普通方式填充")
         await fill_input(page, "名称", data.get("group_name", "测试分群"))
+        results["第2步-分群名称"] = True
         await select_radio(page, "更新方式", data.get("update_type", "自动更新"))
+        results["第2步-更新方式"] = True
         if data.get("coupon_ids"):
             await fill_input(page, "券规则ID", data["coupon_ids"])
+            results["第2步-券规则ID"] = True
 
     # 严格模式下，第2步异常直接终止当前计划；默认先放行便于联调全流程。
     if step2_error:
@@ -1505,6 +1523,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
             return false;
         }''')
         print("      ✅ 已点击预跑")
+        results["第2步-预跑按钮"] = True
         await wait_and_log(page, 3, "预跑执行中...")
     except Exception as e:
         print(f"      ⚠️ 预跑点击失败: {e}")
@@ -1516,8 +1535,10 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
     if not clicked:
         raise RuntimeError("第2步完成后未能点击“下一步”")
     print("      ✅ 点击成功")
+    results["第2步-下一步按钮"] = True
     
     await wait_and_log(page, 2, "跳转到第3步...")
+    return results
 
 async def skip_step2(page):
     """跳过第2步内容，仅点击下一步进入第3步。"""
@@ -1820,7 +1841,7 @@ async def process_single_plan(
                 if skip_step2_mode:
                     field_results.update(await skip_step2(page))
                 else:
-                    await fill_step2(page, plan, strict_step2=strict_step2)
+                    field_results.update(await fill_step2(page, plan, strict_step2=strict_step2))
                 field_results.update(await fill_step3(
                     page,
                     plan,
