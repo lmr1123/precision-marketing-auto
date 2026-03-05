@@ -1277,7 +1277,7 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
         targets = split_multi_values(executor_check_override) if executor_check_override else split_multi_values(executor_vals)
         overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
         if overlap_msg:
-            raise RuntimeError(overlap_msg)
+            print(f"      ⚠️ {overlap_msg}（当前按业务场景仅提示，不阻断保存）")
         haystack = " ".join([
             debug_data.get("inputValue", ""),
             " ".join(debug_data.get("tags", [])),
@@ -1297,7 +1297,7 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
         targets = split_multi_values(executor_vals)
         overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
         if overlap_msg:
-            raise RuntimeError(overlap_msg)
+            print(f"      ⚠️ {overlap_msg}（当前按业务场景仅提示，不阻断保存）")
 
     # 新增字段：发送内容
     send_content = data.get("send_content", "")
