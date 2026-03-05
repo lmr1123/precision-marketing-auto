@@ -524,6 +524,50 @@ async def ensure_step3_saved(page, save_resp_task=None) -> bool:
         print(f"      ⚠️ 未检测到成功跳转，接口信息: {api_diag}")
     return moved
 
+async def click_step3_save_button(page) -> bool:
+    """点击第3步主保存按钮（多策略兜底）。"""
+    # 先尝试关闭可能遮挡按钮的浮层
+    try:
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.1)
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.1)
+    except:
+        pass
+
+    # 策略1：Playwright 定位主按钮并强制点击
+    try:
+        save_btn = page.locator("button.el-button.el-button--primary.el-button--small:visible").filter(has_text="保存").first
+        if await save_btn.count() > 0:
+            await save_btn.scroll_into_view_if_needed()
+            await save_btn.click(force=True)
+            return True
+    except:
+        pass
+
+    # 策略2：JS 直接 click（基于你提供的 class + 文案）
+    try:
+        clicked_js = await page.evaluate("""() => {
+            const btns = Array.from(document.querySelectorAll('button.el-button.el-button--primary.el-button--small'));
+            for (const btn of btns) {
+                const txt = (btn.textContent || '').trim();
+                const style = window.getComputedStyle(btn);
+                const rect = btn.getBoundingClientRect();
+                if (!txt.includes('保存')) continue;
+                if (style.display === 'none' || style.visibility === 'hidden' || rect.width <= 0 || rect.height <= 0) continue;
+                btn.click();
+                return true;
+            }
+            return false;
+        }""")
+        if clicked_js:
+            return True
+    except:
+        pass
+
+    # 策略3：按文本兜底
+    return await click_button_with_text(page, "保存", exclude_text="取消")
+
 async def set_step3_distribution_mode(page, mode_text: str = "指定门店分配") -> bool:
     """第3步分配方式：点击单选文本。"""
     return await page.evaluate(
@@ -1333,18 +1377,7 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
             pass
 
     page.on("response", _on_response)
-    clicked = False
-    try:
-        # 优先点击你提供的主保存按钮样式，避免误点其他“保存”。
-        save_btn = page.locator("button.el-button--primary.el-button--small").filter(has_text="保存").first
-        if await save_btn.count() > 0 and await save_btn.is_visible():
-            await save_btn.click(force=True)
-            clicked = True
-    except:
-        clicked = False
-
-    if not clicked:
-        clicked = await click_button_with_text(page, "保存", exclude_text="取消")
+    clicked = await click_step3_save_button(page)
     if not clicked:
         if not save_resp_task.done():
             save_resp_task.set_result(None)
