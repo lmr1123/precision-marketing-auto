@@ -522,6 +522,41 @@ async def ensure_step3_saved(page, save_resp_task=None) -> bool:
     moved = ("marketingTemplate/use" not in page.url) or ("limitList" in page.url)
     if (not moved) and api_diag:
         print(f"      ⚠️ 未检测到成功跳转，接口信息: {api_diag}")
+    if not moved:
+        # 输出页面可见校验信息，帮助定位“为何点了保存但未提交”
+        try:
+            blockers = await page.evaluate("""() => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                };
+                const sels = [
+                    '.el-form-item__error',
+                    '.ant-form-item-explain-error',
+                    '.el-message__content',
+                    '.ant-message-custom-content',
+                    '.el-message-box__message',
+                    '.el-notification__content',
+                    '.el-alert__content'
+                ];
+                const out = [];
+                for (const s of sels) {
+                    const nodes = document.querySelectorAll(s);
+                    for (const n of nodes) {
+                        const t = (n.textContent || '').trim();
+                        if (t && isVisible(n)) out.push(t);
+                    }
+                }
+                return Array.from(new Set(out)).slice(0, 5);
+            }""")
+            if blockers:
+                raise RuntimeError(f"保存被页面校验拦截: {' | '.join(blockers)}")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
     return moved
 
 async def click_step3_save_button(page) -> bool:
@@ -1363,12 +1398,14 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
 
     def _on_response(r):
         try:
+            url_l = (r.url or "").lower()
             matched = (
                 r.request.method in ("POST", "PUT")
                 and (
-                    "marketingTemplate" in r.url
-                    or "template" in r.url.lower()
-                    or "save" in r.url.lower()
+                    ("/api/" in url_l and "precision.dslyy.com" in url_l)
+                    or "marketingtemplate" in url_l
+                    or "template" in url_l
+                    or "save" in url_l
                 )
             )
             if matched and (not save_resp_task.done()):
@@ -1563,6 +1600,8 @@ async def process_single_plan(
                 non_retryable = any(k in err_text for k in [
                     "目标不可重复",
                     "保存失败提示",
+                    "保存被页面校验拦截",
+                    "保存未真正提交",
                 ])
                 if "目标不可重复" in err_text:
                     print("      ℹ️ 业务校验失败：当前页面存在重复目标，需先人工去重后再执行。")
