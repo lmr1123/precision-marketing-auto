@@ -670,7 +670,18 @@ async def ensure_step3_saved(page, save_resp_task=None) -> bool:
             if resp is not None:
                 body = await resp.text()
                 code, msg = extract_api_code_message(body)
-                api_diag = f"url={resp.url}, status={resp.status}, code={code}, msg={msg}"
+                post_data = ""
+                try:
+                    post_data = resp.request.post_data or ""
+                except Exception:
+                    try:
+                        post_data = resp.request.post_data() or ""
+                    except Exception:
+                        post_data = ""
+                post_excerpt = (post_data or "").replace("\n", " ").replace("\r", " ")
+                if len(post_excerpt) > 220:
+                    post_excerpt = post_excerpt[:220] + "..."
+                api_diag = f"url={resp.url}, status={resp.status}, code={code}, msg={msg}, reqLen={len(post_data or '')}, req={post_excerpt}"
                 print(f"      🧪 保存接口响应: {api_diag}")
         except asyncio.TimeoutError:
             pass
