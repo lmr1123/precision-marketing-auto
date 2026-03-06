@@ -1529,18 +1529,35 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 
                                 if selected in ['checked', 'already_checked']:
                                     print(f"      ✅ 已选择营运区: {area}")
-                                    # 必须点击树弹窗内“确 定”，然后回读“已选：N”
+                                    # 必须点击“选择数据”树弹窗自己的主按钮“确 定”，然后回读“已选：N”
                                     confirm_area_ok = await frame.evaluate("""() => {
                                         const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                        const btns = Array.from(document.querySelectorAll('button.ant-btn'));
-                                        const hit = btns.find(b => norm(b.textContent) === '确定' || norm(b.textContent) === '确 定');
+                                        const isVisible = (el) => {
+                                            if (!el) return false;
+                                            const style = window.getComputedStyle(el);
+                                            const rect = el.getBoundingClientRect();
+                                            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                                        };
+                                        const buttons = Array.from(document.querySelectorAll('button.ant-btn.ant-btn-primary'))
+                                            .filter(isVisible)
+                                            .filter(b => {
+                                                const t = norm(b.textContent);
+                                                return t === '确定' || t === '确定' || t === '确 定';
+                                            });
+                                        const hit = buttons.length ? buttons[buttons.length - 1] : null;
                                         if (!hit) return false;
                                         hit.click();
                                         return true;
                                     }""")
-                                    await asyncio.sleep(0.6)
+                                    await asyncio.sleep(0.8)
                                     selected_count_text = await frame.evaluate("""() => {
-                                        const nodes = Array.from(document.querySelectorAll('div, span'));
+                                        const isVisible = (el) => {
+                                            if (!el) return false;
+                                            const style = window.getComputedStyle(el);
+                                            const rect = el.getBoundingClientRect();
+                                            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                                        };
+                                        const nodes = Array.from(document.querySelectorAll('div, span')).filter(isVisible);
                                         const hit = nodes.find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
                                         return hit ? (hit.textContent || '').trim() : '';
                                     }""")
@@ -1581,15 +1598,32 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     print(f"      ✅ 已直接勾选营运区: {area}")
                                     confirm_area_ok = await frame.evaluate("""() => {
                                         const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                        const btns = Array.from(document.querySelectorAll('button.ant-btn'));
-                                        const hit = btns.find(b => norm(b.textContent) === '确定' || norm(b.textContent) === '确 定');
+                                        const isVisible = (el) => {
+                                            if (!el) return false;
+                                            const style = window.getComputedStyle(el);
+                                            const rect = el.getBoundingClientRect();
+                                            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                                        };
+                                        const buttons = Array.from(document.querySelectorAll('button.ant-btn.ant-btn-primary'))
+                                            .filter(isVisible)
+                                            .filter(b => {
+                                                const t = norm(b.textContent);
+                                                return t === '确定' || t === '确定' || t === '确 定';
+                                            });
+                                        const hit = buttons.length ? buttons[buttons.length - 1] : null;
                                         if (!hit) return false;
                                         hit.click();
                                         return true;
                                     }""")
-                                    await asyncio.sleep(0.6)
+                                    await asyncio.sleep(0.8)
                                     selected_count_text = await frame.evaluate("""() => {
-                                        const nodes = Array.from(document.querySelectorAll('div, span'));
+                                        const isVisible = (el) => {
+                                            if (!el) return false;
+                                            const style = window.getComputedStyle(el);
+                                            const rect = el.getBoundingClientRect();
+                                            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                                        };
+                                        const nodes = Array.from(document.querySelectorAll('div, span')).filter(isVisible);
                                         const hit = nodes.find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
                                         return hit ? (hit.textContent || '').trim() : '';
                                     }""")
