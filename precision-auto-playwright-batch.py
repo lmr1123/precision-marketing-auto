@@ -991,11 +991,26 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
     }""")
     await asyncio.sleep(0.25)
 
-    panel = page.locator(".el-cascader-panel:visible").first
-    menus = panel.locator(".el-cascader-menu")
+    async def reopen_executor_panel():
+        await page.evaluate("""() => {
+            const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
+            for (const label of labels) {
+                const txt = (label.textContent || '').replace(/\\s+/g, '');
+                if (!txt.includes('执行员工')) continue;
+                const item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
+                if (!item) continue;
+                const input = item.querySelector('input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"], .el-cascader input.el-input__inner');
+                if (input) {
+                    input.click();
+                    return;
+                }
+            }
+        }""")
+        await page.locator(".el-cascader-panel:visible").last.wait_for(timeout=5000)
+        await asyncio.sleep(0.15)
 
     async def expand_in_menu(menu_index: int, target: str) -> bool:
-        menu = menus.nth(menu_index)
+        menu = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(menu_index)
         nodes = menu.locator(".el-cascader-node")
         count = await nodes.count()
         for i in range(count):
@@ -1017,70 +1032,51 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
         return False
 
     async def get_menu_checked_state(menu_index: int, target: str) -> str:
-        return str(await page.evaluate("""(payload) => {
-            const { menuIndex, target } = payload;
-            const isVisible = (el) => {
-                if (!el) return false;
-                const s = window.getComputedStyle(el);
-                const r = el.getBoundingClientRect();
-                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-            };
-            const panel = Array.from(document.querySelectorAll('.el-cascader-panel')).find(isVisible);
-            if (!panel) return 'panel_not_found';
-            const menu = panel.querySelectorAll('.el-cascader-menu')[menuIndex];
-            if (!menu) return 'menu_not_found';
-            const nodes = Array.from(menu.querySelectorAll('.el-cascader-node'));
-            for (const node of nodes) {
-                const label = node.querySelector('.el-cascader-node__label');
-                const txt = (label?.textContent || '').trim();
-                if (txt !== target && !txt.includes(target)) continue;
-                const cb = node.querySelector('.el-checkbox__input');
-                if (!cb) return 'missing';
-                const nodeCls = node.className || '';
-                const cbCls = cb.className || '';
-                const input = cb.querySelector('input.el-checkbox__original');
-                const aria = (input?.getAttribute('aria-checked') || '').toLowerCase();
-                const checked = nodeCls.includes('in-checked-path') || cbCls.includes('is-checked') || aria === 'true';
-                return checked ? 'checked' : 'unchecked';
-            }
-            return 'not_found';
-        }""", {"menuIndex": menu_index, "target": target}))
+        menu = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(menu_index)
+        nodes = menu.locator(".el-cascader-node")
+        count = await nodes.count()
+        if count == 0:
+            return "panel_not_found"
+        for i in range(count):
+            node = nodes.nth(i)
+            label = node.locator(".el-cascader-node__label").first
+            if await label.count() == 0:
+                continue
+            txt = ((await label.text_content()) or "").strip()
+            if txt != target and target not in txt:
+                continue
+            cb = node.locator(".el-checkbox__input").first
+            if await cb.count() == 0:
+                return "missing"
+            node_cls = (await node.get_attribute("class")) or ""
+            cb_cls = (await cb.get_attribute("class")) or ""
+            checked = ("in-checked-path" in node_cls) or ("is-checked" in cb_cls)
+            return "checked" if checked else "unchecked"
+        return "not_found"
 
     async def toggle_in_menu(menu_index: int, target: str) -> bool:
-        # 用 JS 触发 checkbox 原生 input 和容器点击，规避点击偏移/遮挡
-        toggled = await page.evaluate("""(payload) => {
-            const { menuIndex, target } = payload;
-            const panel = document.querySelector('.el-cascader-panel');
-            if (!panel) return false;
-            const menu = panel.querySelectorAll('.el-cascader-menu')[menuIndex];
-            if (!menu) return false;
-            const fireClick = (el) => {
-                if (!el) return;
-                ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
-                    el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-                });
-                if (typeof el.click === 'function') el.click();
-            };
-            const nodes = Array.from(menu.querySelectorAll('.el-cascader-node'));
-            for (const node of nodes) {
-                const label = node.querySelector('.el-cascader-node__label');
-                const txt = (label?.textContent || '').trim();
-                if (txt !== target && !txt.includes(target)) continue;
-                node.scrollIntoView({ block: 'center' });
-                const cb = node.querySelector('.el-checkbox__input');
-                if (!cb) return false;
-                const input = cb.querySelector('input.el-checkbox__original');
-                fireClick(input);
-                fireClick(cb);
-                return true;
-            }
-            return false;
-        }""", {"menuIndex": menu_index, "target": target})
-        await asyncio.sleep(0.2)
-        return bool(toggled)
+        menu = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(menu_index)
+        nodes = menu.locator(".el-cascader-node")
+        count = await nodes.count()
+        for i in range(count):
+            node = nodes.nth(i)
+            label = node.locator(".el-cascader-node__label").first
+            if await label.count() == 0:
+                continue
+            txt = ((await label.text_content()) or "").strip()
+            if txt != target and target not in txt:
+                continue
+            cb = node.locator(".el-checkbox__input").first
+            if await cb.count() == 0:
+                return False
+            await cb.scroll_into_view_if_needed()
+            await cb.click(force=True)
+            await asyncio.sleep(0.2)
+            return True
+        return False
 
     async def check_in_menu(menu_index: int, target: str) -> bool:
-        menu = menus.nth(menu_index)
+        menu = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(menu_index)
         nodes = menu.locator(".el-cascader-node")
         count = await nodes.count()
         for i in range(count):
@@ -1104,6 +1100,7 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
         return False
 
     # 先按业务规则双击“全国”：第一次全选，第二次清空。
+    await reopen_executor_panel()
     nation_before = await get_menu_checked_state(0, "全国")
     first_ok = await toggle_in_menu(0, "全国")
     nation_after_first = await get_menu_checked_state(0, "全国")
