@@ -1503,19 +1503,22 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 js_find_node = """
                                 () => {
                                     const targetArea = '""" + area + """';
-                                    const allNodes = document.querySelectorAll('.ant-tree-node-content-wrapper, .ant-tree-title, [title]');
-                                    for (const node of allNodes) {
-                                        if (node.textContent.includes(targetArea)) {
-                                            const parent = node.closest('.ant-tree-treenode') || node.parentElement;
-                                            const checkbox = parent ? parent.querySelector('.ant-checkbox') : null;
-                                            if (checkbox && !checkbox.classList.contains('ant-checkbox-checked')) {
-                                                checkbox.click();
-                                                return 'checked';
-                                            }
-                                            return 'already_checked';
+                                    const nodes = Array.from(document.querySelectorAll('.ant-tree-treenode'));
+                                    const findNode = () => {
+                                        for (const n of nodes) {
+                                            const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
+                                            const txt = (title?.textContent || '').trim();
+                                            if (txt.includes(targetArea)) return n;
                                         }
-                                    }
-                                    return 'not_found';
+                                        return null;
+                                    };
+                                    const node = findNode();
+                                    if (!node) return 'not_found';
+                                    const checkbox = node.querySelector('.ant-checkbox');
+                                    if (!checkbox) return 'checkbox_not_found';
+                                    if (checkbox.classList.contains('ant-checkbox-checked')) return 'already_checked';
+                                    checkbox.click();
+                                    return checkbox.classList.contains('ant-checkbox-checked') ? 'checked' : 'click_no_effect';
                                 }
                                 """
                                 selected = await frame.evaluate(js_find_node)
@@ -1533,15 +1536,22 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     }''')
                                     await asyncio.sleep(0.5)
                                     area_ok = await frame.evaluate("""(areaName) => {
-                                        const bodyTxt = (document.body && document.body.innerText) ? document.body.innerText : '';
-                                        return bodyTxt.includes(areaName);
+                                        const nodes = Array.from(document.querySelectorAll('.ant-tree-treenode'));
+                                        for (const n of nodes) {
+                                            const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
+                                            const txt = (title?.textContent || '').trim();
+                                            if (!txt.includes(areaName)) continue;
+                                            const cb = n.querySelector('.ant-checkbox');
+                                            if (cb && cb.classList.contains('ant-checkbox-checked')) return true;
+                                        }
+                                        return false;
                                     }""", area)
                                     if area_ok:
                                         results["第2步-主消费营运区"] = True
                                     else:
                                         print(f"      ⚠️ 营运区回读失败: {area}")
                                 else:
-                                    print(f"      ⚠️ 仍未找到: {area}")
+                                    print(f"      ⚠️ 营运区勾选失败: {area} ({selected})")
                             else:
                                 # 兜底2：某些页面树已默认展开，直接尝试勾选
                                 print("      ⚠️ 未找到选择数据按钮，尝试直接在当前树中勾选...")
@@ -1549,16 +1559,15 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 selected_direct = await frame.evaluate("""
                                 () => {
                                     const targetArea = '""" + area_escaped + """';
-                                    const allNodes = document.querySelectorAll('.ant-tree-node-content-wrapper, .ant-tree-title, [title]');
-                                    for (const node of allNodes) {
-                                        if ((node.textContent || '').includes(targetArea)) {
-                                            const parent = node.closest('.ant-tree-treenode') || node.parentElement;
-                                            const checkbox = parent ? parent.querySelector('.ant-checkbox') : null;
-                                            if (checkbox) {
-                                                checkbox.click();
-                                                return 'checked';
-                                            }
-                                        }
+                                    const nodes = Array.from(document.querySelectorAll('.ant-tree-treenode'));
+                                    for (const n of nodes) {
+                                        const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
+                                        const txt = (title?.textContent || '').trim();
+                                        if (!txt.includes(targetArea)) continue;
+                                        const cb = n.querySelector('.ant-checkbox');
+                                        if (!cb) return 'checkbox_not_found';
+                                        if (!cb.classList.contains('ant-checkbox-checked')) cb.click();
+                                        return cb.classList.contains('ant-checkbox-checked') ? 'checked' : 'click_no_effect';
                                     }
                                     return 'not_found';
                                 }
@@ -1567,15 +1576,22 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     print(f"      ✅ 已直接勾选营运区: {area}")
                                     await asyncio.sleep(0.3)
                                     area_ok = await frame.evaluate("""(areaName) => {
-                                        const bodyTxt = (document.body && document.body.innerText) ? document.body.innerText : '';
-                                        return bodyTxt.includes(areaName);
+                                        const nodes = Array.from(document.querySelectorAll('.ant-tree-treenode'));
+                                        for (const n of nodes) {
+                                            const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
+                                            const txt = (title?.textContent || '').trim();
+                                            if (!txt.includes(areaName)) continue;
+                                            const cb = n.querySelector('.ant-checkbox');
+                                            if (cb && cb.classList.contains('ant-checkbox-checked')) return true;
+                                        }
+                                        return false;
                                     }""", area)
                                     if area_ok:
                                         results["第2步-主消费营运区"] = True
                                     else:
                                         print(f"      ⚠️ 营运区回读失败: {area}")
                                 else:
-                                    print("      ⚠️ 直接勾选也失败，请检查第2步页面是否空白/未加载完整")
+                                    print(f"      ⚠️ 直接勾选失败: {selected_direct}，请检查第2步页面是否空白/未加载完整")
                         except Exception as e:
                             print(f"      ⚠️ 主消费营运区操作失败: {e}")
                     
@@ -1617,6 +1633,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                     # 弹窗内确认提交（关键步骤）
                     print("   ✅ 弹窗内确认保存分群...")
                     try:
+                        if not results.get("第2步-主消费营运区"):
+                            raise RuntimeError("主消费营运区未真正勾选，禁止确认弹窗")
                         confirmed = await frame.evaluate("""() => {
                             const norm = (s) => (s || '').replace(/\\s+/g, '');
                             const btns = Array.from(document.querySelectorAll('button'));
