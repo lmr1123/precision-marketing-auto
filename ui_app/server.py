@@ -371,7 +371,7 @@ UI_HTML = """
   <style>
     body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f5f7fb;color:#1f2937}
     .wrap{max-width:1440px;margin:20px auto;padding:0 16px}
-    .layout{display:grid;grid-template-columns:1.1fr .9fr;gap:12px;align-items:start}
+    .layout{display:grid;grid-template-columns:1.45fr .55fr;gap:12px;align-items:start}
     .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:14px;margin-bottom:12px}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
     input,button,select{padding:8px 10px;border:1px solid #d1d5db;border-radius:8px}
@@ -386,7 +386,7 @@ UI_HTML = """
     .status-running{color:#2563eb}
     .status-success{color:#059669}
     .status-failed{color:#dc2626}
-    #logs{background:#0b1020;color:#dbeafe;height:calc(50vh - 20px);overflow:auto;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+    #logs{background:#0b1020;color:#dbeafe;height:calc(100vh - 180px);overflow:auto;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px}
     .right-sticky{position:sticky;top:12px}
     .link-pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#ecfeff;color:#0f766e;border:1px solid #a5f3fc;font-size:12px;text-decoration:none}
     @media (max-width: 1100px){
