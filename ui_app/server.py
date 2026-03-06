@@ -1,4 +1,5 @@
 import asyncio
+import getpass
 import os
 import re
 import shutil
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +49,7 @@ class Task:
     filename: str
     file_path: str
     options: TaskOptions
+    operator: str = ""
     created_at: str = field(default_factory=now_iso)
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
@@ -67,6 +69,7 @@ class Task:
             "id": self.id,
             "filename": self.filename,
             "file_path": self.file_path,
+            "operator": self.operator,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
@@ -124,6 +127,7 @@ class TaskRunner:
                 filename=old.filename,
                 file_path=old.file_path,
                 options=old.options,
+                operator=old.operator,
             )
             self.tasks[new_id] = new_task
         await self.queue.put(new_id)
@@ -285,6 +289,15 @@ async def get_task(task_id: str) -> JSONResponse:
     return JSONResponse(task.to_dict())
 
 
+@app.get("/api/tasks/{task_id}/file")
+async def download_task_file(task_id: str):
+    task = await runner.get_task(task_id)
+    p = Path(task.file_path)
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="Task file not found")
+    return FileResponse(path=str(p), filename=task.filename, media_type="text/csv")
+
+
 @app.get("/api/tasks/{task_id}/logs")
 async def get_task_logs(task_id: str, offset: int = 0, limit: int = 300) -> JSONResponse:
     task = await runner.get_task(task_id)
@@ -309,6 +322,7 @@ async def upload_tasks(
     start: str = Form(""),
     end: str = Form(""),
     hold_seconds: int = Form(2),
+    operator: str = Form(""),
 ) -> JSONResponse:
     created = []
     options = TaskOptions(
@@ -328,7 +342,8 @@ async def upload_tasks(
         dst = UPLOAD_DIR / f"{tid}_{Path(f.filename).name}"
         with dst.open("wb") as out:
             shutil.copyfileobj(f.file, out)
-        task = Task(id=tid, filename=f.filename, file_path=str(dst), options=options)
+        op = operator.strip() or os.getenv("USER") or getpass.getuser() or "unknown"
+        task = Task(id=tid, filename=f.filename, file_path=str(dst), options=options, operator=op)
         await runner.add_task(task)
         created.append(task.to_dict())
     return JSONResponse({"created": created})
@@ -371,7 +386,7 @@ UI_HTML = """
     .status-running{color:#2563eb}
     .status-success{color:#059669}
     .status-failed{color:#dc2626}
-    #logs{background:#0b1020;color:#dbeafe;height:calc(100vh - 180px);overflow:auto;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+    #logs{background:#0b1020;color:#dbeafe;height:calc(50vh - 20px);overflow:auto;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px}
     .right-sticky{position:sticky;top:12px}
     .link-pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#ecfeff;color:#0f766e;border:1px solid #a5f3fc;font-size:12px;text-decoration:none}
     @media (max-width: 1100px){
@@ -394,6 +409,7 @@ UI_HTML = """
           <label title="开启后，第2步关键字段校验失败会立刻中断，建议联调用开，正式批量可关"><input id="strict_step2" type="checkbox" checked/> 严格校验第2步（推荐）</label>
           <label>并发任务数 <input id="concurrent" type="number" min="1" value="1" style="width:70px"/></label>
           <label>结束后保留浏览器(秒) <input id="hold_seconds" type="number" min="0" value="2" style="width:70px"/></label>
+          <label>操作人 <input id="operator" style="width:140px" placeholder="自动识别"/></label>
           <button onclick="upload()">上传并开始执行</button>
           <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
         </div>
@@ -404,7 +420,7 @@ UI_HTML = """
         <h3 style="margin:0 0 8px 0">任务列表</h3>
         <table>
           <thead><tr>
-            <th>文件</th><th>状态</th><th>进度</th><th>成功/失败</th><th>开始</th><th>完成</th><th>预计完成</th><th>耗时(s)</th><th>复核链接</th><th>操作</th>
+            <th>文件</th><th>操作人</th><th>状态</th><th>进度</th><th>成功/失败</th><th>开始</th><th>完成</th><th>预计完成</th><th>耗时(s)</th><th>复核链接</th><th>操作</th>
           </tr></thead>
           <tbody id="taskRows"></tbody>
         </table>
@@ -438,6 +454,7 @@ async function upload(){
   fd.append('start', '');
   fd.append('end', '');
   fd.append('hold_seconds', document.getElementById('hold_seconds').value || '2');
+  fd.append('operator', document.getElementById('operator').value || '');
   const r = await fetch('/api/tasks/upload', {method:'POST', body:fd});
   if(!r.ok){ alert(await r.text()); return; }
   await refreshTasks();
@@ -462,6 +479,10 @@ function renderReviewLink(task){
   return '<span class="hint">待生成</span>';
 }
 
+function renderFileLink(task){
+  return `<a class="link-pill" href="/api/tasks/${task.id}/file">下载CSV</a>`;
+}
+
 async function refreshTasks(){
   const r = await fetch('/api/tasks');
   const data = await r.json();
@@ -478,7 +499,8 @@ async function refreshTasks(){
   const tbody = document.getElementById('taskRows');
   tbody.innerHTML = rows.map(t => `
     <tr>
-      <td>${esc(t.filename)}</td>
+      <td>${esc(t.filename)}<div style="margin-top:4px">${renderFileLink(t)}</div></td>
+      <td>${esc(t.operator || '-')}</td>
       <td>${fmtStatus(t.status)}</td>
       <td>${t.completed_plans}/${t.total_plans || '-'}</td>
       <td>${t.success_count}/${t.fail_count}</td>
