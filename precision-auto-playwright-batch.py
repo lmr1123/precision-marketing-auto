@@ -1738,58 +1738,6 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                         except Exception as e:
                             print(f"      ⚠️ 券规则ID填充失败: {e}")
 
-                    # 弹窗内确认提交（关键步骤）
-                    print("   ✅ 弹窗内确认保存分群...")
-                    try:
-                        if not results.get("第2步-主消费营运区"):
-                            raise RuntimeError("主消费营运区未真正勾选，禁止确认弹窗")
-                        confirmed = await frame.evaluate("""() => {
-                            const norm = (s) => (s || '').replace(/\\s+/g, '');
-                            const btns = Array.from(document.querySelectorAll('button'));
-                            const hit = btns.find(b => {
-                                const t = norm(b.textContent);
-                                return t.includes('确定') || t.includes('完成') || t.includes('保存') || t.includes('提交');
-                            });
-                            if (hit) { hit.click(); return true; }
-                            return false;
-                        }""")
-                        if confirmed:
-                            await asyncio.sleep(0.8)
-                            # 校验 iframe 弹窗已关闭或变化
-                            iframe_count_after = await page.locator("iframe").count()
-                            if iframe_count_after == 0:
-                                print("      ✅ 弹窗已关闭")
-                            else:
-                                print(f"      ⚠️ 弹窗可能未关闭（iframe={iframe_count_after}），继续尝试主页面确认按钮")
-                                await click_button_with_text(page, "确定")
-                                await click_button_with_text(page, "完成")
-                                await asyncio.sleep(0.5)
-                            results["第2步-弹窗确认"] = True
-                        else:
-                            print("      ⚠️ 未找到弹窗内确认按钮")
-                    except Exception as e:
-                        print(f"      ⚠️ 弹窗确认失败: {e}")
-
-                    # 主页面回读：确认分群信息已带回（名称或营运区至少一项出现）
-                    try:
-                        await asyncio.sleep(0.6)
-                        group_name_val = data.get("group_name", "")
-                        area_val = data.get("main_operating_area", "")
-                        main_readback_ok = await page.evaluate("""(payload) => {
-                            const groupName = payload.groupName || '';
-                            const areaName = payload.areaName || '';
-                            const bodyText = (document.body && document.body.innerText) ? document.body.innerText : '';
-                            const hasGroup = groupName ? bodyText.includes(groupName) : false;
-                            const hasArea = areaName ? bodyText.includes(areaName) : false;
-                            return hasGroup || hasArea;
-                        }""", {"groupName": group_name_val, "areaName": area_val})
-                        if main_readback_ok:
-                            print("      ✅ 主页面回读通过（分群信息已带回）")
-                            results["第2步-主页面回读"] = True
-                        else:
-                            print("      ⚠️ 主页面回读失败（未检测到分群名称/营运区）")
-                    except Exception as e:
-                        print(f"      ⚠️ 主页面回读异常: {e}")
                 else:
                     print("   ⚠️ 无法获取 frame 内容")
             else:
@@ -1813,33 +1761,122 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
             raise RuntimeError(f"第2步失败: {step2_error}")
         print(f"   ⚠️ 第2步异常已记录，当前为非严格模式，继续后续流程: {step2_error}")
 
+    # 预跑按钮
+    print("   🔍 点击预跑...")
+    try:
+        if iframe_info:
+            frame_handle = await page.query_selector('iframe')
+            if frame_handle:
+                frame = await frame_handle.content_frame()
+            else:
+                frame = None
+            if frame:
+                prerun_clicked = await frame.evaluate('''() => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                    };
+                    const btns = Array.from(document.querySelectorAll('button')).filter(isVisible);
+                    const hit = btns.find(btn => {
+                        const t = (btn.textContent || '').replace(/\\s+/g, '');
+                        return t.includes('预跑');
+                    });
+                    if (hit) {
+                        hit.click();
+                        return true;
+                    }
+                    return false;
+                }''')
+            else:
+                prerun_clicked = False
+        else:
+            prerun_clicked = await page.evaluate('''() => {
+                const btns = document.querySelectorAll('button');
+                for (const btn of btns) {
+                    if (btn.textContent.includes('预跑') || btn.textContent.includes('预览')) {
+                        btn.click();
+                        return true;
+                    }
+                }
+                return false;
+            }''')
+        if prerun_clicked:
+            print("      ✅ 已点击预跑")
+            results["第2步-预跑按钮"] = True
+            await wait_and_log(page, 3, "预跑执行中...")
+        else:
+            print("      ⚠️ 未找到预跑按钮")
+    except Exception as e:
+        print(f"      ⚠️ 预跑点击失败: {e}")
+
+    # 大弹窗保存分群并关闭
+    print("   ✅ 弹窗内确认保存分群...")
+    try:
+        if not results.get("第2步-主消费营运区"):
+            raise RuntimeError("主消费营运区未真正勾选，禁止确认弹窗")
+        frame_handle = await page.query_selector('iframe')
+        frame = await frame_handle.content_frame() if frame_handle else None
+        if not frame:
+            raise RuntimeError("未找到编辑分群 iframe")
+        confirmed = await frame.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const btns = Array.from(document.querySelectorAll('button')).filter(isVisible);
+            const hit = btns.find(b => ((b.textContent || '').replace(/\\s+/g, '')).includes('保存'));
+            if (hit) {
+                hit.click();
+                return true;
+            }
+            return false;
+        }""")
+        if confirmed:
+            await asyncio.sleep(1.0)
+            iframe_count_after = await page.locator("iframe").count()
+            if iframe_count_after == 0:
+                print("      ✅ 编辑分群弹窗已关闭")
+                results["第2步-弹窗确认"] = True
+            else:
+                print(f"      ⚠️ 编辑分群弹窗未关闭（iframe={iframe_count_after}）")
+        else:
+            print("      ⚠️ 未找到编辑分群弹窗保存按钮")
+    except Exception as e:
+        print(f"      ⚠️ 弹窗确认失败: {e}")
+
+    # 主页面回读：确认分群信息已带回（名称或营运区至少一项出现）
+    try:
+        await asyncio.sleep(0.8)
+        group_name_val = data.get("group_name", "")
+        area_val = data.get("main_operating_area", "")
+        main_readback_ok = await page.evaluate("""(payload) => {
+            const groupName = payload.groupName || '';
+            const areaName = payload.areaName || '';
+            const bodyText = (document.body && document.body.innerText) ? document.body.innerText : '';
+            const hasGroup = groupName ? bodyText.includes(groupName) : false;
+            const hasArea = areaName ? bodyText.includes(areaName) : false;
+            return hasGroup || hasArea;
+        }""", {"groupName": group_name_val, "areaName": area_val})
+        if main_readback_ok:
+            print("      ✅ 主页面回读通过（分群信息已带回）")
+            results["第2步-主页面回读"] = True
+        else:
+            print("      ⚠️ 主页面回读失败（未检测到分群名称/营运区）")
+    except Exception as e:
+        print(f"      ⚠️ 主页面回读异常: {e}")
+
     # 严格模式下，字段级回读失败也要终止，避免“日志看着成功”。
     if strict_step2:
-        required_keys = ["第2步-编辑按钮", "第2步-弹窗可见", "第2步-分群名称", "第2步-更新方式", "第2步-主消费营运区", "第2步-券规则ID", "第2步-弹窗确认", "第2步-主页面回读"]
+        required_keys = ["第2步-编辑按钮", "第2步-弹窗可见", "第2步-分群名称", "第2步-更新方式", "第2步-主消费营运区", "第2步-券规则ID", "第2步-预跑按钮", "第2步-弹窗确认", "第2步-主页面回读"]
         failed = [k for k in required_keys if not results.get(k, False)]
         if failed:
             raise RuntimeError(f"第2步字段回读未通过: {failed}")
     
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step2-modal-filled.png')
-    
-    # 预跑按钮
-    print("   🔍 点击预跑...")
-    try:
-        await page.evaluate('''() => {
-            const btns = document.querySelectorAll('button');
-            for (const btn of btns) {
-                if (btn.textContent.includes('预跑') || btn.textContent.includes('预览')) {
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
-        }''')
-        print("      ✅ 已点击预跑")
-        results["第2步-预跑按钮"] = True
-        await wait_and_log(page, 3, "预跑执行中...")
-    except Exception as e:
-        print(f"      ⚠️ 预跑点击失败: {e}")
     
     print("\n   ✅ 第2步完成")
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step2-after-main.png')
