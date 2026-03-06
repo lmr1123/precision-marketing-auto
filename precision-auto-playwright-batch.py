@@ -1017,23 +1017,34 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
         return False
 
     async def get_menu_checked_state(menu_index: int, target: str) -> str:
-        menu = menus.nth(menu_index)
-        nodes = menu.locator(".el-cascader-node")
-        count = await nodes.count()
-        for i in range(count):
-            node = nodes.nth(i)
-            label = node.locator(".el-cascader-node__label").first
-            if await label.count() == 0:
-                continue
-            txt = ((await label.text_content()) or "").strip()
-            if txt != target and target not in txt:
-                continue
-            checkbox = node.locator(".el-checkbox__input").first
-            if await checkbox.count() == 0:
-                return "missing"
-            cls = (await checkbox.get_attribute("class")) or ""
-            return "checked" if "is-checked" in cls else "unchecked"
-        return "not_found"
+        return str(await page.evaluate("""(payload) => {
+            const { menuIndex, target } = payload;
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const panel = Array.from(document.querySelectorAll('.el-cascader-panel')).find(isVisible);
+            if (!panel) return 'panel_not_found';
+            const menu = panel.querySelectorAll('.el-cascader-menu')[menuIndex];
+            if (!menu) return 'menu_not_found';
+            const nodes = Array.from(menu.querySelectorAll('.el-cascader-node'));
+            for (const node of nodes) {
+                const label = node.querySelector('.el-cascader-node__label');
+                const txt = (label?.textContent || '').trim();
+                if (txt !== target && !txt.includes(target)) continue;
+                const cb = node.querySelector('.el-checkbox__input');
+                if (!cb) return 'missing';
+                const nodeCls = node.className || '';
+                const cbCls = cb.className || '';
+                const input = cb.querySelector('input.el-checkbox__original');
+                const aria = (input?.getAttribute('aria-checked') || '').toLowerCase();
+                const checked = nodeCls.includes('in-checked-path') || cbCls.includes('is-checked') || aria === 'true';
+                return checked ? 'checked' : 'unchecked';
+            }
+            return 'not_found';
+        }""", {"menuIndex": menu_index, "target": target}))
 
     async def toggle_in_menu(menu_index: int, target: str) -> bool:
         # 用 JS 触发 checkbox 原生 input 和容器点击，规避点击偏移/遮挡
@@ -1084,8 +1095,9 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
             if await checkbox.count() == 0:
                 continue
             await checkbox.scroll_into_view_if_needed()
-            cls = (await checkbox.get_attribute("class")) or ""
-            if "is-checked" not in cls:
+            node_cls = (await node.get_attribute("class")) or ""
+            cb_cls = (await checkbox.get_attribute("class")) or ""
+            if ("in-checked-path" not in node_cls) and ("is-checked" not in cb_cls):
                 await checkbox.click(force=True)
                 await asyncio.sleep(0.15)
             return True
