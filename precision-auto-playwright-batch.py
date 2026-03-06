@@ -1874,7 +1874,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                         print(f"   🎫 券规则ID: {data['coupon_ids']}")
                         try:
                             coupon_val = data["coupon_ids"]
-                            coupon_ok = await frame.evaluate("""(val) => {
+                            coupon_result = await frame.evaluate("""(val) => {
                                 const isVisible = (el) => {
                                     if (!el) return false;
                                     const style = window.getComputedStyle(el);
@@ -1889,31 +1889,41 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     inp.dispatchEvent(new Event('input', { bubbles: true }));
                                     inp.dispatchEvent(new Event('keyup', { bubbles: true }));
                                     inp.dispatchEvent(new Event('change', { bubbles: true }));
+                                    inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+                                    inp.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
                                     inp.blur();
-                                    return (inp.value || '').includes(v);
+                                    return ((inp.value || '').trim());
                                 };
+                                // 优先：精准命中“券规则ID”对应的 event-row，再写入该行 box 中可见输入框
+                                const preciseRows = Array.from(document.querySelectorAll('.event-row'))
+                                    .filter(r => isVisible(r) && r.querySelector('.ant-select-selection-item[title="券规则ID"]'));
+                                for (const row of preciseRows) {
+                                    const target = Array.from(row.querySelectorAll('.box input.ant-input, .box input[type="text"], .box input'))
+                                        .find(inp => isVisible(inp) && !inp.disabled && !inp.readOnly);
+                                    if (!target) continue;
+                                    const rb = write(target, val);
+                                    return { ok: (rb === val), readback: rb || '', mode: 'precise_event_row' };
+                                }
+                                // 兜底：在含“券规则ID”文本的可见块内找最后一个可写 input
                                 const rows = Array.from(document.querySelectorAll('.event-row, .ant-row, .ant-form-item, div')).filter(isVisible);
                                 for (const row of rows) {
                                     const txt = (row.textContent || '').replace(/\\s+/g, '');
                                     if (!txt.includes('券规则ID')) continue;
                                     const inputs = Array.from(row.querySelectorAll('input.ant-input, input[type="text"], input'))
-                                        .filter(isVisible);
+                                        .filter(inp => isVisible(inp) && !inp.disabled && !inp.readOnly);
                                     const target = inputs.length ? inputs[inputs.length - 1] : null;
-                                    if (write(target, val)) return true;
+                                    if (!target) continue;
+                                    const rb = write(target, val);
+                                    return { ok: (rb === val), readback: rb || '', mode: 'fallback_row' };
                                 }
-                                const fallback = Array.from(document.querySelectorAll('input.ant-input, input[type="text"], input'))
-                                    .filter(isVisible)
-                                    .find(inp => {
-                                        const row = inp.closest('.event-row, .ant-row, .ant-form-item, div');
-                                        return row && ((row.textContent || '').replace(/\\s+/g, '')).includes('券规则ID');
-                                    });
-                                return write(fallback, val);
+                                return { ok: false, readback: '', mode: 'not_found' };
                             }""", coupon_val)
+                            coupon_ok = bool(coupon_result and coupon_result.get("ok"))
                             if coupon_ok:
                                 print("      ✅ 已填充券规则ID")
                                 results["第2步-券规则ID"] = True
                             else:
-                                print("      ⚠️ 券规则ID回读不一致")
+                                print(f"      ⚠️ 券规则ID回读不一致: mode={coupon_result.get('mode','')}, readback={coupon_result.get('readback','')}")
                         except Exception as e:
                             print(f"      ⚠️ 券规则ID填充失败: {e}")
 
