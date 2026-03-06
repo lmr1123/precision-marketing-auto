@@ -1557,11 +1557,11 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         if (typeof el.click === 'function') el.click();
                                     };
                                     const node = findNode();
-                                    if (!node) return 'not_found';
+                                    if (!node) return { status: 'not_found', matched: false };
                                     node.scrollIntoView({ block: 'center' });
                                     const checkbox = node.querySelector('.ant-tree-checkbox');
-                                    if (!checkbox) return 'checkbox_not_found';
-                                    if (checkbox.classList.contains('ant-tree-checkbox-checked')) return 'already_checked';
+                                    if (!checkbox) return { status: 'checkbox_not_found', matched: true };
+                                    if (checkbox.classList.contains('ant-tree-checkbox-checked')) return { status: 'already_checked', matched: true };
                                     fireClick(checkbox);
                                     if (!checkbox.classList.contains('ant-tree-checkbox-checked')) {
                                         const inner = checkbox.querySelector('.ant-tree-checkbox-inner');
@@ -1571,13 +1571,21 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         const titleWrap = node.querySelector('.ant-tree-node-content-wrapper');
                                         fireClick(titleWrap);
                                     }
-                                    return checkbox.classList.contains('ant-tree-checkbox-checked') ? 'checked' : 'click_no_effect';
+                                    return {
+                                        status: checkbox.classList.contains('ant-tree-checkbox-checked') ? 'checked' : 'click_no_effect',
+                                        matched: true
+                                    };
                                 }
                                 """
-                                selected = await frame.evaluate(js_find_node)
+                                selected_result = await frame.evaluate(js_find_node)
+                                selected = selected_result.get('status') if isinstance(selected_result, dict) else selected_result
+                                matched_area_node = bool(selected_result.get('matched')) if isinstance(selected_result, dict) else selected in ['checked', 'already_checked', 'click_no_effect', 'checkbox_not_found']
                                 
-                                if selected in ['checked', 'already_checked']:
-                                    print(f"      ✅ 已选择营运区: {area}")
+                                if matched_area_node:
+                                    if selected in ['checked', 'already_checked']:
+                                        print(f"      ✅ 已选择营运区: {area}")
+                                    else:
+                                        print(f"      ⚠️ 营运区勾选状态未确认，继续尝试小弹窗确定并用已选条数校验: {area} ({selected})")
                                     # 只关闭“选择数据”小弹窗，不关闭“编辑分群”大弹窗。
                                     confirm_area_result = await frame.evaluate("""() => {
                                         const norm = (s) => (s || '').replace(/\\s+/g, '');
@@ -1640,7 +1648,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     picker_still_visible = bool(confirm_area_result.get("pickerStillVisible"))
                                     before_num = int(re.search(r'(\d+)', before_selected_count).group(1)) if before_selected_count and re.search(r'(\d+)', before_selected_count) else -1
                                     after_num = int(re.search(r'(\d+)', selected_count_text).group(1)) if selected_count_text and re.search(r'(\d+)', selected_count_text) else -1
-                                    count_changed = after_num > before_num or (selected == 'already_checked' and after_num > 0)
+                                    count_changed = after_num > before_num or (selected in ['already_checked', 'click_no_effect'] and after_num > 0)
                                     if confirm_area_result.get("ok") and not picker_still_visible and selected_count_text and count_changed:
                                         print(f"      ✅ 营运区已确认: {selected_count_text}")
                                         results["第2步-主消费营运区"] = True
@@ -1658,7 +1666,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 # 兜底2：某些页面树已默认展开，直接尝试勾选
                                 print("      ⚠️ 未找到选择数据按钮，尝试直接在当前树中勾选...")
                                 area = data['main_operating_area']
-                                selected_direct = await frame.evaluate("""
+                                selected_direct_result = await frame.evaluate("""
                                 () => {
                                     const targetArea = '""" + area_escaped + """';
                                     const isVisible = (el) => {
@@ -1677,7 +1685,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         .filter(x => x.hasTree)
                                         .sort((a, b) => a.area - b.area);
                                     const pickerModal = modalCandidates.length ? modalCandidates[0].el : null;
-                                    if (!pickerModal) return 'picker_modal_not_found';
+                                    if (!pickerModal) return { status: 'picker_modal_not_found', matched: false };
                                     const fireClick = (el) => {
                                         if (!el) return;
                                         ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
@@ -1692,7 +1700,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         if (!(txt === targetArea || txt.includes(targetArea))) continue;
                                         n.scrollIntoView({ block: 'center' });
                                         const cb = n.querySelector('.ant-tree-checkbox');
-                                        if (!cb) return 'checkbox_not_found';
+                                        if (!cb) return { status: 'checkbox_not_found', matched: true };
                                         if (!cb.classList.contains('ant-tree-checkbox-checked')) {
                                             fireClick(cb);
                                             if (!cb.classList.contains('ant-tree-checkbox-checked')) {
@@ -1704,13 +1712,21 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                                 fireClick(titleWrap);
                                             }
                                         }
-                                        return cb.classList.contains('ant-tree-checkbox-checked') ? 'checked' : 'click_no_effect';
+                                        return {
+                                            status: cb.classList.contains('ant-tree-checkbox-checked') ? 'checked' : 'click_no_effect',
+                                            matched: true
+                                        };
                                     }
-                                    return 'not_found';
+                                    return { status: 'not_found', matched: false };
                                 }
                                 """)
-                                if selected_direct == "checked":
-                                    print(f"      ✅ 已直接勾选营运区: {area}")
+                                selected_direct = selected_direct_result.get('status') if isinstance(selected_direct_result, dict) else selected_direct_result
+                                matched_direct_area_node = bool(selected_direct_result.get('matched')) if isinstance(selected_direct_result, dict) else selected_direct == "checked"
+                                if matched_direct_area_node:
+                                    if selected_direct == "checked":
+                                        print(f"      ✅ 已直接勾选营运区: {area}")
+                                    else:
+                                        print(f"      ⚠️ 直接勾选状态未确认，继续尝试小弹窗确定并用已选条数校验: {area} ({selected_direct})")
                                     before_selected_count = await frame.evaluate("""() => {
                                         const isVisible = (el) => {
                                             if (!el) return false;
