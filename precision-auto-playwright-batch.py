@@ -1124,7 +1124,7 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
         selected[rt] = await check_in_menu(1, rt)
 
     # 再跨大区选省区目标（例如湖北省区）
-    region_nodes = menus.nth(1).locator(".el-cascader-node .el-cascader-node__label")
+    region_nodes = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(1).locator(".el-cascader-node .el-cascader-node__label")
     region_count = await region_nodes.count()
     region_names = []
     for i in range(region_count):
@@ -1141,7 +1141,13 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
                 selected[pt] = True
 
     selected_labels = await page.evaluate("""() => {
-        const panel = document.querySelector('.el-cascader-panel');
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        };
+        const panel = Array.from(document.querySelectorAll('.el-cascader-panel')).find(isVisible);
         if (!panel) return [];
         const checked = Array.from(panel.querySelectorAll('.el-checkbox__input.is-checked'));
         return checked.map(c => {
