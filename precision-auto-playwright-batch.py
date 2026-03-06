@@ -389,44 +389,27 @@ def sanitize_sms_content(content: str) -> str:
 async def fill_step3_end_time(page, end_time: str) -> bool:
     """第3步结束时间：填入并确认日期面板。"""
     date_part, _ = split_datetime(end_time)
-    item = page.locator(".item", has_text="结束时间").first
-    input_el = None
-    if await item.count() > 0:
-        cand = item.locator('input[placeholder*="结束"], input[placeholder*="请选择结束"], input[placeholder*="日期"], input.el-input__inner, input').first
-        if await cand.count() > 0:
-            input_el = cand
-
-    # 兜底1：全局可见 placeholder
-    if input_el is None:
-        cand = page.locator('input[placeholder*="请选择结束日期"], input[placeholder*="结束日期"], input[placeholder*="请选择结束"]').first
-        if await cand.count() > 0:
-            input_el = cand
-
-    # 兜底2：按“结束时间”文本就近寻找 input
-    if input_el is None:
-        ok = await page.evaluate("""() => {
-            const isVisible = (el) => {
-                if (!el) return false;
-                const style = window.getComputedStyle(el);
-                const rect = el.getBoundingClientRect();
-                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-            };
-            const labels = Array.from(document.querySelectorAll('span,label,div')).filter(n => /结束时间/.test((n.textContent||'')));
-            for (const l of labels) {
-                const scope = l.closest('.item, .el-form-item, .ant-form-item') || l.parentElement;
-                if (!scope) continue;
-                const inp = scope.querySelector('input[placeholder*="结束"], input[placeholder*="日期"], input.el-input__inner');
-                if (inp && isVisible(inp)) {
-                    inp.setAttribute('data-step3-endtime-target', '1');
-                    return true;
-                }
+    ok = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
+        for (const it of items) {
+            const txt = (it.textContent || '').replace(/\\s+/g, '');
+            if (!txt.includes('结束时间')) continue;
+            const inp = Array.from(it.querySelectorAll('input'))
+                .find(i => isVisible(i) && /结束|日期/.test((i.getAttribute('placeholder') || '') + ' ' + (i.className || '')));
+            if (inp) {
+                inp.setAttribute('data-step3-endtime-target', '1');
+                return true;
             }
-            return false;
-        }""")
-        if ok:
-            cand = page.locator('input[data-step3-endtime-target="1"]').first
-            if await cand.count() > 0:
-                input_el = cand
+        }
+        return false;
+    }""")
+    input_el = page.locator('input[data-step3-endtime-target="1"]').first if ok else None
 
     if input_el is None:
         debug = await page.evaluate("""() => {
@@ -518,12 +501,29 @@ async def fill_step3_end_time(page, end_time: str) -> bool:
 
 async def fill_step3_send_content(page, content: str) -> bool:
     """第3步发送内容：固定写入“发送内容”对应编辑器，并清除默认值。"""
-    item = page.locator('.item', has=page.locator('span.label', has_text='发送内容')).first
-    if await item.count() == 0:
-        item = page.locator('.item', has_text='发送内容').first
-        if await item.count() == 0:
-            return False
-    editable = item.locator('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]').first
+    ok = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
+        for (const it of items) {
+            const txt = (it.textContent || '').replace(/\\s+/g, '');
+            if (!txt.includes('发送内容')) continue;
+            const ed = Array.from(it.querySelectorAll('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]'))
+                .find(isVisible);
+            if (ed) {
+                ed.setAttribute('data-step3-send-target', '1');
+                return true;
+            }
+        }
+        return false;
+    }""")
+    if not ok:
+        return False
+    editable = page.locator('[data-step3-send-target="1"]').first
     if await editable.count() == 0:
         return False
     try:
@@ -565,12 +565,29 @@ async def fill_step3_send_content(page, content: str) -> bool:
 
 async def fill_step3_sms_content(page, content: str) -> bool:
     """第3步短信内容：固定写入“短信内容(必填)”对应编辑器，并校验长度>0。"""
-    item = page.locator('.item', has=page.locator('span.label.required', has_text='短信内容')).first
-    if await item.count() == 0:
-        item = page.locator('.item', has_text='短信内容').first
-        if await item.count() == 0:
-            return False
-    editable = item.locator('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]').first
+    ok = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
+        for (const it of items) {
+            const txt = (it.textContent || '').replace(/\\s+/g, '');
+            if (!txt.includes('短信内容')) continue;
+            const ed = Array.from(it.querySelectorAll('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]'))
+                .find(isVisible);
+            if (ed) {
+                ed.setAttribute('data-step3-sms-target', '1');
+                return true;
+            }
+        }
+        return false;
+    }""")
+    if not ok:
+        return False
+    editable = page.locator('[data-step3-sms-target="1"]').first
     if await editable.count() == 0:
         return False
     try:
@@ -603,7 +620,7 @@ async def fill_step3_sms_content(page, content: str) -> bool:
         return False
     # 结合长度控件做二次校验（如果存在）
     try:
-        length_el = item.locator(".length").first
+        length_el = page.locator('[data-step3-sms-target="1"]').locator('xpath=ancestor::*[contains(@class,"item")][1]').locator(".length").first
         if await length_el.count() > 0:
             length_text = ((await length_el.text_content()) or "").strip()
             m = re.search(r"(\\d+)\\s*/", length_text)
@@ -838,12 +855,29 @@ async def copy_channel_info_if_available(page) -> bool:
 async def read_step3_sms_text(page) -> str:
     """读取第3步短信内容编辑器文本（用于保存前后回读）。"""
     try:
-        item = page.locator('.item', has=page.locator('span.label.required', has_text='短信内容')).first
-        if await item.count() == 0:
-            item = page.locator('.item', has_text='短信内容').first
-            if await item.count() == 0:
-                return ""
-        editable = item.locator('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]').first
+        ok = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
+            for (const it of items) {
+                const txt = (it.textContent || '').replace(/\\s+/g, '');
+                if (!txt.includes('短信内容')) continue;
+                const ed = Array.from(it.querySelectorAll('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]'))
+                    .find(isVisible);
+                if (ed) {
+                    ed.setAttribute('data-step3-sms-target', '1');
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        if not ok:
+            return ""
+        editable = page.locator('[data-step3-sms-target="1"]').first
         if await editable.count() == 0:
             return ""
         txt = (await editable.inner_text()) or ""
@@ -854,12 +888,29 @@ async def read_step3_sms_text(page) -> str:
 async def read_step3_send_text(page) -> str:
     """读取第3步发送内容编辑器文本。"""
     try:
-        item = page.locator('.item', has=page.locator('span.label', has_text='发送内容')).first
-        if await item.count() == 0:
-            item = page.locator('.item', has_text='发送内容').first
-            if await item.count() == 0:
-                return ""
-        editable = item.locator('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]').first
+        ok = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
+            for (const it of items) {
+                const txt = (it.textContent || '').replace(/\\s+/g, '');
+                if (!txt.includes('发送内容')) continue;
+                const ed = Array.from(it.querySelectorAll('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]'))
+                    .find(isVisible);
+                if (ed) {
+                    ed.setAttribute('data-step3-send-target', '1');
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        if not ok:
+            return ""
+        editable = page.locator('[data-step3-send-target="1"]').first
         if await editable.count() == 0:
             return ""
         txt = (await editable.inner_text()) or ""
@@ -1975,6 +2026,31 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     print("="*50)
     
     await wait_and_log(page, 2, "等待第3步加载...")
+    await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        return new Promise((resolve) => {
+            const started = Date.now();
+            const tick = () => {
+                const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
+                const text = items.map(n => n.textContent || '').join(' ');
+                if (text.includes('短信内容') || text.includes('发送内容') || text.includes('结束时间')) {
+                    resolve(true);
+                    return;
+                }
+                if (Date.now() - started > 6000) {
+                    resolve(false);
+                    return;
+                }
+                setTimeout(tick, 200);
+            };
+            tick();
+        });
+    }""")
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step3-before.png')
     
     results = {}
