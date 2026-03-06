@@ -1695,7 +1695,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         return hit ? (hit.textContent || '').trim() : '';
                                     }""")
                                     picker_still_visible = bool(confirm_area_result.get("pickerStillVisible"))
-                                    if confirm_area_result.get("ok") and selected_count_text:
+                                    selected_num = int(re.search(r'(\d+)', selected_count_text).group(1)) if selected_count_text and re.search(r'(\d+)', selected_count_text) else 0
+                                    if confirm_area_result.get("ok") and selected_num > 0:
                                         print(f"      ✅ 营运区已确认: {selected_count_text}")
                                         if picker_still_visible:
                                             print("      ⚠️ 选择数据弹窗关闭状态未可靠识别，当前按已点击“确定”且已回读到已选条数放行")
@@ -1706,7 +1707,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             f"reason={confirm_area_result.get('reason','')}, "
                                             f"pickerStillVisible={picker_still_visible}, "
                                             f"selectedCountBefore={before_selected_count}, "
-                                            f"selectedCountAfter={selected_count_text or confirm_area_result.get('selectedCount','')}"
+                                            f"selectedCountAfter={selected_count_text or confirm_area_result.get('selectedCount','')}, "
+                                            f"selectedNum={selected_num}"
                                         )
                                 else:
                                     print(f"      ⚠️ 营运区勾选失败: {area} ({selected})")
@@ -1851,7 +1853,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         return hit ? (hit.textContent || '').trim() : '';
                                     }""")
                                     picker_still_visible = bool(confirm_area_result.get("pickerStillVisible"))
-                                    if confirm_area_result.get("ok") and selected_count_text:
+                                    selected_num = int(re.search(r'(\d+)', selected_count_text).group(1)) if selected_count_text and re.search(r'(\d+)', selected_count_text) else 0
+                                    if confirm_area_result.get("ok") and selected_num > 0:
                                         print(f"      ✅ 营运区已确认: {selected_count_text}")
                                         if picker_still_visible:
                                             print("      ⚠️ 选择数据弹窗关闭状态未可靠识别，当前按已点击“确定”且已回读到已选条数放行")
@@ -1862,7 +1865,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             f"reason={confirm_area_result.get('reason','')}, "
                                             f"pickerStillVisible={picker_still_visible}, "
                                             f"selectedCountBefore={before_selected_count}, "
-                                            f"selectedCountAfter={selected_count_text or confirm_area_result.get('selectedCount','')}"
+                                            f"selectedCountAfter={selected_count_text or confirm_area_result.get('selectedCount','')}, "
+                                            f"selectedNum={selected_num}"
                                         )
                                 else:
                                     print(f"      ⚠️ 直接勾选失败: {selected_direct}，请检查第2步页面是否空白/未加载完整")
