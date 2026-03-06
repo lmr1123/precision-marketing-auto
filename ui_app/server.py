@@ -393,8 +393,6 @@ UI_HTML = """
           <label>浏览器调试地址: <input id="cdp_endpoint" value="http://127.0.0.1:18800" style="width:220px"/></label>
           <label title="开启后，第2步关键字段校验失败会立刻中断，建议联调用开，正式批量可关"><input id="strict_step2" type="checkbox" checked/> 严格校验第2步（推荐）</label>
           <label>并发任务数 <input id="concurrent" type="number" min="1" value="1" style="width:70px"/></label>
-          <label>从第几行开始 <input id="start" type="number" min="1" style="width:90px"/></label>
-          <label>到第几行结束 <input id="end" type="number" min="1" style="width:90px"/></label>
           <label>结束后保留浏览器(秒) <input id="hold_seconds" type="number" min="0" value="2" style="width:70px"/></label>
           <button onclick="upload()">上传并开始执行</button>
           <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
@@ -437,8 +435,8 @@ async function upload(){
   fd.append('strict_step2', document.getElementById('strict_step2').checked ? 'true' : 'false');
   fd.append('skip_step2', 'false');
   fd.append('concurrent', document.getElementById('concurrent').value || '1');
-  fd.append('start', document.getElementById('start').value || '');
-  fd.append('end', document.getElementById('end').value || '');
+  fd.append('start', '');
+  fd.append('end', '');
   fd.append('hold_seconds', document.getElementById('hold_seconds').value || '2');
   const r = await fetch('/api/tasks/upload', {method:'POST', body:fd});
   if(!r.ok){ alert(await r.text()); return; }
