@@ -962,49 +962,79 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
     menus = panel.locator(".el-cascader-menu")
 
     async def expand_in_menu(menu_index: int, target: str) -> bool:
-        menu = menus.nth(menu_index)
-        nodes = menu.locator(".el-cascader-node")
-        count = await nodes.count()
-        for i in range(count):
-            node = nodes.nth(i)
-            label = node.locator(".el-cascader-node__label").first
-            if await label.count() == 0:
-                continue
-            txt = ((await label.text_content()) or "").strip()
-            if txt != target and target not in txt:
-                continue
-            await node.scroll_into_view_if_needed()
-            postfix = node.locator(".el-cascader-node__postfix").first
-            if await postfix.count() > 0:
-                await postfix.click(force=True)
-                await asyncio.sleep(0.2)
-                return True
-            return False
-        return False
+        return await page.evaluate("""(payload) => {
+            const { menuIndex, target } = payload;
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const fireClick = (el) => {
+                if (!el) return false;
+                ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
+                    el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                });
+                if (typeof el.click === 'function') el.click();
+                return true;
+            };
+            const panel = document.querySelector('.el-cascader-panel');
+            if (!panel || !isVisible(panel)) return false;
+            const menu = panel.querySelectorAll('.el-cascader-menu')[menuIndex];
+            if (!menu) return false;
+            const nodes = Array.from(menu.querySelectorAll('.el-cascader-node'));
+            for (const node of nodes) {
+                const label = node.querySelector('.el-cascader-node__label');
+                const txt = (label?.textContent || '').trim();
+                if (txt !== target && !txt.includes(target)) continue;
+                node.scrollIntoView({ block: 'center' });
+                const postfix = node.querySelector('.el-cascader-node__postfix');
+                if (!postfix) return false;
+                fireClick(postfix);
+                return true;
+            }
+            return false;
+        }""", {"menuIndex": menu_index, "target": target})
 
     async def check_in_menu(menu_index: int, target: str) -> bool:
-        menu = menus.nth(menu_index)
-        nodes = menu.locator(".el-cascader-node")
-        count = await nodes.count()
-        for i in range(count):
-            node = nodes.nth(i)
-            label = node.locator(".el-cascader-node__label").first
-            if await label.count() == 0:
-                continue
-            txt = ((await label.text_content()) or "").strip()
-            if txt != target and target not in txt:
-                continue
-            await node.scroll_into_view_if_needed()
-            checkbox = node.locator(".el-checkbox__input").first
-            if await checkbox.count() == 0:
-                continue
-            cls = (await checkbox.get_attribute("class")) or ""
-            if "is-checked" not in cls:
-                await checkbox.click(force=True)
-                await asyncio.sleep(0.15)
-                cls = (await checkbox.get_attribute("class")) or ""
-            return "is-checked" in cls
-        return False
+        return await page.evaluate("""(payload) => {
+            const { menuIndex, target } = payload;
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const fireClick = (el) => {
+                if (!el) return false;
+                ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
+                    el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                });
+                if (typeof el.click === 'function') el.click();
+                return true;
+            };
+            const panel = document.querySelector('.el-cascader-panel');
+            if (!panel || !isVisible(panel)) return false;
+            const menu = panel.querySelectorAll('.el-cascader-menu')[menuIndex];
+            if (!menu) return false;
+            const nodes = Array.from(menu.querySelectorAll('.el-cascader-node'));
+            for (const node of nodes) {
+                const label = node.querySelector('.el-cascader-node__label');
+                const txt = (label?.textContent || '').trim();
+                if (txt !== target && !txt.includes(target)) continue;
+                node.scrollIntoView({ block: 'center' });
+                const cb = node.querySelector('.el-checkbox__input');
+                if (!cb) return false;
+                if (!cb.classList.contains('is-checked')) {
+                    fireClick(cb);
+                    if (!cb.classList.contains('is-checked')) {
+                        fireClick(cb.querySelector('.el-checkbox__inner'));
+                    }
+                }
+                return cb.classList.contains('is-checked');
+            }
+            return false;
+        }""", {"menuIndex": menu_index, "target": target})
 
     # 展开全国，显示大区列
     await expand_in_menu(0, "全国")
