@@ -939,6 +939,22 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
     if not targets:
         return True
 
+    # 兼容小窗口/浏览器缩放场景，尽量把级联面板恢复到可操作尺寸。
+    try:
+        await page.set_viewport_size({"width": 1600, "height": 950})
+    except Exception:
+        pass
+    try:
+        await page.evaluate("""() => {
+            try {
+                document.documentElement.style.zoom = '100%';
+                document.body.style.zoom = '100%';
+            } catch (e) {}
+            try { window.scrollTo(0, 0); } catch (e) {}
+        }""")
+    except Exception:
+        pass
+
     opened = await page.evaluate("""() => {
         const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
         for (const label of labels) {
@@ -962,27 +978,34 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
     menus = panel.locator(".el-cascader-menu")
 
     async def expand_in_menu(menu_index: int, target: str) -> bool:
-        menu = menus.nth(menu_index)
-        nodes = menu.locator(".el-cascader-node")
-        count = await nodes.count()
-        for i in range(count):
-            node = nodes.nth(i)
-            label = node.locator(".el-cascader-node__label").first
-            if await label.count() == 0:
-                continue
-            txt = ((await label.text_content()) or "").strip()
-            if txt != target and target not in txt:
-                continue
-            await label.scroll_into_view_if_needed()
-            postfix = node.locator(".el-cascader-node__postfix").first
-            if await postfix.count() > 0:
-                await postfix.hover()
-                await postfix.click(force=True)
-            else:
-                await label.hover()
-            await asyncio.sleep(0.2)
-            return True
-        return False
+        return bool(await page.evaluate(
+            """({ menuIndex, target }) => {
+                const panel = document.querySelector('.el-cascader-panel');
+                if (!panel) return false;
+                const menus = panel.querySelectorAll('.el-cascader-menu');
+                const menu = menus[menuIndex];
+                if (!menu) return false;
+                const fireClick = (el) => {
+                    if (!el) return;
+                    ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
+                        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                    });
+                    if (typeof el.click === 'function') el.click();
+                };
+                const nodes = Array.from(menu.querySelectorAll('.el-cascader-node'));
+                for (const node of nodes) {
+                    const label = node.querySelector('.el-cascader-node__label');
+                    const txt = (label?.textContent || '').trim();
+                    if (!(txt === target || txt.includes(target))) continue;
+                    node.scrollIntoView({ block: 'center', inline: 'nearest' });
+                    const postfix = node.querySelector('.el-cascader-node__postfix');
+                    fireClick(postfix || label || node);
+                    return true;
+                }
+                return false;
+            }""",
+            {"menuIndex": menu_index, "target": target}
+        ))
 
     async def check_in_menu(menu_index: int, target: str) -> bool:
         menu = menus.nth(menu_index)
