@@ -1562,8 +1562,9 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         }
                                         btn.click();
                                         const pickerStillVisible = isVisible(pickerModal);
-                                        const countNode = Array.from(document.querySelectorAll('div, span'))
+                                        const countNode = Array.from(document.querySelectorAll('.condition, .box, .ant-form-item, div'))
                                             .filter(isVisible)
+                                            .map(node => node.querySelector('.ml-2') || node)
                                             .find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
                                         return {
                                             ok: true,
@@ -1579,7 +1580,11 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             const rect = el.getBoundingClientRect();
                                             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
                                         };
-                                        const nodes = Array.from(document.querySelectorAll('div, span')).filter(isVisible);
+                                        const button = Array.from(document.querySelectorAll('button.ant-btn.ant-btn-primary'))
+                                            .filter(isVisible)
+                                            .find(b => ((b.textContent || '').replace(/\\s+/g, '')).includes('选择数据'));
+                                        const scope = button ? (button.closest('.condition__right, .condition, .box') || button.parentElement) : document;
+                                        const nodes = Array.from(scope.querySelectorAll('.ml-2, div, span')).filter(isVisible);
                                         const hit = nodes.find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
                                         return hit ? (hit.textContent || '').trim() : '';
                                     }""")
@@ -1656,8 +1661,9 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         }
                                         btn.click();
                                         const pickerStillVisible = isVisible(pickerModal);
-                                        const countNode = Array.from(document.querySelectorAll('div, span'))
+                                        const countNode = Array.from(document.querySelectorAll('.condition, .box, .ant-form-item, div'))
                                             .filter(isVisible)
+                                            .map(node => node.querySelector('.ml-2') || node)
                                             .find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
                                         return {
                                             ok: true,
@@ -1673,7 +1679,11 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             const rect = el.getBoundingClientRect();
                                             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
                                         };
-                                        const nodes = Array.from(document.querySelectorAll('div, span')).filter(isVisible);
+                                        const button = Array.from(document.querySelectorAll('button.ant-btn.ant-btn-primary'))
+                                            .filter(isVisible)
+                                            .find(b => ((b.textContent || '').replace(/\\s+/g, '')).includes('选择数据'));
+                                        const scope = button ? (button.closest('.condition__right, .condition, .box') || button.parentElement) : document;
+                                        const nodes = Array.from(scope.querySelectorAll('.ml-2, div, span')).filter(isVisible);
                                         const hit = nodes.find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
                                         return hit ? (hit.textContent || '').trim() : '';
                                     }""")
