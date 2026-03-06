@@ -1514,11 +1514,15 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     };
                                     const node = findNode();
                                     if (!node) return 'not_found';
-                                    const checkbox = node.querySelector('.ant-checkbox');
+                                    const checkbox = node.querySelector('.ant-tree-checkbox');
                                     if (!checkbox) return 'checkbox_not_found';
-                                    if (checkbox.classList.contains('ant-checkbox-checked')) return 'already_checked';
+                                    if (checkbox.classList.contains('ant-tree-checkbox-checked')) return 'already_checked';
                                     checkbox.click();
-                                    return checkbox.classList.contains('ant-checkbox-checked') ? 'checked' : 'click_no_effect';
+                                    if (!checkbox.classList.contains('ant-tree-checkbox-checked')) {
+                                        const inner = checkbox.querySelector('.ant-tree-checkbox-inner');
+                                        if (inner) inner.click();
+                                    }
+                                    return checkbox.classList.contains('ant-tree-checkbox-checked') ? 'checked' : 'click_no_effect';
                                 }
                                 """
                                 selected = await frame.evaluate(js_find_node)
@@ -1541,8 +1545,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
                                             const txt = (title?.textContent || '').trim();
                                             if (!txt.includes(areaName)) continue;
-                                            const cb = n.querySelector('.ant-checkbox');
-                                            if (cb && cb.classList.contains('ant-checkbox-checked')) return true;
+                                            const cb = n.querySelector('.ant-tree-checkbox');
+                                            if (cb && cb.classList.contains('ant-tree-checkbox-checked')) return true;
                                         }
                                         return false;
                                     }""", area)
@@ -1564,10 +1568,16 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
                                         const txt = (title?.textContent || '').trim();
                                         if (!txt.includes(targetArea)) continue;
-                                        const cb = n.querySelector('.ant-checkbox');
+                                        const cb = n.querySelector('.ant-tree-checkbox');
                                         if (!cb) return 'checkbox_not_found';
-                                        if (!cb.classList.contains('ant-checkbox-checked')) cb.click();
-                                        return cb.classList.contains('ant-checkbox-checked') ? 'checked' : 'click_no_effect';
+                                        if (!cb.classList.contains('ant-tree-checkbox-checked')) {
+                                            cb.click();
+                                            if (!cb.classList.contains('ant-tree-checkbox-checked')) {
+                                                const inner = cb.querySelector('.ant-tree-checkbox-inner');
+                                                if (inner) inner.click();
+                                            }
+                                        }
+                                        return cb.classList.contains('ant-tree-checkbox-checked') ? 'checked' : 'click_no_effect';
                                     }
                                     return 'not_found';
                                 }
@@ -1581,8 +1591,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
                                             const txt = (title?.textContent || '').trim();
                                             if (!txt.includes(areaName)) continue;
-                                            const cb = n.querySelector('.ant-checkbox');
-                                            if (cb && cb.classList.contains('ant-checkbox-checked')) return true;
+                                            const cb = n.querySelector('.ant-tree-checkbox');
+                                            if (cb && cb.classList.contains('ant-tree-checkbox-checked')) return true;
                                         }
                                         return false;
                                     }""", area)
