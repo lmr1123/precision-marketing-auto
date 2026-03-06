@@ -1016,7 +1016,7 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
             return True
         return False
 
-    async def uncheck_in_menu(menu_index: int, target: str) -> bool:
+    async def toggle_in_menu(menu_index: int, target: str) -> bool:
         menu = menus.nth(menu_index)
         nodes = menu.locator(".el-cascader-node")
         count = await nodes.count()
@@ -1032,12 +1032,9 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
             if await checkbox.count() == 0:
                 return False
             await checkbox.scroll_into_view_if_needed()
-            cls = (await checkbox.get_attribute("class")) or ""
-            if "is-checked" in cls:
-                await checkbox.click(force=True)
-                await asyncio.sleep(0.15)
-                cls = (await checkbox.get_attribute("class")) or ""
-            return "is-checked" not in cls
+            await checkbox.click(force=True)
+            await asyncio.sleep(0.15)
+            return True
         return False
 
     async def check_in_menu(menu_index: int, target: str) -> bool:
@@ -1063,8 +1060,11 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
             return True
         return False
 
-    # 先取消“全国”默认勾选，再点全国展开大区列
-    await uncheck_in_menu(0, "全国")
+    # 先按业务规则双击“全国”：第一次全选，第二次清空。
+    await toggle_in_menu(0, "全国")
+    await toggle_in_menu(0, "全国")
+    await asyncio.sleep(0.2)
+    # 再点全国展开大区列
     await expand_in_menu(0, "全国")
 
     selected = {t: False for t in targets}
