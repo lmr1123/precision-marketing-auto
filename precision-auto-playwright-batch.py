@@ -958,6 +958,23 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
         return False
     await asyncio.sleep(0.3)
 
+    # 先清空“执行员工”字段已有选择，避免残留“全国”导致目标选择失效。
+    await page.evaluate("""() => {
+        const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
+        for (const label of labels) {
+            const txt = (label.textContent || '').replace(/\\s+/g, '');
+            if (!txt.includes('执行员工')) continue;
+            const item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
+            if (!item) continue;
+            const closes = Array.from(item.querySelectorAll('.el-tag__close'));
+            for (const c of closes) c.click();
+            const input = item.querySelector('input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"], .el-cascader input.el-input__inner');
+            if (input) input.click();
+            return;
+        }
+    }""")
+    await asyncio.sleep(0.25)
+
     panel = page.locator(".el-cascader-panel:visible").first
     menus = panel.locator(".el-cascader-menu")
 
@@ -1036,7 +1053,47 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
             return false;
         }""", {"menuIndex": menu_index, "target": target})
 
+    async def uncheck_in_menu(menu_index: int, target: str) -> bool:
+        return await page.evaluate("""(payload) => {
+            const { menuIndex, target } = payload;
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const fireClick = (el) => {
+                if (!el) return false;
+                ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
+                    el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                });
+                if (typeof el.click === 'function') el.click();
+                return true;
+            };
+            const panel = document.querySelector('.el-cascader-panel');
+            if (!panel || !isVisible(panel)) return false;
+            const menu = panel.querySelectorAll('.el-cascader-menu')[menuIndex];
+            if (!menu) return false;
+            const nodes = Array.from(menu.querySelectorAll('.el-cascader-node'));
+            for (const node of nodes) {
+                const label = node.querySelector('.el-cascader-node__label');
+                const txt = (label?.textContent || '').trim();
+                if (txt !== target && !txt.includes(target)) continue;
+                const cb = node.querySelector('.el-checkbox__input');
+                if (!cb) return false;
+                if (cb.classList.contains('is-checked')) {
+                    fireClick(cb);
+                    if (cb.classList.contains('is-checked')) {
+                        fireClick(cb.querySelector('.el-checkbox__inner'));
+                    }
+                }
+                return !cb.classList.contains('is-checked');
+            }
+            return false;
+        }""", {"menuIndex": menu_index, "target": target})
+
     # 展开全国，显示大区列
+    await uncheck_in_menu(0, "全国")
     await expand_in_menu(0, "全国")
 
     selected = {t: False for t in targets}
