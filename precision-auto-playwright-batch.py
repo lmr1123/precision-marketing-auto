@@ -1518,8 +1518,30 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 js_find_node = """
                                 () => {
                                     const targetArea = '""" + area + """';
-                                    const nodes = Array.from(document.querySelectorAll('.ant-tree-treenode'));
+                                    const isVisible = (el) => {
+                                        if (!el) return false;
+                                        const style = window.getComputedStyle(el);
+                                        const rect = el.getBoundingClientRect();
+                                        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                                    };
+                                    const modalCandidates = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root'))
+                                        .filter(isVisible)
+                                        .map(el => ({
+                                            el,
+                                            area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+                                            hasTree: !!el.querySelector('.ant-tree, .ant-tree-list-holder-inner'),
+                                        }))
+                                        .filter(x => x.hasTree)
+                                        .sort((a, b) => a.area - b.area);
+                                    const pickerModal = modalCandidates.length ? modalCandidates[0].el : null;
+                                    if (!pickerModal) return 'picker_modal_not_found';
+                                    const nodes = Array.from(pickerModal.querySelectorAll('.ant-tree-treenode'));
                                     const findNode = () => {
+                                        for (const n of nodes) {
+                                            const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
+                                            const txt = (title?.textContent || '').trim();
+                                            if (txt === targetArea) return n;
+                                        }
                                         for (const n of nodes) {
                                             const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
                                             const txt = (title?.textContent || '').trim();
@@ -1527,15 +1549,27 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         }
                                         return null;
                                     };
+                                    const fireClick = (el) => {
+                                        if (!el) return;
+                                        ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
+                                            el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                                        });
+                                        if (typeof el.click === 'function') el.click();
+                                    };
                                     const node = findNode();
                                     if (!node) return 'not_found';
+                                    node.scrollIntoView({ block: 'center' });
                                     const checkbox = node.querySelector('.ant-tree-checkbox');
                                     if (!checkbox) return 'checkbox_not_found';
                                     if (checkbox.classList.contains('ant-tree-checkbox-checked')) return 'already_checked';
-                                    checkbox.click();
+                                    fireClick(checkbox);
                                     if (!checkbox.classList.contains('ant-tree-checkbox-checked')) {
                                         const inner = checkbox.querySelector('.ant-tree-checkbox-inner');
-                                        if (inner) inner.click();
+                                        fireClick(inner);
+                                    }
+                                    if (!checkbox.classList.contains('ant-tree-checkbox-checked')) {
+                                        const titleWrap = node.querySelector('.ant-tree-node-content-wrapper');
+                                        fireClick(titleWrap);
                                     }
                                     return checkbox.classList.contains('ant-tree-checkbox-checked') ? 'checked' : 'click_no_effect';
                                 }
@@ -1627,18 +1661,47 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 selected_direct = await frame.evaluate("""
                                 () => {
                                     const targetArea = '""" + area_escaped + """';
-                                    const nodes = Array.from(document.querySelectorAll('.ant-tree-treenode'));
+                                    const isVisible = (el) => {
+                                        if (!el) return false;
+                                        const style = window.getComputedStyle(el);
+                                        const rect = el.getBoundingClientRect();
+                                        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                                    };
+                                    const modalCandidates = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root'))
+                                        .filter(isVisible)
+                                        .map(el => ({
+                                            el,
+                                            area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+                                            hasTree: !!el.querySelector('.ant-tree, .ant-tree-list-holder-inner'),
+                                        }))
+                                        .filter(x => x.hasTree)
+                                        .sort((a, b) => a.area - b.area);
+                                    const pickerModal = modalCandidates.length ? modalCandidates[0].el : null;
+                                    if (!pickerModal) return 'picker_modal_not_found';
+                                    const fireClick = (el) => {
+                                        if (!el) return;
+                                        ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
+                                            el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                                        });
+                                        if (typeof el.click === 'function') el.click();
+                                    };
+                                    const nodes = Array.from(pickerModal.querySelectorAll('.ant-tree-treenode'));
                                     for (const n of nodes) {
                                         const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
                                         const txt = (title?.textContent || '').trim();
-                                        if (!txt.includes(targetArea)) continue;
+                                        if (!(txt === targetArea || txt.includes(targetArea))) continue;
+                                        n.scrollIntoView({ block: 'center' });
                                         const cb = n.querySelector('.ant-tree-checkbox');
                                         if (!cb) return 'checkbox_not_found';
                                         if (!cb.classList.contains('ant-tree-checkbox-checked')) {
-                                            cb.click();
+                                            fireClick(cb);
                                             if (!cb.classList.contains('ant-tree-checkbox-checked')) {
                                                 const inner = cb.querySelector('.ant-tree-checkbox-inner');
-                                                if (inner) inner.click();
+                                                fireClick(inner);
+                                            }
+                                            if (!cb.classList.contains('ant-tree-checkbox-checked')) {
+                                                const titleWrap = n.querySelector('.ant-tree-node-content-wrapper');
+                                                fireClick(titleWrap);
                                             }
                                         }
                                         return cb.classList.contains('ant-tree-checkbox-checked') ? 'checked' : 'click_no_effect';
