@@ -939,7 +939,7 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
     if not targets:
         return True
 
-    # 兼容小窗口/浏览器缩放场景，尽量把级联面板恢复到可操作尺寸。
+    # 兼容小窗口/缩放导致的“元素在视口外”问题
     try:
         await page.set_viewport_size({"width": 1600, "height": 950})
     except Exception:
@@ -974,38 +974,71 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
         return False
     await asyncio.sleep(0.3)
 
+    # 先清空字段内已有标签，避免营销模板默认区域残留
+    await page.evaluate("""() => {
+        const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
+        for (const label of labels) {
+            const txt = (label.textContent || '').replace(/\\s+/g, '');
+            if (!txt.includes('执行员工')) continue;
+            const item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
+            if (!item) continue;
+            const closes = Array.from(item.querySelectorAll('.el-tag__close'));
+            for (const c of closes) c.click();
+            const input = item.querySelector('input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"], .el-cascader input.el-input__inner');
+            if (input) input.click();
+            return;
+        }
+    }""")
+    await asyncio.sleep(0.25)
+
     panel = page.locator(".el-cascader-panel:visible").first
     menus = panel.locator(".el-cascader-menu")
 
     async def expand_in_menu(menu_index: int, target: str) -> bool:
-        return bool(await page.evaluate(
-            """({ menuIndex, target }) => {
-                const panel = document.querySelector('.el-cascader-panel');
-                if (!panel) return false;
-                const menus = panel.querySelectorAll('.el-cascader-menu');
-                const menu = menus[menuIndex];
-                if (!menu) return false;
-                const fireClick = (el) => {
-                    if (!el) return;
-                    ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
-                        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-                    });
-                    if (typeof el.click === 'function') el.click();
-                };
-                const nodes = Array.from(menu.querySelectorAll('.el-cascader-node'));
-                for (const node of nodes) {
-                    const label = node.querySelector('.el-cascader-node__label');
-                    const txt = (label?.textContent || '').trim();
-                    if (!(txt === target || txt.includes(target))) continue;
-                    node.scrollIntoView({ block: 'center', inline: 'nearest' });
-                    const postfix = node.querySelector('.el-cascader-node__postfix');
-                    fireClick(postfix || label || node);
-                    return true;
-                }
-                return false;
-            }""",
-            {"menuIndex": menu_index, "target": target}
-        ))
+        menu = menus.nth(menu_index)
+        nodes = menu.locator(".el-cascader-node")
+        count = await nodes.count()
+        for i in range(count):
+            node = nodes.nth(i)
+            label = node.locator(".el-cascader-node__label").first
+            if await label.count() == 0:
+                continue
+            txt = ((await label.text_content()) or "").strip()
+            if txt != target and target not in txt:
+                continue
+            await node.scroll_into_view_if_needed()
+            postfix = node.locator(".el-cascader-node__postfix").first
+            if await postfix.count() > 0:
+                await postfix.click(force=True)
+            else:
+                await label.click(force=True)
+            await asyncio.sleep(0.2)
+            return True
+        return False
+
+    async def uncheck_in_menu(menu_index: int, target: str) -> bool:
+        menu = menus.nth(menu_index)
+        nodes = menu.locator(".el-cascader-node")
+        count = await nodes.count()
+        for i in range(count):
+            node = nodes.nth(i)
+            label = node.locator(".el-cascader-node__label").first
+            if await label.count() == 0:
+                continue
+            txt = ((await label.text_content()) or "").strip()
+            if txt != target and target not in txt:
+                continue
+            checkbox = node.locator(".el-checkbox__input").first
+            if await checkbox.count() == 0:
+                return False
+            await checkbox.scroll_into_view_if_needed()
+            cls = (await checkbox.get_attribute("class")) or ""
+            if "is-checked" in cls:
+                await checkbox.click(force=True)
+                await asyncio.sleep(0.15)
+                cls = (await checkbox.get_attribute("class")) or ""
+            return "is-checked" not in cls
+        return False
 
     async def check_in_menu(menu_index: int, target: str) -> bool:
         menu = menus.nth(menu_index)
@@ -1030,7 +1063,8 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
             return True
         return False
 
-    # 先点全国，展开大区列
+    # 先取消“全国”默认勾选，再点全国展开大区列
+    await uncheck_in_menu(0, "全国")
     await expand_in_menu(0, "全国")
 
     selected = {t: False for t in targets}
