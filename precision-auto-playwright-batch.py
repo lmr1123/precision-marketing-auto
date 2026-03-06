@@ -1016,7 +1016,7 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
             return True
         return False
 
-    async def toggle_in_menu(menu_index: int, target: str) -> bool:
+    async def get_menu_checked_state(menu_index: int, target: str) -> str:
         menu = menus.nth(menu_index)
         nodes = menu.locator(".el-cascader-node")
         count = await nodes.count()
@@ -1030,12 +1030,43 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
                 continue
             checkbox = node.locator(".el-checkbox__input").first
             if await checkbox.count() == 0:
-                return False
-            await checkbox.scroll_into_view_if_needed()
-            await checkbox.click(force=True)
-            await asyncio.sleep(0.15)
-            return True
-        return False
+                return "missing"
+            cls = (await checkbox.get_attribute("class")) or ""
+            return "checked" if "is-checked" in cls else "unchecked"
+        return "not_found"
+
+    async def toggle_in_menu(menu_index: int, target: str) -> bool:
+        # 用 JS 触发 checkbox 原生 input 和容器点击，规避点击偏移/遮挡
+        toggled = await page.evaluate("""(payload) => {
+            const { menuIndex, target } = payload;
+            const panel = document.querySelector('.el-cascader-panel');
+            if (!panel) return false;
+            const menu = panel.querySelectorAll('.el-cascader-menu')[menuIndex];
+            if (!menu) return false;
+            const fireClick = (el) => {
+                if (!el) return;
+                ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
+                    el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                });
+                if (typeof el.click === 'function') el.click();
+            };
+            const nodes = Array.from(menu.querySelectorAll('.el-cascader-node'));
+            for (const node of nodes) {
+                const label = node.querySelector('.el-cascader-node__label');
+                const txt = (label?.textContent || '').trim();
+                if (txt !== target && !txt.includes(target)) continue;
+                node.scrollIntoView({ block: 'center' });
+                const cb = node.querySelector('.el-checkbox__input');
+                if (!cb) return false;
+                const input = cb.querySelector('input.el-checkbox__original');
+                fireClick(input);
+                fireClick(cb);
+                return true;
+            }
+            return false;
+        }""", {"menuIndex": menu_index, "target": target})
+        await asyncio.sleep(0.2)
+        return bool(toggled)
 
     async def check_in_menu(menu_index: int, target: str) -> bool:
         menu = menus.nth(menu_index)
@@ -1061,8 +1092,16 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
         return False
 
     # 先按业务规则双击“全国”：第一次全选，第二次清空。
-    await toggle_in_menu(0, "全国")
-    await toggle_in_menu(0, "全国")
+    nation_before = await get_menu_checked_state(0, "全国")
+    first_ok = await toggle_in_menu(0, "全国")
+    nation_after_first = await get_menu_checked_state(0, "全国")
+    second_ok = await toggle_in_menu(0, "全国")
+    nation_after_second = await get_menu_checked_state(0, "全国")
+    print(
+        "      🧪 全国双击清空: "
+        f"before={nation_before}, firstClick={first_ok}, afterFirst={nation_after_first}, "
+        f"secondClick={second_ok}, afterSecond={nation_after_second}"
+    )
     await asyncio.sleep(0.2)
     # 再点全国展开大区列
     await expand_in_menu(0, "全国")
