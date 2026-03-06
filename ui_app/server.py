@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import getpass
 import os
 import re
@@ -13,11 +14,18 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+try:
+    from openpyxl import Workbook, load_workbook
+except Exception:
+    Workbook = None
+    load_workbook = None
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "precision-auto-playwright-batch.py"
 UPLOAD_DIR = ROOT / "ui_uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_DATA_CSV = ROOT / "data" / "plans.csv"
 
 
 def now_iso() -> str:
@@ -29,6 +37,81 @@ def parse_int(val: str, default: int = 0) -> int:
         return int(val)
     except Exception:
         return default
+
+
+def _default_headers() -> List[str]:
+    return [
+        "name",
+        "region",
+        "theme",
+        "use_recommend",
+        "start_time",
+        "end_time",
+        "trigger_type",
+        "send_time",
+        "global_limit",
+        "set_target",
+        "group_name",
+        "update_type",
+        "main_operating_area",
+        "coupon_ids",
+        "sms_content",
+        "step3_end_time",
+        "executor_employees",
+        "send_content",
+    ]
+
+
+def load_template_headers_and_sample() -> tuple[List[str], List[str]]:
+    if DEFAULT_DATA_CSV.exists():
+        for enc in ("utf-8-sig", "utf-8", "gbk"):
+            try:
+                with DEFAULT_DATA_CSV.open("r", encoding=enc, newline="") as f:
+                    reader = csv.reader(f)
+                    rows = list(reader)
+                    if rows:
+                        headers = [str(x or "").strip() for x in rows[0]]
+                        sample = [str(x or "").strip() for x in (rows[1] if len(rows) > 1 else [""] * len(headers))]
+                        if headers:
+                            return headers, sample
+            except Exception:
+                continue
+    headers = _default_headers()
+    return headers, [""] * len(headers)
+
+
+def write_template_csv(path: Path) -> None:
+    headers, sample = load_template_headers_and_sample()
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        writer.writerow(sample)
+
+
+def write_template_xlsx(path: Path) -> None:
+    if Workbook is None:
+        raise RuntimeError("openpyxl is not installed")
+    headers, sample = load_template_headers_and_sample()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "plans"
+    ws.append(headers)
+    ws.append(sample)
+    wb.save(path)
+    wb.close()
+
+
+def convert_uploaded_xlsx_to_csv(upload: UploadFile, dst_csv: Path) -> None:
+    if load_workbook is None:
+        raise HTTPException(status_code=500, detail="Server missing openpyxl. Please install requirements-ui.txt")
+    upload.file.seek(0)
+    wb = load_workbook(upload.file, read_only=True, data_only=True)
+    ws = wb.active
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as out:
+        writer = csv.writer(out)
+        for row in ws.iter_rows(values_only=True):
+            writer.writerow(["" if v is None else str(v) for v in row])
+    wb.close()
 
 
 @dataclass
@@ -295,7 +378,7 @@ async def download_task_file(task_id: str):
     p = Path(task.file_path)
     if not p.exists():
         raise HTTPException(status_code=404, detail="Task file not found")
-    return FileResponse(path=str(p), filename=task.filename, media_type="text/csv")
+    return FileResponse(path=str(p), filename=p.name, media_type="text/csv")
 
 
 @app.get("/api/tasks/{task_id}/logs")
@@ -309,6 +392,27 @@ async def get_task_logs(task_id: str, offset: int = 0, limit: int = 300) -> JSON
         "logs": logs,
         "status": task.status,
     })
+
+
+@app.get("/api/template/csv")
+async def download_template_csv():
+    p = UPLOAD_DIR / "precision_template_utf8_bom.csv"
+    write_template_csv(p)
+    return FileResponse(path=str(p), filename="精准营销导入模板_UTF8BOM.csv", media_type="text/csv")
+
+
+@app.get("/api/template/xlsx")
+async def download_template_xlsx():
+    p = UPLOAD_DIR / "precision_template.xlsx"
+    try:
+        write_template_xlsx(p)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return FileResponse(
+        path=str(p),
+        filename="精准营销导入模板.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 @app.post("/api/tasks/upload")
@@ -336,12 +440,17 @@ async def upload_tasks(
         hold_seconds=max(0, hold_seconds),
     )
     for f in files:
-        if not f.filename.lower().endswith(".csv"):
-            raise HTTPException(status_code=400, detail=f"Only CSV supported: {f.filename}")
+        lower = f.filename.lower()
+        if not (lower.endswith(".csv") or lower.endswith(".xlsx")):
+            raise HTTPException(status_code=400, detail=f"Only CSV/XLSX supported: {f.filename}")
         tid = str(uuid.uuid4())
-        dst = UPLOAD_DIR / f"{tid}_{Path(f.filename).name}"
-        with dst.open("wb") as out:
-            shutil.copyfileobj(f.file, out)
+        stem = Path(f.filename).stem
+        dst = UPLOAD_DIR / f"{tid}_{stem}.csv"
+        if lower.endswith(".xlsx"):
+            convert_uploaded_xlsx_to_csv(f, dst)
+        else:
+            with dst.open("wb") as out:
+                shutil.copyfileobj(f.file, out)
         op = operator.strip() or os.getenv("USER") or getpass.getuser() or "unknown"
         task = Task(id=tid, filename=f.filename, file_path=str(dst), options=options, operator=op)
         await runner.add_task(task)
@@ -403,7 +512,7 @@ UI_HTML = """
       <div class="card">
         <h3 style="margin:0 0 10px 0">批量导入并执行（业务版）</h3>
         <div class="row">
-          <input id="files" type="file" multiple accept=".csv"/>
+          <input id="files" type="file" multiple accept=".csv,.xlsx"/>
           <label><input id="connect_cdp" type="checkbox" checked/> 复用当前已登录浏览器</label>
           <label>浏览器调试地址: <input id="cdp_endpoint" value="http://127.0.0.1:18800" style="width:220px"/></label>
           <label title="开启后，第2步关键字段校验失败会立刻中断，建议联调用开，正式批量可关"><input id="strict_step2" type="checkbox" checked/> 严格校验第2步（推荐）</label>
@@ -412,8 +521,10 @@ UI_HTML = """
           <label>操作人 <input id="operator" style="width:140px" placeholder="自动识别"/></label>
           <button onclick="upload()">上传并开始执行</button>
           <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
+          <a class="link-pill" href="/api/template/xlsx">下载Excel模板</a>
+          <a class="link-pill" href="/api/template/csv">下载CSV模板(防乱码)</a>
         </div>
-        <div class="tip" style="margin-top:8px">说明: 上传多个 CSV 后会按任务队列执行。可点击“日志”查看实时进度，失败任务可单独重试。</div>
+        <div class="tip" style="margin-top:8px">说明: 支持上传 CSV / XLSX。Windows Excel 如遇 CSV 乱码，请优先下载“Excel模板”或“CSV模板(UTF-8 BOM)”。</div>
       </div>
 
       <div class="card">
@@ -443,7 +554,7 @@ function esc(s){return (s||"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">
 
 async function upload(){
   const files = document.getElementById('files').files;
-  if(!files.length){ alert('请先选择CSV文件'); return; }
+  if(!files.length){ alert('请先选择CSV或XLSX文件'); return; }
   const fd = new FormData();
   for(const f of files){ fd.append('files', f); }
   fd.append('connect_cdp', document.getElementById('connect_cdp').checked ? 'true' : 'false');

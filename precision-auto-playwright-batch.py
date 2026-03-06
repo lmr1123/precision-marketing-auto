@@ -73,7 +73,7 @@ DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:9222"
 def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> list:
     """从 CSV 加载计划数据"""
     plans = []
-    with open(csv_path, 'r', encoding='utf-8') as f:
+    with open(csv_path, 'r', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
         for i, row in enumerate(reader, 1):
             if start and i < start:
