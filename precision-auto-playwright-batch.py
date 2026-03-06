@@ -1466,6 +1466,23 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                             if clicked == 'clicked':
                                 print("      ✅ 已点击选择数据按钮")
                                 await asyncio.sleep(2)
+                                before_selected_count = await frame.evaluate("""() => {
+                                    const isVisible = (el) => {
+                                        if (!el) return false;
+                                        const style = window.getComputedStyle(el);
+                                        const rect = el.getBoundingClientRect();
+                                        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                                    };
+                                    const button = Array.from(document.querySelectorAll('button.ant-btn.ant-btn-primary'))
+                                        .filter(isVisible)
+                                        .find(b => ((b.textContent || '').replace(/\\s+/g, '')).includes('选择数据'));
+                                    const scope = button ? (button.closest('.condition__right, .condition, .box') || button.parentElement) : document;
+                                    const nodes = Array.from(scope.querySelectorAll('.ml-2, div, span')).filter(isVisible);
+                                    const hit = nodes.find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
+                                    return hit ? (hit.textContent || '').trim() : '';
+                                }""")
+                                if before_selected_count:
+                                    print(f"      🧪 营运区确认前回读: {before_selected_count}")
                                 
                                 # 在树形选择器中选择营运区
                                 area = data['main_operating_area']
@@ -1587,7 +1604,10 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         return hit ? (hit.textContent || '').trim() : '';
                                     }""")
                                     picker_still_visible = bool(confirm_area_result.get("pickerStillVisible"))
-                                    if confirm_area_result.get("ok") and not picker_still_visible and selected_count_text:
+                                    before_num = int(re.search(r'(\d+)', before_selected_count).group(1)) if before_selected_count and re.search(r'(\d+)', before_selected_count) else -1
+                                    after_num = int(re.search(r'(\d+)', selected_count_text).group(1)) if selected_count_text and re.search(r'(\d+)', selected_count_text) else -1
+                                    count_changed = after_num > before_num or (selected == 'already_checked' and after_num > 0)
+                                    if confirm_area_result.get("ok") and not picker_still_visible and selected_count_text and count_changed:
                                         print(f"      ✅ 营运区已确认: {selected_count_text}")
                                         results["第2步-主消费营运区"] = True
                                     else:
@@ -1595,7 +1615,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             "      ⚠️ 营运区确认失败: "
                                             f"reason={confirm_area_result.get('reason','')}, "
                                             f"pickerStillVisible={picker_still_visible}, "
-                                            f"selectedCount={selected_count_text or confirm_area_result.get('selectedCount','')}"
+                                            f"selectedCountBefore={before_selected_count}, "
+                                            f"selectedCountAfter={selected_count_text or confirm_area_result.get('selectedCount','')}"
                                         )
                                 else:
                                     print(f"      ⚠️ 营运区勾选失败: {area} ({selected})")
@@ -1627,6 +1648,23 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 """)
                                 if selected_direct == "checked":
                                     print(f"      ✅ 已直接勾选营运区: {area}")
+                                    before_selected_count = await frame.evaluate("""() => {
+                                        const isVisible = (el) => {
+                                            if (!el) return false;
+                                            const style = window.getComputedStyle(el);
+                                            const rect = el.getBoundingClientRect();
+                                            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                                        };
+                                        const button = Array.from(document.querySelectorAll('button.ant-btn.ant-btn-primary'))
+                                            .filter(isVisible)
+                                            .find(b => ((b.textContent || '').replace(/\\s+/g, '')).includes('选择数据'));
+                                        const scope = button ? (button.closest('.condition__right, .condition, .box') || button.parentElement) : document;
+                                        const nodes = Array.from(scope.querySelectorAll('.ml-2, div, span')).filter(isVisible);
+                                        const hit = nodes.find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
+                                        return hit ? (hit.textContent || '').trim() : '';
+                                    }""")
+                                    if before_selected_count:
+                                        print(f"      🧪 营运区确认前回读: {before_selected_count}")
                                     confirm_area_result = await frame.evaluate("""() => {
                                         const norm = (s) => (s || '').replace(/\\s+/g, '');
                                         const isVisible = (el) => {
@@ -1686,7 +1724,10 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         return hit ? (hit.textContent || '').trim() : '';
                                     }""")
                                     picker_still_visible = bool(confirm_area_result.get("pickerStillVisible"))
-                                    if confirm_area_result.get("ok") and not picker_still_visible and selected_count_text:
+                                    before_num = int(re.search(r'(\d+)', before_selected_count).group(1)) if before_selected_count and re.search(r'(\d+)', before_selected_count) else -1
+                                    after_num = int(re.search(r'(\d+)', selected_count_text).group(1)) if selected_count_text and re.search(r'(\d+)', selected_count_text) else -1
+                                    count_changed = after_num > before_num or after_num > 0
+                                    if confirm_area_result.get("ok") and not picker_still_visible and selected_count_text and count_changed:
                                         print(f"      ✅ 营运区已确认: {selected_count_text}")
                                         results["第2步-主消费营运区"] = True
                                     else:
@@ -1694,7 +1735,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             "      ⚠️ 营运区确认失败: "
                                             f"reason={confirm_area_result.get('reason','')}, "
                                             f"pickerStillVisible={picker_still_visible}, "
-                                            f"selectedCount={selected_count_text or confirm_area_result.get('selectedCount','')}"
+                                            f"selectedCountBefore={before_selected_count}, "
+                                            f"selectedCountAfter={selected_count_text or confirm_area_result.get('selectedCount','')}"
                                         )
                                 else:
                                     print(f"      ⚠️ 直接勾选失败: {selected_direct}，请检查第2步页面是否空白/未加载完整")
