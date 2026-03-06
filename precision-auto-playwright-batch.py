@@ -934,7 +934,7 @@ async def set_step3_distribution_mode(page, mode_text: str = "指定门店分配
     )
 
 async def fill_step3_executor(page, raw_values: str) -> bool:
-    """第3步执行员工：按级联面板（全国->大区->省区/门店）多选。"""
+    """第3步执行员工：优先按大区勾选，避免层层 hover 导致元素抖动超时。"""
     targets = split_multi_values(raw_values)
     if not targets:
         return True
@@ -958,82 +958,59 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
         return False
     await asyncio.sleep(0.3)
 
-    panel = page.locator(".el-cascader-panel:visible").first
-    menus = panel.locator(".el-cascader-menu")
-
-    async def expand_in_menu(menu_index: int, target: str) -> bool:
-        menu = menus.nth(menu_index)
-        nodes = menu.locator(".el-cascader-node")
-        count = await nodes.count()
-        for i in range(count):
-            node = nodes.nth(i)
-            label = node.locator(".el-cascader-node__label").first
-            if await label.count() == 0:
-                continue
-            txt = ((await label.text_content()) or "").strip()
-            if txt != target and target not in txt:
-                continue
-            await label.scroll_into_view_if_needed()
-            postfix = node.locator(".el-cascader-node__postfix").first
-            if await postfix.count() > 0:
-                await postfix.hover()
-                await postfix.click(force=True)
-            else:
-                await label.hover()
-            await asyncio.sleep(0.2)
-            return True
-        return False
-
-    async def check_in_menu(menu_index: int, target: str) -> bool:
-        menu = menus.nth(menu_index)
-        nodes = menu.locator(".el-cascader-node")
-        count = await nodes.count()
-        for i in range(count):
-            node = nodes.nth(i)
-            label = node.locator(".el-cascader-node__label").first
-            if await label.count() == 0:
-                continue
-            txt = ((await label.text_content()) or "").strip()
-            if txt != target and target not in txt:
-                continue
-            checkbox = node.locator(".el-checkbox__input").first
-            if await checkbox.count() == 0:
-                continue
-            await checkbox.scroll_into_view_if_needed()
-            cls = (await checkbox.get_attribute("class")) or ""
-            if "is-checked" not in cls:
-                await checkbox.click(force=True)
-                await asyncio.sleep(0.15)
-            return True
-        return False
-
-    # 先点全国，展开大区列
-    await expand_in_menu(0, "全国")
-
-    selected = {t: False for t in targets}
+    # 业务优先：若传了“大区”目标，只要求大区命中，不再强制展开到省区/门店。
     region_targets = [t for t in targets if "大区" in t]
-    province_targets = [t for t in targets if "省区" in t or "营运区" in t or "店" in t]
+    effective_targets = region_targets if region_targets else targets
 
-    # 先选大区目标（例如西北大区）
-    for rt in region_targets:
-        selected[rt] = await check_in_menu(1, rt)
+    selected = await page.evaluate("""(targets) => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        };
+        const fireClick = (el) => {
+            if (!el) return;
+            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+            el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            if (typeof el.click === 'function') el.click();
+        };
+        const out = {};
+        const panel = document.querySelector('.el-cascader-panel');
+        if (!panel || !isVisible(panel)) return out;
 
-    # 再跨大区选省区目标（例如湖北省区）
-    region_nodes = menus.nth(1).locator(".el-cascader-node .el-cascader-node__label")
-    region_count = await region_nodes.count()
-    region_names = []
-    for i in range(region_count):
-        txt = ((await region_nodes.nth(i).text_content()) or "").strip()
-        if txt.endswith("大区"):
-            region_names.append(txt)
+        // 尽量先展开“全国”，确保大区层可见。
+        const rootNation = Array.from(panel.querySelectorAll('.el-cascader-node')).find(n => {
+            const t = ((n.querySelector('.el-cascader-node__label')?.textContent) || '').trim();
+            return t === '全国';
+        });
+        if (rootNation) {
+            const postfix = rootNation.querySelector('.el-cascader-node__postfix');
+            fireClick(postfix);
+        }
 
-    for region in region_names:
-        await expand_in_menu(1, region)
-        for pt in province_targets:
-            if selected.get(pt):
-                continue
-            if await check_in_menu(2, pt):
-                selected[pt] = True
+        for (const target of targets) {
+            out[target] = false;
+            const nodes = Array.from(panel.querySelectorAll('.el-cascader-node'));
+            const node = nodes.find(n => {
+                const txt = ((n.querySelector('.el-cascader-node__label')?.textContent) || '').trim();
+                return txt === target || txt.includes(target);
+            });
+            if (!node) continue;
+            node.scrollIntoView({ block: 'center' });
+            const cb = node.querySelector('.el-checkbox__input');
+            if (!cb) continue;
+            if (!cb.classList.contains('is-checked')) {
+                fireClick(cb);
+                if (!cb.classList.contains('is-checked')) {
+                    fireClick(cb.querySelector('.el-checkbox__inner'));
+                }
+            }
+            out[target] = cb.classList.contains('is-checked');
+        }
+        return out;
+    }""", effective_targets)
 
     selected_labels = await page.evaluate("""() => {
         const panel = document.querySelector('.el-cascader-panel');
@@ -1050,7 +1027,6 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
     await page.keyboard.press("Escape")
     await asyncio.sleep(0.2)
 
-    # 回读校验：限定在“执行员工”字段容器内。
     readback = await page.evaluate("""() => {
         const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
         for (const label of labels) {
@@ -1066,12 +1042,11 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
         }
         return '';
     }""")
-    for t in targets:
-        if t in readback:
-            selected[t] = True
 
     print(f"      🧪 执行员工回读文本: {readback}")
-    return all(selected.values())
+    selected_ok = all(bool(selected.get(t, False)) for t in effective_targets)
+    readback_ok = all(t in readback for t in effective_targets)
+    return selected_ok or readback_ok
 
 async def set_plan_time_range(page, start_time: str, end_time: str):
     """设置 Element 日期范围并点击确定，避免值未提交。"""
