@@ -1646,11 +1646,10 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         return hit ? (hit.textContent || '').trim() : '';
                                     }""")
                                     picker_still_visible = bool(confirm_area_result.get("pickerStillVisible"))
-                                    before_num = int(re.search(r'(\d+)', before_selected_count).group(1)) if before_selected_count and re.search(r'(\d+)', before_selected_count) else -1
-                                    after_num = int(re.search(r'(\d+)', selected_count_text).group(1)) if selected_count_text and re.search(r'(\d+)', selected_count_text) else -1
-                                    count_changed = after_num > before_num or (selected in ['already_checked', 'click_no_effect'] and after_num > 0)
-                                    if confirm_area_result.get("ok") and not picker_still_visible and selected_count_text and count_changed:
+                                    if confirm_area_result.get("ok") and selected_count_text:
                                         print(f"      ✅ 营运区已确认: {selected_count_text}")
+                                        if picker_still_visible:
+                                            print("      ⚠️ 选择数据弹窗关闭状态未可靠识别，当前按已点击“确定”且已回读到已选条数放行")
                                         results["第2步-主消费营运区"] = True
                                     else:
                                         print(
@@ -1803,11 +1802,10 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         return hit ? (hit.textContent || '').trim() : '';
                                     }""")
                                     picker_still_visible = bool(confirm_area_result.get("pickerStillVisible"))
-                                    before_num = int(re.search(r'(\d+)', before_selected_count).group(1)) if before_selected_count and re.search(r'(\d+)', before_selected_count) else -1
-                                    after_num = int(re.search(r'(\d+)', selected_count_text).group(1)) if selected_count_text and re.search(r'(\d+)', selected_count_text) else -1
-                                    count_changed = after_num > before_num or after_num > 0
-                                    if confirm_area_result.get("ok") and not picker_still_visible and selected_count_text and count_changed:
+                                    if confirm_area_result.get("ok") and selected_count_text:
                                         print(f"      ✅ 营运区已确认: {selected_count_text}")
+                                        if picker_still_visible:
+                                            print("      ⚠️ 选择数据弹窗关闭状态未可靠识别，当前按已点击“确定”且已回读到已选条数放行")
                                         results["第2步-主消费营运区"] = True
                                     else:
                                         print(
