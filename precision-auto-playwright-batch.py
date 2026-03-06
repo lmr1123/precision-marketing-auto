@@ -446,9 +446,7 @@ async def fill_step3_end_time(page, end_time: str) -> bool:
         await fill_with_retry(input_el, date_part)
         await input_el.press("Enter")
         await input_el.blur()
-        await item.evaluate("""(node) => {
-            const input = node.querySelector('input');
-            if (!input) return;
+        await input_el.evaluate("""(input) => {
             input.dispatchEvent(new Event('input', { bubbles: true }));
             input.dispatchEvent(new Event('change', { bubbles: true }));
             input.dispatchEvent(new Event('blur', { bubbles: true }));
@@ -1877,25 +1875,38 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                         try:
                             coupon_val = data["coupon_ids"]
                             coupon_ok = await frame.evaluate("""(val) => {
-                                const labels = Array.from(document.querySelectorAll('label, span, div'));
+                                const isVisible = (el) => {
+                                    if (!el) return false;
+                                    const style = window.getComputedStyle(el);
+                                    const rect = el.getBoundingClientRect();
+                                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                                };
                                 const write = (inp, v) => {
-                                    if (!inp) return false;
+                                    if (!inp || !isVisible(inp)) return false;
                                     inp.focus();
                                     inp.value = v;
+                                    inp.setAttribute('value', v);
                                     inp.dispatchEvent(new Event('input', { bubbles: true }));
+                                    inp.dispatchEvent(new Event('keyup', { bubbles: true }));
                                     inp.dispatchEvent(new Event('change', { bubbles: true }));
                                     inp.blur();
                                     return (inp.value || '').includes(v);
                                 };
-                                for (const lb of labels) {
-                                    const t = (lb.textContent || '').replace(/\\s+/g, '');
-                                    if (!t.includes('券规则ID') && !t.includes('券规则')) continue;
-                                    const scope = lb.closest('.ant-form-item, .el-form-item, .item') || lb.parentElement;
-                                    if (!scope) continue;
-                                    const inp = scope.querySelector('input');
-                                    if (write(inp, val)) return true;
+                                const rows = Array.from(document.querySelectorAll('.event-row, .ant-row, .ant-form-item, div')).filter(isVisible);
+                                for (const row of rows) {
+                                    const txt = (row.textContent || '').replace(/\\s+/g, '');
+                                    if (!txt.includes('券规则ID')) continue;
+                                    const inputs = Array.from(row.querySelectorAll('input.ant-input, input[type="text"], input'))
+                                        .filter(isVisible);
+                                    const target = inputs.length ? inputs[inputs.length - 1] : null;
+                                    if (write(target, val)) return true;
                                 }
-                                const fallback = document.querySelector('input[placeholder*="券规则"]');
+                                const fallback = Array.from(document.querySelectorAll('input.ant-input, input[type="text"], input'))
+                                    .filter(isVisible)
+                                    .find(inp => {
+                                        const row = inp.closest('.event-row, .ant-row, .ant-form-item, div');
+                                        return row && ((row.textContent || '').replace(/\\s+/g, '')).includes('券规则ID');
+                                    });
                                 return write(fallback, val);
                             }""", coupon_val)
                             if coupon_ok:
