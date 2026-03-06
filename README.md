@@ -69,6 +69,35 @@ python precision-auto-playwright-batch.py --test --connect-cdp
 python precision-auto-playwright-batch.py --csv data/plans.csv
 ```
 
+### 可视化任务中心（低门槛）
+
+说明：这是独立新增的 UI 层，底层仍复用 `precision-auto-playwright-batch.py`，不会改动现有命令行能力。
+
+1. 安装 UI 依赖
+
+```bash
+pip install -r requirements-ui.txt
+```
+
+2. 启动 UI
+
+```bash
+uvicorn ui_app.server:app --host 0.0.0.0 --port 8787 --reload
+```
+
+3. 浏览器打开
+
+```text
+http://127.0.0.1:8787
+```
+
+UI 支持：
+- 批量导入多个 CSV 文件并入队
+- 串行/并行执行（按文件维度）
+- 实时日志查看（与脚本日志一致）
+- 任务列表总览（状态、开始时间、完成时间、预计完成时间、耗时、成功/失败）
+- 失败任务一键重试（单条/全部失败）
+
 ## 配置
 
 修改脚本中的 `BASE_URL` 为当前可用的测试链接。
