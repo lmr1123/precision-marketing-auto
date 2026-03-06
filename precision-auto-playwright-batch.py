@@ -1529,31 +1529,26 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 
                                 if selected in ['checked', 'already_checked']:
                                     print(f"      ✅ 已选择营运区: {area}")
-                                    # 点击确定
-                                    await frame.evaluate('''() => {
-                                        const btns = document.querySelectorAll('button');
-                                        for (const btn of btns) {
-                                            if (btn.textContent.includes('确定')) {
-                                                btn.click();
-                                            }
-                                        }
-                                    }''')
-                                    await asyncio.sleep(0.5)
-                                    area_ok = await frame.evaluate("""(areaName) => {
-                                        const nodes = Array.from(document.querySelectorAll('.ant-tree-treenode'));
-                                        for (const n of nodes) {
-                                            const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
-                                            const txt = (title?.textContent || '').trim();
-                                            if (!txt.includes(areaName)) continue;
-                                            const cb = n.querySelector('.ant-tree-checkbox');
-                                            if (cb && cb.classList.contains('ant-tree-checkbox-checked')) return true;
-                                        }
-                                        return false;
-                                    }""", area)
-                                    if area_ok:
+                                    # 必须点击树弹窗内“确 定”，然后回读“已选：N”
+                                    confirm_area_ok = await frame.evaluate("""() => {
+                                        const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                        const btns = Array.from(document.querySelectorAll('button.ant-btn'));
+                                        const hit = btns.find(b => norm(b.textContent) === '确定' || norm(b.textContent) === '确 定');
+                                        if (!hit) return false;
+                                        hit.click();
+                                        return true;
+                                    }""")
+                                    await asyncio.sleep(0.6)
+                                    selected_count_text = await frame.evaluate("""() => {
+                                        const nodes = Array.from(document.querySelectorAll('div, span'));
+                                        const hit = nodes.find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
+                                        return hit ? (hit.textContent || '').trim() : '';
+                                    }""")
+                                    if confirm_area_ok and selected_count_text:
+                                        print(f"      ✅ 营运区已确认: {selected_count_text}")
                                         results["第2步-主消费营运区"] = True
                                     else:
-                                        print(f"      ⚠️ 营运区回读失败: {area}")
+                                        print(f"      ⚠️ 营运区确认失败: confirm={confirm_area_ok}, selectedCount={selected_count_text}")
                                 else:
                                     print(f"      ⚠️ 营运区勾选失败: {area} ({selected})")
                             else:
@@ -1584,22 +1579,25 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 """)
                                 if selected_direct == "checked":
                                     print(f"      ✅ 已直接勾选营运区: {area}")
-                                    await asyncio.sleep(0.3)
-                                    area_ok = await frame.evaluate("""(areaName) => {
-                                        const nodes = Array.from(document.querySelectorAll('.ant-tree-treenode'));
-                                        for (const n of nodes) {
-                                            const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
-                                            const txt = (title?.textContent || '').trim();
-                                            if (!txt.includes(areaName)) continue;
-                                            const cb = n.querySelector('.ant-tree-checkbox');
-                                            if (cb && cb.classList.contains('ant-tree-checkbox-checked')) return true;
-                                        }
-                                        return false;
-                                    }""", area)
-                                    if area_ok:
+                                    confirm_area_ok = await frame.evaluate("""() => {
+                                        const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                        const btns = Array.from(document.querySelectorAll('button.ant-btn'));
+                                        const hit = btns.find(b => norm(b.textContent) === '确定' || norm(b.textContent) === '确 定');
+                                        if (!hit) return false;
+                                        hit.click();
+                                        return true;
+                                    }""")
+                                    await asyncio.sleep(0.6)
+                                    selected_count_text = await frame.evaluate("""() => {
+                                        const nodes = Array.from(document.querySelectorAll('div, span'));
+                                        const hit = nodes.find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
+                                        return hit ? (hit.textContent || '').trim() : '';
+                                    }""")
+                                    if confirm_area_ok and selected_count_text:
+                                        print(f"      ✅ 营运区已确认: {selected_count_text}")
                                         results["第2步-主消费营运区"] = True
                                     else:
-                                        print(f"      ⚠️ 营运区回读失败: {area}")
+                                        print(f"      ⚠️ 营运区确认失败: confirm={confirm_area_ok}, selectedCount={selected_count_text}")
                                 else:
                                     print(f"      ⚠️ 直接勾选失败: {selected_direct}，请检查第2步页面是否空白/未加载完整")
                         except Exception as e:
