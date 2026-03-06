@@ -392,7 +392,6 @@ UI_HTML = """
           <label><input id="connect_cdp" type="checkbox" checked/> 复用当前已登录浏览器</label>
           <label>浏览器调试地址: <input id="cdp_endpoint" value="http://127.0.0.1:18800" style="width:220px"/></label>
           <label title="开启后，第2步关键字段校验失败会立刻中断，建议联调用开，正式批量可关"><input id="strict_step2" type="checkbox" checked/> 严格校验第2步（推荐）</label>
-          <label title="仅用于快速联调第1步和第3步"><input id="skip_step2" type="checkbox"/> 跳过第2步（联调用）</label>
           <label>并发任务数 <input id="concurrent" type="number" min="1" value="1" style="width:70px"/></label>
           <label>从第几行开始 <input id="start" type="number" min="1" style="width:90px"/></label>
           <label>到第几行结束 <input id="end" type="number" min="1" style="width:90px"/></label>
@@ -436,7 +435,7 @@ async function upload(){
   fd.append('connect_cdp', document.getElementById('connect_cdp').checked ? 'true' : 'false');
   fd.append('cdp_endpoint', document.getElementById('cdp_endpoint').value);
   fd.append('strict_step2', document.getElementById('strict_step2').checked ? 'true' : 'false');
-  fd.append('skip_step2', document.getElementById('skip_step2').checked ? 'true' : 'false');
+  fd.append('skip_step2', 'false');
   fd.append('concurrent', document.getElementById('concurrent').value || '1');
   fd.append('start', document.getElementById('start').value || '');
   fd.append('end', document.getElementById('end').value || '');
