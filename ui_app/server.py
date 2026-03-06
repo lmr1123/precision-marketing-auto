@@ -60,6 +60,7 @@ class Task:
     duration_sec: Optional[float] = None
     error: str = ""
     logs: List[str] = field(default_factory=list)
+    generated_links: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -78,6 +79,8 @@ class Task:
             "duration_sec": self.duration_sec,
             "error": self.error,
             "logs_count": len(self.logs),
+            "generated_links": self.generated_links,
+            "latest_link": self.generated_links[-1] if self.generated_links else "",
             "options": {
                 "connect_cdp": self.options.connect_cdp,
                 "cdp_endpoint": self.options.cdp_endpoint,
@@ -168,7 +171,20 @@ class TaskRunner:
             task.completed_plans += 1
         if "❌ 计划 " in line and " 失败 " in line:
             task.completed_plans += 1
+        self._parse_generated_links(task, line)
         self._update_eta(task)
+
+    def _parse_generated_links(self, task: Task, line: str) -> None:
+        # Extract review links from runtime logs for business users.
+        urls = re.findall(r"(https?://[^\s]+)", line)
+        for u in urls:
+            if "precision.dslyy.com" not in u:
+                continue
+            if "#/marketingTemplate/use?" in u or "useId=" in u or "#/marketingTemplate/" in u:
+                if u not in task.generated_links:
+                    task.generated_links.append(u)
+                    if len(task.generated_links) > 20:
+                        task.generated_links = task.generated_links[-20:]
 
     def _update_eta(self, task: Task) -> None:
         if not task.started_at:
@@ -339,12 +355,15 @@ UI_HTML = """
   <title>精准营销自动化任务中心</title>
   <style>
     body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f5f7fb;color:#1f2937}
-    .wrap{max-width:1280px;margin:20px auto;padding:0 16px}
+    .wrap{max-width:1440px;margin:20px auto;padding:0 16px}
+    .layout{display:grid;grid-template-columns:1.1fr .9fr;gap:12px;align-items:start}
     .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:14px;margin-bottom:12px}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
     input,button,select{padding:8px 10px;border:1px solid #d1d5db;border-radius:8px}
     button{background:#0f766e;color:#fff;border:none;cursor:pointer}
     button.secondary{background:#374151}
+    .tip{font-size:12px;color:#6b7280}
+    .hint{font-size:12px;color:#6b7280;display:block}
     table{width:100%;border-collapse:collapse}
     th,td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left;font-size:13px}
     th{background:#f9fafb}
@@ -352,42 +371,55 @@ UI_HTML = """
     .status-running{color:#2563eb}
     .status-success{color:#059669}
     .status-failed{color:#dc2626}
-    #logs{background:#0b1020;color:#dbeafe;height:360px;overflow:auto;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+    #logs{background:#0b1020;color:#dbeafe;height:calc(100vh - 180px);overflow:auto;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+    .right-sticky{position:sticky;top:12px}
+    .link-pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#ecfeff;color:#0f766e;border:1px solid #a5f3fc;font-size:12px;text-decoration:none}
+    @media (max-width: 1100px){
+      .layout{grid-template-columns:1fr}
+      #logs{height:360px}
+      .right-sticky{position:static}
+    }
   </style>
 </head>
 <body>
 <div class="wrap">
-  <div class="card">
-    <h3 style="margin:0 0 10px 0">批量导入 CSV 并执行</h3>
-    <div class="row">
-      <input id="files" type="file" multiple accept=".csv"/>
-      <label><input id="connect_cdp" type="checkbox" checked/> CDP接管</label>
-      <label>CDP: <input id="cdp_endpoint" value="http://127.0.0.1:18800" style="width:220px"/></label>
-      <label><input id="strict_step2" type="checkbox" checked/> strict-step2</label>
-      <label><input id="skip_step2" type="checkbox"/> skip-step2</label>
-      <label>并发 <input id="concurrent" type="number" min="1" value="1" style="width:70px"/></label>
-      <label>start <input id="start" type="number" min="1" style="width:80px"/></label>
-      <label>end <input id="end" type="number" min="1" style="width:80px"/></label>
-      <label>hold <input id="hold_seconds" type="number" min="0" value="2" style="width:70px"/></label>
-      <button onclick="upload()">上传并入队</button>
-      <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
+  <div class="layout">
+    <div>
+      <div class="card">
+        <h3 style="margin:0 0 10px 0">批量导入并执行（业务版）</h3>
+        <div class="row">
+          <input id="files" type="file" multiple accept=".csv"/>
+          <label><input id="connect_cdp" type="checkbox" checked/> 复用当前已登录浏览器</label>
+          <label>浏览器调试地址: <input id="cdp_endpoint" value="http://127.0.0.1:18800" style="width:220px"/></label>
+          <label title="开启后，第2步关键字段校验失败会立刻中断，建议联调用开，正式批量可关"><input id="strict_step2" type="checkbox" checked/> 严格校验第2步（推荐）</label>
+          <label title="仅用于快速联调第1步和第3步"><input id="skip_step2" type="checkbox"/> 跳过第2步（联调用）</label>
+          <label>并发任务数 <input id="concurrent" type="number" min="1" value="1" style="width:70px"/></label>
+          <label>从第几行开始 <input id="start" type="number" min="1" style="width:90px"/></label>
+          <label>到第几行结束 <input id="end" type="number" min="1" style="width:90px"/></label>
+          <label>结束后保留浏览器(秒) <input id="hold_seconds" type="number" min="0" value="2" style="width:70px"/></label>
+          <button onclick="upload()">上传并开始执行</button>
+          <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
+        </div>
+        <div class="tip" style="margin-top:8px">说明: 上传多个 CSV 后会按任务队列执行。可点击“日志”查看实时进度，失败任务可单独重试。</div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0 0 8px 0">任务列表</h3>
+        <table>
+          <thead><tr>
+            <th>文件</th><th>状态</th><th>进度</th><th>成功/失败</th><th>开始</th><th>完成</th><th>预计完成</th><th>耗时(s)</th><th>复核链接</th><th>操作</th>
+          </tr></thead>
+          <tbody id="taskRows"></tbody>
+        </table>
+      </div>
     </div>
-  </div>
-
-  <div class="card">
-    <h3 style="margin:0 0 8px 0">任务列表</h3>
-    <table>
-      <thead><tr>
-        <th>文件</th><th>状态</th><th>进度</th><th>成功/失败</th><th>开始</th><th>完成</th><th>预计完成</th><th>耗时(s)</th><th>操作</th>
-      </tr></thead>
-      <tbody id="taskRows"></tbody>
-    </table>
-  </div>
-
-  <div class="card">
-    <h3 style="margin:0 0 8px 0">执行日志</h3>
-    <div id="logTitle" style="margin-bottom:8px;color:#6b7280">未选中任务</div>
-    <div id="logs"></div>
+    <div class="right-sticky">
+      <div class="card">
+        <h3 style="margin:0 0 8px 0">执行日志（实时）</h3>
+        <div id="logTitle" style="margin-bottom:8px;color:#6b7280">未选中任务</div>
+        <div id="logs"></div>
+      </div>
+    </div>
   </div>
 </div>
 <script>
@@ -426,10 +458,26 @@ async function retryFailed(){
 
 function fmtStatus(s){return '<span class="status-'+s+'">'+s+'</span>';}
 
+function renderReviewLink(task){
+  if(task.latest_link){
+    return `<a class="link-pill" href="${task.latest_link}" target="_blank">打开生成页</a>`;
+  }
+  return '<span class="hint">待生成</span>';
+}
+
 async function refreshTasks(){
   const r = await fetch('/api/tasks');
   const data = await r.json();
   const rows = data.tasks || [];
+  if(!selectedTaskId){
+    const running = rows.find(t => t.status === 'running');
+    if(running){
+      selectedTaskId = running.id;
+      logOffset = 0;
+      document.getElementById('logs').textContent = "";
+      document.getElementById('logTitle').textContent = `任务 ${running.filename} (${running.status})`;
+    }
+  }
   const tbody = document.getElementById('taskRows');
   tbody.innerHTML = rows.map(t => `
     <tr>
@@ -441,6 +489,7 @@ async function refreshTasks(){
       <td>${esc(t.ended_at || '-')}</td>
       <td>${esc(t.eta || '-')}</td>
       <td>${t.duration_sec ? t.duration_sec.toFixed(1) : '-'}</td>
+      <td>${renderReviewLink(t)}</td>
       <td>
         <button onclick="selectTask('${t.id}')">日志</button>
         ${t.status === 'failed' ? `<button class="secondary" onclick="retryTask('${t.id}')">重试</button>` : ''}
@@ -477,4 +526,3 @@ refreshTasks();
 </body>
 </html>
 """
-
