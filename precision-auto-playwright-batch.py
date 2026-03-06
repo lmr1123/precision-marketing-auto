@@ -1529,8 +1529,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 
                                 if selected in ['checked', 'already_checked']:
                                     print(f"      ✅ 已选择营运区: {area}")
-                                    # 必须点击“选择数据”树弹窗自己的主按钮“确 定”，然后回读“已选：N”
-                                    confirm_area_ok = await frame.evaluate("""() => {
+                                    # 只关闭“选择数据”小弹窗，不关闭“编辑分群”大弹窗。
+                                    confirm_area_result = await frame.evaluate("""() => {
                                         const norm = (s) => (s || '').replace(/\\s+/g, '');
                                         const isVisible = (el) => {
                                             if (!el) return false;
@@ -1538,18 +1538,40 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             const rect = el.getBoundingClientRect();
                                             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
                                         };
-                                        const buttons = Array.from(document.querySelectorAll('button.ant-btn.ant-btn-primary'))
+                                        const textOf = (el) => norm(el?.textContent || '');
+                                        const modalCandidates = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root'))
                                             .filter(isVisible)
-                                            .filter(b => {
-                                                const t = norm(b.textContent);
-                                                return t === '确定' || t === '确定' || t === '确 定';
+                                            .map(el => ({
+                                                el,
+                                                area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+                                                hasTree: !!el.querySelector('.ant-tree, .ant-tree-list-holder-inner'),
+                                            }))
+                                            .filter(x => x.hasTree)
+                                            .sort((a, b) => a.area - b.area);
+                                        const pickerModal = modalCandidates.length ? modalCandidates[0].el : null;
+                                        if (!pickerModal) {
+                                            return { ok: false, reason: 'picker_modal_not_found' };
+                                        }
+                                        const btn = Array.from(pickerModal.querySelectorAll('button.ant-btn.ant-btn-primary'))
+                                            .find(b => {
+                                                const t = textOf(b);
+                                                return t === '确定' || t === '确 定';
                                             });
-                                        const hit = buttons.length ? buttons[buttons.length - 1] : null;
-                                        if (!hit) return false;
-                                        hit.click();
-                                        return true;
+                                        if (!btn) {
+                                            return { ok: false, reason: 'picker_confirm_not_found' };
+                                        }
+                                        btn.click();
+                                        const pickerStillVisible = isVisible(pickerModal);
+                                        const countNode = Array.from(document.querySelectorAll('div, span'))
+                                            .filter(isVisible)
+                                            .find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
+                                        return {
+                                            ok: true,
+                                            pickerStillVisible,
+                                            selectedCount: countNode ? (countNode.textContent || '').trim() : ''
+                                        };
                                     }""")
-                                    await asyncio.sleep(0.8)
+                                    await asyncio.sleep(1.0)
                                     selected_count_text = await frame.evaluate("""() => {
                                         const isVisible = (el) => {
                                             if (!el) return false;
@@ -1561,11 +1583,17 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         const hit = nodes.find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
                                         return hit ? (hit.textContent || '').trim() : '';
                                     }""")
-                                    if confirm_area_ok and selected_count_text:
+                                    picker_still_visible = bool(confirm_area_result.get("pickerStillVisible"))
+                                    if confirm_area_result.get("ok") and not picker_still_visible and selected_count_text:
                                         print(f"      ✅ 营运区已确认: {selected_count_text}")
                                         results["第2步-主消费营运区"] = True
                                     else:
-                                        print(f"      ⚠️ 营运区确认失败: confirm={confirm_area_ok}, selectedCount={selected_count_text}")
+                                        print(
+                                            "      ⚠️ 营运区确认失败: "
+                                            f"reason={confirm_area_result.get('reason','')}, "
+                                            f"pickerStillVisible={picker_still_visible}, "
+                                            f"selectedCount={selected_count_text or confirm_area_result.get('selectedCount','')}"
+                                        )
                                 else:
                                     print(f"      ⚠️ 营运区勾选失败: {area} ({selected})")
                             else:
@@ -1596,7 +1624,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 """)
                                 if selected_direct == "checked":
                                     print(f"      ✅ 已直接勾选营运区: {area}")
-                                    confirm_area_ok = await frame.evaluate("""() => {
+                                    confirm_area_result = await frame.evaluate("""() => {
                                         const norm = (s) => (s || '').replace(/\\s+/g, '');
                                         const isVisible = (el) => {
                                             if (!el) return false;
@@ -1604,18 +1632,40 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             const rect = el.getBoundingClientRect();
                                             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
                                         };
-                                        const buttons = Array.from(document.querySelectorAll('button.ant-btn.ant-btn-primary'))
+                                        const textOf = (el) => norm(el?.textContent || '');
+                                        const modalCandidates = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root'))
                                             .filter(isVisible)
-                                            .filter(b => {
-                                                const t = norm(b.textContent);
-                                                return t === '确定' || t === '确定' || t === '确 定';
+                                            .map(el => ({
+                                                el,
+                                                area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+                                                hasTree: !!el.querySelector('.ant-tree, .ant-tree-list-holder-inner'),
+                                            }))
+                                            .filter(x => x.hasTree)
+                                            .sort((a, b) => a.area - b.area);
+                                        const pickerModal = modalCandidates.length ? modalCandidates[0].el : null;
+                                        if (!pickerModal) {
+                                            return { ok: false, reason: 'picker_modal_not_found' };
+                                        }
+                                        const btn = Array.from(pickerModal.querySelectorAll('button.ant-btn.ant-btn-primary'))
+                                            .find(b => {
+                                                const t = textOf(b);
+                                                return t === '确定' || t === '确 定';
                                             });
-                                        const hit = buttons.length ? buttons[buttons.length - 1] : null;
-                                        if (!hit) return false;
-                                        hit.click();
-                                        return true;
+                                        if (!btn) {
+                                            return { ok: false, reason: 'picker_confirm_not_found' };
+                                        }
+                                        btn.click();
+                                        const pickerStillVisible = isVisible(pickerModal);
+                                        const countNode = Array.from(document.querySelectorAll('div, span'))
+                                            .filter(isVisible)
+                                            .find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
+                                        return {
+                                            ok: true,
+                                            pickerStillVisible,
+                                            selectedCount: countNode ? (countNode.textContent || '').trim() : ''
+                                        };
                                     }""")
-                                    await asyncio.sleep(0.8)
+                                    await asyncio.sleep(1.0)
                                     selected_count_text = await frame.evaluate("""() => {
                                         const isVisible = (el) => {
                                             if (!el) return false;
@@ -1627,11 +1677,17 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         const hit = nodes.find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
                                         return hit ? (hit.textContent || '').trim() : '';
                                     }""")
-                                    if confirm_area_ok and selected_count_text:
+                                    picker_still_visible = bool(confirm_area_result.get("pickerStillVisible"))
+                                    if confirm_area_result.get("ok") and not picker_still_visible and selected_count_text:
                                         print(f"      ✅ 营运区已确认: {selected_count_text}")
                                         results["第2步-主消费营运区"] = True
                                     else:
-                                        print(f"      ⚠️ 营运区确认失败: confirm={confirm_area_ok}, selectedCount={selected_count_text}")
+                                        print(
+                                            "      ⚠️ 营运区确认失败: "
+                                            f"reason={confirm_area_result.get('reason','')}, "
+                                            f"pickerStillVisible={picker_still_visible}, "
+                                            f"selectedCount={selected_count_text or confirm_area_result.get('selectedCount','')}"
+                                        )
                                 else:
                                     print(f"      ⚠️ 直接勾选失败: {selected_direct}，请检查第2步页面是否空白/未加载完整")
                         except Exception as e:
