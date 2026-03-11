@@ -59,6 +59,9 @@ def _default_headers() -> List[str]:
         "step3_end_time",
         "executor_employees",
         "send_content",
+        "channels",
+        "moments_add_images",
+        "moments_image_paths",
     ]
 
 
@@ -73,6 +76,11 @@ def load_template_headers_and_sample() -> tuple[List[str], List[str]]:
                         headers = [str(x or "").strip() for x in rows[0]]
                         sample = [str(x or "").strip() for x in (rows[1] if len(rows) > 1 else [""] * len(headers))]
                         if headers:
+                            defaults = _default_headers()
+                            missing = [h for h in defaults if h not in headers]
+                            if missing:
+                                headers = headers + missing
+                                sample = sample + [""] * len(missing)
                             return headers, sample
             except Exception:
                 continue
@@ -112,6 +120,60 @@ def convert_uploaded_xlsx_to_csv(upload: UploadFile, dst_csv: Path) -> None:
         for row in ws.iter_rows(values_only=True):
             writer.writerow(["" if v is None else str(v) for v in row])
     wb.close()
+
+
+def save_uploaded_moments_images(task_id: str, images: List[tuple[str, bytes]]) -> List[str]:
+    """保存UI上传的朋友圈图片，返回本地绝对路径（按上传顺序）。"""
+    if not images:
+        return []
+    out_dir = UPLOAD_DIR / f"{task_id}_images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_paths: List[str] = []
+    for idx, (name, data) in enumerate(images, 1):
+        ext = Path(name).suffix.lower()
+        if ext not in {".jpg", ".jpeg", ".png"}:
+            raise HTTPException(status_code=400, detail=f"朋友圈图片格式仅支持 jpg/png: {name}")
+        if len(data) >= 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail=f"朋友圈图片需小于10MB: {name}")
+        safe = re.sub(r"[^0-9A-Za-z._-]+", "_", Path(name).name)
+        dst = out_dir / f"{idx:02d}_{safe}"
+        with dst.open("wb") as f:
+            f.write(data)
+        out_paths.append(str(dst.resolve()))
+    if len(out_paths) > 9:
+        raise HTTPException(status_code=400, detail=f"朋友圈图片最多9张，当前{len(out_paths)}张")
+    return out_paths
+
+
+def inject_moments_images_to_csv(dst_csv: Path, image_paths: List[str], step3_channels: str) -> None:
+    """将上传图片信息回写到任务CSV（覆盖朋友圈场景行）。"""
+    if not image_paths:
+        return
+    with dst_csv.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not headers:
+        return
+
+    for col in ("moments_add_images", "moments_image_paths", "channels"):
+        if col not in headers:
+            headers.append(col)
+
+    ui_channels = step3_channels or ""
+    for row in rows:
+        row_channels = str(row.get("channels", "") or "").strip()
+        channel_scope = row_channels or ui_channels
+        if "会员通-发客户朋友圈" not in channel_scope:
+            continue
+        row["moments_add_images"] = "是"
+        row["moments_image_paths"] = "|".join(image_paths)
+
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in headers})
 
 
 @dataclass
@@ -422,6 +484,7 @@ async def download_template_xlsx():
 @app.post("/api/tasks/upload")
 async def upload_tasks(
     files: List[UploadFile] = File(...),
+    moments_images: List[UploadFile] = File(default=[]),
     connect_cdp: bool = Form(True),
     cdp_endpoint: str = Form("http://127.0.0.1:18800"),
     strict_step2: bool = Form(True),
@@ -431,6 +494,7 @@ async def upload_tasks(
     end: str = Form(""),
     hold_seconds: int = Form(2),
     step3_channels: str = Form(""),
+    moments_add_images: bool = Form(False),
     operator: str = Form(""),
 ) -> JSONResponse:
     created = []
@@ -445,6 +509,17 @@ async def upload_tasks(
         hold_seconds=max(0, hold_seconds),
         step3_channels=step3_channels.strip(),
     )
+
+    # 朋友圈图片（由本UI上传），按上传顺序透传到任务CSV
+    image_blobs: List[tuple[str, bytes]] = []
+    if moments_add_images:
+        for mf in moments_images:
+            b = await mf.read()
+            if b:
+                image_blobs.append((mf.filename or f"image_{len(image_blobs)+1}.jpg", b))
+        if not image_blobs:
+            raise HTTPException(status_code=400, detail="已勾选朋友圈图片上传，但未选择图片文件")
+
     for f in files:
         lower = f.filename.lower()
         if not (lower.endswith(".csv") or lower.endswith(".xlsx")):
@@ -457,6 +532,9 @@ async def upload_tasks(
         else:
             with dst.open("wb") as out:
                 shutil.copyfileobj(f.file, out)
+        if moments_add_images and image_blobs:
+            image_paths = save_uploaded_moments_images(tid, image_blobs)
+            inject_moments_images_to_csv(dst, image_paths, options.step3_channels)
         op = operator.strip() or os.getenv("USER") or getpass.getuser() or "unknown"
         task = Task(id=tid, filename=f.filename, file_path=str(dst), options=options, operator=op)
         await runner.add_task(task)
@@ -526,13 +604,15 @@ UI_HTML = """
           <label>结束后保留浏览器(秒) <input id="hold_seconds" type="number" min="0" value="2" style="width:70px"/></label>
           <label><input class="step3_channel" type="checkbox" value="会员通-发客户消息" checked/> 会员通-发客户消息</label>
           <label><input class="step3_channel" type="checkbox" value="会员通-发客户朋友圈"/> 会员通-发客户朋友圈</label>
+          <label><input id="moments_add_images" type="checkbox"/> 朋友圈上传图片</label>
+          <label>朋友圈图片 <input id="moments_images" type="file" multiple accept=".jpg,.jpeg,.png"/></label>
           <label>操作人 <input id="operator" style="width:140px" placeholder="自动识别"/></label>
           <button onclick="upload()">上传并开始执行</button>
           <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
           <a class="link-pill" href="/api/template/xlsx">下载Excel模板</a>
           <a class="link-pill" href="/api/template/csv">下载CSV模板(防乱码)</a>
         </div>
-        <div class="tip" style="margin-top:8px">说明: 支持上传 CSV / XLSX。Windows Excel 如遇 CSV 乱码，请优先下载“Excel模板”或“CSV模板(UTF-8 BOM)”。</div>
+        <div class="tip" style="margin-top:8px">说明: 支持上传 CSV / XLSX。Windows Excel 如遇 CSV 乱码，请优先下载“Excel模板”或“CSV模板(UTF-8 BOM)”。如勾选“朋友圈上传图片”，请在本页面选择图片文件（最多9张，jpg/png且<10MB），系统会自动写入任务CSV并按顺序上传。</div>
       </div>
 
       <div class="card">
@@ -575,6 +655,9 @@ async function upload(){
   fd.append('hold_seconds', document.getElementById('hold_seconds').value || '2');
   const channels = Array.from(document.querySelectorAll('.step3_channel:checked')).map(el => el.value);
   fd.append('step3_channels', channels.join(','));
+  fd.append('moments_add_images', document.getElementById('moments_add_images').checked ? 'true' : 'false');
+  const momentImgs = document.getElementById('moments_images').files;
+  for(const img of momentImgs){ fd.append('moments_images', img); }
   fd.append('operator', document.getElementById('operator').value || '');
   const r = await fetch('/api/tasks/upload', {method:'POST', body:fd});
   if(!r.ok){ alert(await r.text()); return; }

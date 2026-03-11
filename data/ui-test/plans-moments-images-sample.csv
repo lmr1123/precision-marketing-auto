@@ -1,0 +1,3 @@
+name,region,theme,use_recommend,start_time,end_time,trigger_type,send_time,global_limit,set_target,group_name,update_type,main_operating_area,coupon_ids,sms_content,step3_end_time,executor_employees,send_content,channels,moments_add_images,moments_image_paths
+测试-朋友圈-不传图,省区,其他,否,2026/3/12 8:00,2026/3/19 8:00,定时-单次任务,2026/3/13 8:00,不限制,否,测试-≥20积分会员（未绑客）,自动更新,广佛省区,1-20000005475,短信渠道文案（朋友圈场景可忽略）,2026/3/19 8:00,西北大区、湖北省区,朋友圈发送内容测试A,会员通-发客户朋友圈,否,
+测试-朋友圈-上传3张图,省区,其他,否,2026/3/12 8:00,2026/3/19 8:00,定时-单次任务,2026/3/13 8:00,不限制,否,测试-≥20积分会员（未绑客）,自动更新,广佛省区,1-20000005475,短信渠道文案（朋友圈场景可忽略）,2026/3/19 8:00,西北大区、湖北省区,朋友圈发送内容测试B,会员通-发客户朋友圈,是,/Users/liminrong/Pictures/pm/1.jpg|/Users/liminrong/Pictures/pm/2.png|/Users/liminrong/Pictures/pm/3.jpg

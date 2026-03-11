@@ -31,6 +31,7 @@ import argparse
 import subprocess
 import re
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
@@ -60,6 +61,8 @@ DEFAULT_PLAN = {
     "executor_employees": "西北大区、湖北省区",
     "send_content": "企微1对1内容测试",
     "channels": "",
+    "moments_add_images": "否",
+    "moments_image_paths": "",
 }
 
 HEADLESS = False
@@ -101,6 +104,8 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "executor_employees": row.get("executor_employees", "").strip(),
                 "send_content": row.get("send_content", "").strip(),
                 "channels": row.get("channels", "").strip(),
+                "moments_add_images": row.get("moments_add_images", "").strip(),
+                "moments_image_paths": row.get("moments_image_paths", "").strip(),
             }
             plans.append(plan)
     return plans
@@ -386,6 +391,35 @@ def parse_step3_channels(raw: str) -> list:
         seen.add(v)
     return out
 
+
+def parse_bool_flag(raw: str, default: bool = False) -> bool:
+    """解析业务布尔值：是/否、true/false、1/0、y/n。"""
+    if raw is None:
+        return default
+    v = str(raw).strip().lower()
+    if not v:
+        return default
+    if v in {"1", "true", "yes", "y", "on", "是", "需", "需要"}:
+        return True
+    if v in {"0", "false", "no", "n", "off", "否", "不", "不需要"}:
+        return False
+    return default
+
+
+def parse_file_list(raw: str) -> list:
+    """解析文件路径列表（支持 | 、 , ， ; ； 换行 分隔）。"""
+    if not raw:
+        return []
+    parts = [p.strip() for p in re.split(r"[|,，;；、\n\r]", str(raw)) if p.strip()]
+    out = []
+    seen = set()
+    for p in parts:
+        if p in seen:
+            continue
+        out.append(p)
+        seen.add(p)
+    return out
+
 def sanitize_sms_content(content: str) -> str:
     """清洗短信内容中的高风险非法字符（按 P1106 场景）。"""
     if not content:
@@ -645,6 +679,120 @@ async def fill_step3_sms_content(page, content: str) -> bool:
     except:
         pass
     return True
+
+
+async def upload_step3_moments_images(page, raw_paths: str):
+    """第3步朋友圈图片：按顺序逐张上传（最多9张，jpg/png且<10MB）。"""
+    img_paths_raw = parse_file_list(raw_paths)
+    if not img_paths_raw:
+        return False, "未提供图片路径"
+
+    if len(img_paths_raw) > 9:
+        return False, f"图片数量超限：{len(img_paths_raw)}（最多9张）"
+
+    resolved = []
+    for p in img_paths_raw:
+        path = Path(os.path.expanduser(p))
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if not path.exists():
+            return False, f"图片不存在: {path}"
+        ext = path.suffix.lower()
+        if ext not in {".jpg", ".jpeg", ".png"}:
+            return False, f"图片格式不支持: {path.name}（仅支持jpg/png）"
+        size = path.stat().st_size
+        if size >= 10 * 1024 * 1024:
+            return False, f"图片超10MB: {path.name}"
+        resolved.append(str(path))
+
+    # 定位朋友圈“添加图片”按钮（优先精准命中 .upload-btn + .text1=添加图片）
+    locate_info = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const normalize = (s) => (s || '').replace(/\\s+/g, '');
+
+        // 路径1：精准命中 upload-btn 内 text1=添加图片
+        const uploadBtns = Array.from(document.querySelectorAll('.upload-btn')).filter(isVisible);
+        for (const btn of uploadBtns) {
+            const text1 = btn.querySelector('.text1');
+            const t = normalize(text1 ? text1.textContent : btn.textContent);
+            if (!t.includes('添加图片')) continue;
+            btn.setAttribute('data-step3-image-trigger', '1');
+            const root = btn.closest('.item, .el-form-item, .ant-form-item, .channel, .module, .card') || btn.parentElement || btn;
+            if (root) root.setAttribute('data-step3-image-root', '1');
+            return { ok: true, mode: 'upload-btn' };
+        }
+
+        // 路径2：全局文本命中“添加图片”，回溯到可点击容器
+        const textNodes = Array.from(document.querySelectorAll('.text1, span, div, button, a')).filter(isVisible);
+        for (const n of textNodes) {
+            const t = normalize(n.textContent || '');
+            if (!t.includes('添加图片')) continue;
+            const clickable = n.closest('.upload-btn, .el-upload, button, a, div, span') || n;
+            clickable.setAttribute('data-step3-image-trigger', '1');
+            const root = clickable.closest('.item, .el-form-item, .ant-form-item, .channel, .module, .card') || clickable.parentElement || clickable;
+            if (root) root.setAttribute('data-step3-image-root', '1');
+            return { ok: true, mode: 'text-fallback' };
+        }
+        return { ok: false, mode: 'not-found' };
+    }""")
+    if not locate_info or (not locate_info.get("ok")):
+        return False, f"未找到“添加图片”上传入口（mode={locate_info.get('mode','unknown') if locate_info else 'unknown'}）"
+
+    trigger = page.locator('[data-step3-image-trigger="1"]').first
+    if await trigger.count() == 0:
+        return False, "上传入口不可用"
+    print(f"      🧪 图片入口定位: {locate_info.get('mode', 'unknown')}")
+
+    for idx, file_path in enumerate(resolved, 1):
+        try:
+            await trigger.scroll_into_view_if_needed()
+        except Exception:
+            pass
+
+        uploaded = False
+        # 优先走 filechooser 触发链路（最接近真实用户）
+        try:
+            async with page.expect_file_chooser(timeout=3500) as fc_info:
+                try:
+                    await trigger.click(force=True)
+                except Exception:
+                    await page.evaluate("""() => {
+                        const t = document.querySelector('[data-step3-image-trigger="1"]');
+                        if (t) t.click();
+                    }""")
+            chooser = await fc_info.value
+            await chooser.set_files(file_path)
+            uploaded = True
+        except Exception:
+            uploaded = False
+
+        # 兜底：优先使用当前图片模块内 file input，再使用全局最后一个
+        if not uploaded:
+            try:
+                scoped_input = page.locator('[data-step3-image-root="1"] input[type="file"]').last
+                if await scoped_input.count() > 0:
+                    await scoped_input.set_input_files(file_path)
+                    uploaded = True
+                else:
+                    file_input = page.locator('input[type="file"]').last
+                    if await file_input.count() > 0:
+                        await file_input.set_input_files(file_path)
+                        uploaded = True
+            except Exception:
+                uploaded = False
+
+        if not uploaded:
+            return False, f"第{idx}张上传失败: {Path(file_path).name}"
+
+        print(f"      ✅ 已上传图片({idx}/{len(resolved)}): {Path(file_path).name}")
+        await asyncio.sleep(0.35)
+
+    return True, f"已上传{len(resolved)}张"
 
 def extract_api_code_message(text: str):
     """从接口响应体中提取 code/message。"""
@@ -2398,11 +2546,18 @@ async def fill_step3(
     step3_end_time = data.get("step3_end_time") or data.get("end_time")
     executor_vals = data.get("executor_employees", "")
     send_content = data.get("send_content", "")
+    moments_add_images = parse_bool_flag(data.get("moments_add_images", "否"), default=False)
+    moments_image_paths = data.get("moments_image_paths", "")
+    moments_gate_ok = True
+    moments_gate_errors = []
     if moments_required:
         print(f"   📅 结束时间: {step3_end_time}")
         end_ok = await fill_step3_end_time(page, step3_end_time)
         print(f"      {'✅' if end_ok else '⚠️'} 结束时间{'已填充' if end_ok else '未匹配到字段'}")
         results["第3步-结束时间"] = end_ok
+        if not end_ok:
+            moments_gate_ok = False
+            moments_gate_errors.append("结束时间")
 
         mode_ok = await set_step3_distribution_mode(page, "指定门店分配")
         print(f"   ⚙️ 分配方式: {'指定门店分配' if mode_ok else '未找到分配方式控件'}")
@@ -2426,10 +2581,16 @@ async def fill_step3(
             else:
                 print("      ✅ 手动执行员工校验通过")
             results["第3步-执行员工"] = manual_ok
+            if not manual_ok:
+                moments_gate_ok = False
+                moments_gate_errors.append("执行员工")
         else:
             exec_ok = await fill_step3_executor(page, executor_vals)
             print(f"      {'✅' if exec_ok else '⚠️'} 执行员工{'已选择' if exec_ok else '未完整选择'}")
             results["第3步-执行员工"] = exec_ok
+            if not exec_ok:
+                moments_gate_ok = False
+                moments_gate_errors.append("执行员工")
             debug_data = await dump_executor_debug(page)
             targets = split_multi_values(executor_vals)
             overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
@@ -2440,13 +2601,34 @@ async def fill_step3(
         send_ok = await fill_step3_send_content(page, send_content)
         print(f"      {'✅' if send_ok else '⚠️'} 发送内容{'已填充' if send_ok else '未匹配到字段'}")
         results["第3步-发送内容"] = send_ok
+        if not send_ok:
+            moments_gate_ok = False
+            moments_gate_errors.append("发送内容")
+
+        print(f"   🖼️ 朋友圈图片: {'需要上传' if moments_add_images else '不上传'}")
+        if moments_add_images:
+            img_ok, img_msg = await upload_step3_moments_images(page, moments_image_paths)
+            print(f"      {'✅' if img_ok else '⚠️'} {img_msg}")
+            results["第3步-朋友圈图片"] = img_ok
+            if not img_ok:
+                moments_gate_ok = False
+                moments_gate_errors.append("朋友圈图片")
+        else:
+            print("      ⏭️ 未勾选图片上传，已跳过")
+            results["第3步-朋友圈图片"] = True
     else:
         print("   📅 结束时间: ⏭️ 当前所选渠道无需填写，已跳过")
         print("   👥 执行员工: ⏭️ 当前所选渠道无需填写，已跳过")
         print("   📝 发送内容: ⏭️ 当前所选渠道无需填写，已跳过")
+        print("   🖼️ 朋友圈图片: ⏭️ 当前所选渠道无需填写，已跳过")
         results["第3步-结束时间"] = True
         results["第3步-执行员工"] = True
         results["第3步-发送内容"] = True
+        results["第3步-朋友圈图片"] = True
+
+    # 朋友圈渠道下，必填失败直接中断，不进入保存动作
+    if moments_required and (not moments_gate_ok):
+        raise RuntimeError(f"朋友圈必填项未完成: {','.join(moments_gate_errors)}")
 
     # 通知配置场景：将当前配置复制到其他地区，避免部分地区短信为空导致 P1114。
     # 默认不自动执行“渠道信息复制”，避免在部分页面触发内容重置副作用。
@@ -2463,14 +2645,20 @@ async def fill_step3(
         refill_ok = await fill_step3_sms_content(page, sms_content)
         print(f"      {'✅' if refill_ok else '⚠️'} 重填短信{'成功' if refill_ok else '失败'}")
         sms_before_save = await read_step3_sms_text(page)
-    print(f"      🧪 保存前短信回读长度: {len(sms_before_save)}")
+    if sms_required:
+        print(f"      🧪 保存前短信回读长度: {len(sms_before_save)}")
+    else:
+        print("      🧪 保存前短信回读: 已跳过（当前渠道无需短信）")
     send_before_save = await read_step3_send_text(page) if moments_required else ""
     if moments_required and len(send_before_save) == 0 and send_content:
         print("      ⚠️ 保存前发送内容为空，执行一次重填...")
         refill_send_ok = await fill_step3_send_content(page, send_content)
         print(f"      {'✅' if refill_send_ok else '⚠️'} 重填发送内容{'成功' if refill_send_ok else '失败'}")
         send_before_save = await read_step3_send_text(page)
-    print(f"      🧪 保存前发送内容回读长度: {len(send_before_save)}")
+    if moments_required:
+        print(f"      🧪 保存前发送内容回读长度: {len(send_before_save)}")
+    else:
+        print("      🧪 保存前发送内容回读: 已跳过（当前渠道无需发送内容）")
     loop = asyncio.get_running_loop()
     save_resp_task = loop.create_future()
 
@@ -2502,9 +2690,15 @@ async def fill_step3(
     
     await wait_and_log(page, 2, "保存中...")
     sms_after_click = await read_step3_sms_text(page) if sms_required else ""
-    print(f"      🧪 点击保存后短信回读长度: {len(sms_after_click)}")
+    if sms_required:
+        print(f"      🧪 点击保存后短信回读长度: {len(sms_after_click)}")
+    else:
+        print("      🧪 点击保存后短信回读: 已跳过（当前渠道无需短信）")
     send_after_click = await read_step3_send_text(page) if moments_required else ""
-    print(f"      🧪 点击保存后发送内容回读长度: {len(send_after_click)}")
+    if moments_required:
+        print(f"      🧪 点击保存后发送内容回读长度: {len(send_after_click)}")
+    else:
+        print("      🧪 点击保存后发送内容回读: 已跳过（当前渠道无需发送内容）")
     saved_ok = await ensure_step3_saved(page, save_resp_task=save_resp_task)
     try:
         page.remove_listener("response", _on_response)
