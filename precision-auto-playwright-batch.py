@@ -1570,6 +1570,61 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                     if frame_diag.get("textLen", 0) == 0 or frame_diag.get("hasErrKeyword"):
                         raise RuntimeError("第2步 iframe 内容为空或疑似网络/代理异常，请检查 VPN/代理并重试")
 
+                    # 关键控件就绪等待：避免 iframe 刚打开时 textLen 很低、控件尚未挂载导致后续字段全 miss。
+                    ready = await frame.evaluate("""() => {
+                        const isVisible = (el) => {
+                            if (!el) return false;
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                        };
+                        const hasNameInput = !!Array.from(document.querySelectorAll('input'))
+                            .find(i => isVisible(i) && (
+                                (i.getAttribute('placeholder') || '').includes('名称') ||
+                                (i.getAttribute('placeholder') || '').includes('请输入')
+                            ));
+                        const hasPickBtn = !!Array.from(document.querySelectorAll('button'))
+                            .find(b => isVisible(b) && (b.textContent || '').replace(/\\s+/g, '').includes('选择数据'));
+                        const hasCouponRow = !!Array.from(document.querySelectorAll('.event-row, .ant-form-item, .ant-row, div'))
+                            .find(r => isVisible(r) && (r.textContent || '').replace(/\\s+/g, '').includes('券规则ID'));
+                        const textLen = ((document.body && document.body.innerText) ? document.body.innerText.trim().length : 0);
+                        return { ok: (hasNameInput || hasPickBtn || hasCouponRow), hasNameInput, hasPickBtn, hasCouponRow, textLen };
+                    }""")
+                    if not ready.get("ok"):
+                        print(f"      ⏳ iframe 控件未就绪，等待加载... textLen={ready.get('textLen', 0)}")
+                        for _ in range(20):  # 最多再等 10 秒
+                            await asyncio.sleep(0.5)
+                            ready = await frame.evaluate("""() => {
+                                const isVisible = (el) => {
+                                    if (!el) return false;
+                                    const style = window.getComputedStyle(el);
+                                    const rect = el.getBoundingClientRect();
+                                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                                };
+                                const hasNameInput = !!Array.from(document.querySelectorAll('input'))
+                                    .find(i => isVisible(i) && (
+                                        (i.getAttribute('placeholder') || '').includes('名称') ||
+                                        (i.getAttribute('placeholder') || '').includes('请输入')
+                                    ));
+                                const hasPickBtn = !!Array.from(document.querySelectorAll('button'))
+                                    .find(b => isVisible(b) && (b.textContent || '').replace(/\\s+/g, '').includes('选择数据'));
+                                const hasCouponRow = !!Array.from(document.querySelectorAll('.event-row, .ant-form-item, .ant-row, div'))
+                                    .find(r => isVisible(r) && (r.textContent || '').replace(/\\s+/g, '').includes('券规则ID'));
+                                const textLen = ((document.body && document.body.innerText) ? document.body.innerText.trim().length : 0);
+                                return { ok: (hasNameInput || hasPickBtn || hasCouponRow), hasNameInput, hasPickBtn, hasCouponRow, textLen };
+                            }""")
+                            if ready.get("ok"):
+                                break
+                        print(
+                            "      🧪 iframe 就绪回读: "
+                            f"ok={ready.get('ok')}, textLen={ready.get('textLen', 0)}, "
+                            f"name={ready.get('hasNameInput')}, pickBtn={ready.get('hasPickBtn')}, coupon={ready.get('hasCouponRow')}"
+                        )
+                    if not ready.get("ok"):
+                        raise RuntimeError(
+                            f"第2步 iframe 控件未就绪（textLen={ready.get('textLen', 0)}），请检查网络/VPN或重试"
+                        )
+
                     # 在 iframe 内填充名称（按标签就近定位 + 回读）
                     print("   📝 名称: " + data.get("group_name", "测试分群"))
                     try:
