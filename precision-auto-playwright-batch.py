@@ -2255,6 +2255,36 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     print("="*50)
     
     await wait_and_log(page, 2, "等待第3步加载...")
+    async def detect_step3_ready() -> bool:
+        return bool(await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
+            const text = items.map(n => n.textContent || '').join(' ');
+            return text.includes('短信内容') || text.includes('发送内容') || text.includes('结束时间');
+        }"""))
+
+    ready = await detect_step3_ready()
+    if not ready:
+        print("   ⚠️ 未检测到第3步字段，尝试再次点击“下一步”...")
+        clicked_next = await click_button_with_text(page, "下一步")
+        if clicked_next:
+            await wait_and_log(page, 2, "重试进入第3步...")
+            ready = await detect_step3_ready()
+    if not ready:
+        debug = await page.evaluate("""() => {
+            const placeholders = Array.from(document.querySelectorAll('input'))
+                .map(i => i.getAttribute('placeholder') || '')
+                .filter(Boolean)
+                .slice(0, 20);
+            return { url: location.href, placeholders };
+        }""")
+        raise RuntimeError(f"未进入第3步页面，停止执行。诊断={debug}")
+
     await page.evaluate("""() => {
         const isVisible = (el) => {
             if (!el) return false;
