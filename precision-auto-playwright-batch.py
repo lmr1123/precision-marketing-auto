@@ -2268,13 +2268,24 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
             return text.includes('短信内容') || text.includes('发送内容') || text.includes('结束时间');
         }"""))
 
-    ready = await detect_step3_ready()
+    async def wait_step3_ready(max_seconds: int = 30, interval: float = 0.5) -> bool:
+        loops = int(max_seconds / interval)
+        for i in range(loops):
+            if await detect_step3_ready():
+                return True
+            # 每 5 秒打一条等待日志，便于观察慢加载
+            if i > 0 and i % int(5 / interval) == 0:
+                print(f"   ⏳ 第3步仍在加载中... ({int(i * interval)}s)")
+            await asyncio.sleep(interval)
+        return False
+
+    ready = await wait_step3_ready(max_seconds=25)
     if not ready:
         print("   ⚠️ 未检测到第3步字段，尝试再次点击“下一步”...")
         clicked_next = await click_button_with_text(page, "下一步")
         if clicked_next:
             await wait_and_log(page, 2, "重试进入第3步...")
-            ready = await detect_step3_ready()
+            ready = await wait_step3_ready(max_seconds=20)
     if not ready:
         debug = await page.evaluate("""() => {
             const placeholders = Array.from(document.querySelectorAll('input'))
@@ -2301,7 +2312,7 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
                     resolve(true);
                     return;
                 }
-                if (Date.now() - started > 6000) {
+                if (Date.now() - started > 12000) {
                     resolve(false);
                     return;
                 }
