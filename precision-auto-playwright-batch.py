@@ -59,6 +59,7 @@ DEFAULT_PLAN = {
     "step3_end_time": "2026-03-08 08:00",
     "executor_employees": "西北大区、湖北省区",
     "send_content": "企微1对1内容测试",
+    "channels": "",
 }
 
 HEADLESS = False
@@ -99,6 +100,7 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "step3_end_time": row.get("step3_end_time", "").strip(),
                 "executor_employees": row.get("executor_employees", "").strip(),
                 "send_content": row.get("send_content", "").strip(),
+                "channels": row.get("channels", "").strip(),
             }
             plans.append(plan)
     return plans
@@ -367,6 +369,22 @@ def split_multi_values(raw: str) -> list:
         return []
     vals = [v.strip() for v in re.split(r"[、,，/]", raw) if v.strip()]
     return vals
+
+
+def parse_step3_channels(raw: str) -> list:
+    """解析第3步渠道多选字符串。支持 、 , ， / | 分隔。"""
+    if not raw:
+        return []
+    vals = [v.strip() for v in re.split(r"[、,，/|]", raw) if v.strip()]
+    # 去重并保序
+    out = []
+    seen = set()
+    for v in vals:
+        if v in seen:
+            continue
+        out.append(v)
+        seen.add(v)
+    return out
 
 def sanitize_sms_content(content: str) -> str:
     """清洗短信内容中的高风险非法字符（按 P1106 场景）。"""
@@ -2249,7 +2267,13 @@ async def skip_step2(page):
 
 # ============ 第3步：触达内容 ============
 
-async def fill_step3(page, data: dict, manual_executor_mode: bool = False, executor_check_override: str = ""):
+async def fill_step3(
+    page,
+    data: dict,
+    manual_executor_mode: bool = False,
+    executor_check_override: str = "",
+    step3_channels_override: str = "",
+):
     """填充第3步：触达内容/短信内容"""
     print("\n📋 第3步：短信内容")
     print("="*50)
@@ -2279,13 +2303,13 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
             await asyncio.sleep(interval)
         return False
 
-    ready = await wait_step3_ready(max_seconds=25)
+    ready = await wait_step3_ready(max_seconds=45)
     if not ready:
         print("   ⚠️ 未检测到第3步字段，尝试再次点击“下一步”...")
         clicked_next = await click_button_with_text(page, "下一步")
         if clicked_next:
             await wait_and_log(page, 2, "重试进入第3步...")
-            ready = await wait_step3_ready(max_seconds=20)
+            ready = await wait_step3_ready(max_seconds=30)
     if not ready:
         debug = await page.evaluate("""() => {
             const placeholders = Array.from(document.querySelectorAll('input'))
@@ -2324,70 +2348,105 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step3-before.png')
     
     results = {}
+    selected_channels = parse_step3_channels(step3_channels_override) or parse_step3_channels(data.get("channels", ""))
+    if selected_channels:
+        print(f"   📡 渠道选择: {'、'.join(selected_channels)}")
+    else:
+        print("   📡 渠道选择: 未指定（按当前页面自动识别）")
+
+    has_sms_editor = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
+        for (const it of items) {
+            const txt = (it.textContent || '').replace(/\\s+/g, '');
+            if (!txt.includes('短信内容')) continue;
+            const ed = Array.from(it.querySelectorAll('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]')).find(isVisible);
+            if (ed) return true;
+        }
+        return false;
+    }""")
+    has_channel_filter = bool(selected_channels)
+    sms_required = ("会员通-发客户消息" in selected_channels) if has_channel_filter else bool(has_sms_editor)
+    moments_required = ("会员通-发客户朋友圈" in selected_channels) if has_channel_filter else True
+
     print("   📝 短信内容...")
     sms_content = data.get("sms_content", "测试短信内容")
     sms_content_clean = sanitize_sms_content(sms_content)
     if sms_content_clean != sms_content:
         print(f"      ⚠️ 短信文案已自动清洗非法字符: {sms_content} -> {sms_content_clean}")
     sms_content = sms_content_clean
-    # 第3步统一填写（不区分渠道类型）：按当前页面字段直接填充。
-    try:
-        sms_ok = await fill_step3_sms_content(page, sms_content)
-        if not sms_ok:
-            raise RuntimeError("未找到可写入的短信内容输入框")
-        print(f"      ✅ 已填充: {sms_content[:30]}...")
-        results["第3步-短信内容"] = True
-    except Exception as e:
-        print(f"      ⚠️ 填充失败: {e}")
-        results["第3步-短信内容"] = False
-
-    # 结束时间
-    step3_end_time = data.get("step3_end_time") or data.get("end_time")
-    print(f"   📅 结束时间: {step3_end_time}")
-    end_ok = await fill_step3_end_time(page, step3_end_time)
-    print(f"      {'✅' if end_ok else '⚠️'} 结束时间{'已填充' if end_ok else '未匹配到字段'}")
-    results["第3步-结束时间"] = end_ok
-
-    # 执行员工（多选）
-    executor_vals = data.get("executor_employees", "")
-    mode_ok = await set_step3_distribution_mode(page, "指定门店分配")
-    print(f"   ⚙️ 分配方式: {'指定门店分配' if mode_ok else '未找到分配方式控件'}")
-    print(f"   👥 执行员工: {executor_vals}")
-    if manual_executor_mode:
-        print("      ⏸️ 手动模式：请在浏览器中手工勾选执行员工后，回到终端按回车继续...")
-        await asyncio.to_thread(input, "Press Enter to continue after manual executor selection...")
-        debug_data = await dump_executor_debug(page)
-        targets = split_multi_values(executor_check_override) if executor_check_override else split_multi_values(executor_vals)
-        overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
-        if overlap_msg:
-            print(f"      ⚠️ {overlap_msg}（当前按业务场景仅提示，不阻断保存）")
-        haystack = " ".join([
-            debug_data.get("inputValue", ""),
-            " ".join(debug_data.get("tags", [])),
-            " ".join([n.get("text", "") for n in debug_data.get("checked", []) if isinstance(n, dict)]),
-        ])
-        manual_ok = all(t in haystack for t in targets)
-        if not manual_ok:
-            print(f"      ⚠️ 手动执行员工校验失败：当前未匹配目标 {targets}")
-        else:
-            print("      ✅ 手动执行员工校验通过")
-        results["第3步-执行员工"] = manual_ok
+    if sms_required:
+        try:
+            sms_ok = await fill_step3_sms_content(page, sms_content)
+            if not sms_ok:
+                raise RuntimeError("未找到可写入的短信内容输入框")
+            print(f"      ✅ 已填充: {sms_content[:30]}...")
+            results["第3步-短信内容"] = True
+        except Exception as e:
+            print(f"      ⚠️ 填充失败: {e}")
+            results["第3步-短信内容"] = False
     else:
-        exec_ok = await fill_step3_executor(page, executor_vals)
-        print(f"      {'✅' if exec_ok else '⚠️'} 执行员工{'已选择' if exec_ok else '未完整选择'}")
-        results["第3步-执行员工"] = exec_ok
-        debug_data = await dump_executor_debug(page)
-        targets = split_multi_values(executor_vals)
-        overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
-        if overlap_msg:
-            print(f"      ⚠️ {overlap_msg}（当前按业务场景仅提示，不阻断保存）")
+        print("      ⏭️ 当前所选渠道无需短信内容，已跳过")
+        results["第3步-短信内容"] = True
 
-    # 发送内容
+    # 朋友圈渠道字段：结束时间、执行员工、发送内容
+    step3_end_time = data.get("step3_end_time") or data.get("end_time")
+    executor_vals = data.get("executor_employees", "")
     send_content = data.get("send_content", "")
-    print(f"   📝 发送内容: {send_content}")
-    send_ok = await fill_step3_send_content(page, send_content)
-    print(f"      {'✅' if send_ok else '⚠️'} 发送内容{'已填充' if send_ok else '未匹配到字段'}")
-    results["第3步-发送内容"] = send_ok
+    if moments_required:
+        print(f"   📅 结束时间: {step3_end_time}")
+        end_ok = await fill_step3_end_time(page, step3_end_time)
+        print(f"      {'✅' if end_ok else '⚠️'} 结束时间{'已填充' if end_ok else '未匹配到字段'}")
+        results["第3步-结束时间"] = end_ok
+
+        mode_ok = await set_step3_distribution_mode(page, "指定门店分配")
+        print(f"   ⚙️ 分配方式: {'指定门店分配' if mode_ok else '未找到分配方式控件'}")
+        print(f"   👥 执行员工: {executor_vals}")
+        if manual_executor_mode:
+            print("      ⏸️ 手动模式：请在浏览器中手工勾选执行员工后，回到终端按回车继续...")
+            await asyncio.to_thread(input, "Press Enter to continue after manual executor selection...")
+            debug_data = await dump_executor_debug(page)
+            targets = split_multi_values(executor_check_override) if executor_check_override else split_multi_values(executor_vals)
+            overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
+            if overlap_msg:
+                print(f"      ⚠️ {overlap_msg}（当前按业务场景仅提示，不阻断保存）")
+            haystack = " ".join([
+                debug_data.get("inputValue", ""),
+                " ".join(debug_data.get("tags", [])),
+                " ".join([n.get("text", "") for n in debug_data.get("checked", []) if isinstance(n, dict)]),
+            ])
+            manual_ok = all(t in haystack for t in targets)
+            if not manual_ok:
+                print(f"      ⚠️ 手动执行员工校验失败：当前未匹配目标 {targets}")
+            else:
+                print("      ✅ 手动执行员工校验通过")
+            results["第3步-执行员工"] = manual_ok
+        else:
+            exec_ok = await fill_step3_executor(page, executor_vals)
+            print(f"      {'✅' if exec_ok else '⚠️'} 执行员工{'已选择' if exec_ok else '未完整选择'}")
+            results["第3步-执行员工"] = exec_ok
+            debug_data = await dump_executor_debug(page)
+            targets = split_multi_values(executor_vals)
+            overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
+            if overlap_msg:
+                print(f"      ⚠️ {overlap_msg}（当前按业务场景仅提示，不阻断保存）")
+
+        print(f"   📝 发送内容: {send_content}")
+        send_ok = await fill_step3_send_content(page, send_content)
+        print(f"      {'✅' if send_ok else '⚠️'} 发送内容{'已填充' if send_ok else '未匹配到字段'}")
+        results["第3步-发送内容"] = send_ok
+    else:
+        print("   📅 结束时间: ⏭️ 当前所选渠道无需填写，已跳过")
+        print("   👥 执行员工: ⏭️ 当前所选渠道无需填写，已跳过")
+        print("   📝 发送内容: ⏭️ 当前所选渠道无需填写，已跳过")
+        results["第3步-结束时间"] = True
+        results["第3步-执行员工"] = True
+        results["第3步-发送内容"] = True
 
     # 通知配置场景：将当前配置复制到其他地区，避免部分地区短信为空导致 P1114。
     # 默认不自动执行“渠道信息复制”，避免在部分页面触发内容重置副作用。
@@ -2398,15 +2457,15 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     print("\n   ✅ 第3步完成")
     
     print("   💾 点击保存...")
-    sms_before_save = await read_step3_sms_text(page)
-    if len(sms_before_save) == 0 and sms_content:
+    sms_before_save = await read_step3_sms_text(page) if sms_required else ""
+    if sms_required and len(sms_before_save) == 0 and sms_content:
         print("      ⚠️ 保存前短信为空，执行一次重填...")
         refill_ok = await fill_step3_sms_content(page, sms_content)
         print(f"      {'✅' if refill_ok else '⚠️'} 重填短信{'成功' if refill_ok else '失败'}")
         sms_before_save = await read_step3_sms_text(page)
     print(f"      🧪 保存前短信回读长度: {len(sms_before_save)}")
-    send_before_save = await read_step3_send_text(page)
-    if len(send_before_save) == 0 and send_content:
+    send_before_save = await read_step3_send_text(page) if moments_required else ""
+    if moments_required and len(send_before_save) == 0 and send_content:
         print("      ⚠️ 保存前发送内容为空，执行一次重填...")
         refill_send_ok = await fill_step3_send_content(page, send_content)
         print(f"      {'✅' if refill_send_ok else '⚠️'} 重填发送内容{'成功' if refill_send_ok else '失败'}")
@@ -2442,9 +2501,9 @@ async def fill_step3(page, data: dict, manual_executor_mode: bool = False, execu
     results["第3步-保存按钮"] = True
     
     await wait_and_log(page, 2, "保存中...")
-    sms_after_click = await read_step3_sms_text(page)
+    sms_after_click = await read_step3_sms_text(page) if sms_required else ""
     print(f"      🧪 点击保存后短信回读长度: {len(sms_after_click)}")
-    send_after_click = await read_step3_send_text(page)
+    send_after_click = await read_step3_send_text(page) if moments_required else ""
     print(f"      🧪 点击保存后发送内容回读长度: {len(send_after_click)}")
     saved_ok = await ensure_step3_saved(page, save_resp_task=save_resp_task)
     try:
@@ -2576,7 +2635,8 @@ async def process_single_plan(
     strict_step2: bool = False,
     skip_step2_mode: bool = False,
     manual_executor_mode: bool = False,
-    executor_check_override: str = ""
+    executor_check_override: str = "",
+    step3_channels_override: str = "",
 ) -> bool:
     """使用信号量控制并发，处理单个计划"""
     async with semaphore:
@@ -2604,7 +2664,8 @@ async def process_single_plan(
                     page,
                     plan,
                     manual_executor_mode=manual_executor_mode,
-                    executor_check_override=executor_check_override
+                    executor_check_override=executor_check_override,
+                    step3_channels_override=step3_channels_override,
                 ))
                 
                 print(f"\n   ✅ 计划 {plan_index} 完成！")
@@ -2669,6 +2730,12 @@ async def main():
     parser.add_argument('--skip-step2', action='store_true', help='跳过第2步内容（仅联调第1步和第3步）')
     parser.add_argument('--manual-executor', action='store_true', help='第3步执行员工改为手动勾选（终端回车后继续）')
     parser.add_argument('--executor-check-only', type=str, default='', help='仅校验指定执行员工目标（例如 湖北省区）')
+    parser.add_argument(
+        '--step3-channels',
+        type=str,
+        default='',
+        help='第3步渠道多选（逗号分隔），如: 会员通-发客户消息,会员通-发客户朋友圈',
+    )
     args = parser.parse_args()
     
     # 加载数据
@@ -2719,7 +2786,8 @@ async def main():
                 args.strict_step2,
                 args.skip_step2,
                 args.manual_executor,
-                args.executor_check_only
+                args.executor_check_only,
+                args.step3_channels,
             )
             tasks.append(task)
 

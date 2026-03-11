@@ -124,6 +124,7 @@ class TaskOptions:
     start: Optional[int] = None
     end: Optional[int] = None
     hold_seconds: int = 2
+    step3_channels: str = ""
 
 
 @dataclass
@@ -176,6 +177,7 @@ class Task:
                 "start": self.options.start,
                 "end": self.options.end,
                 "hold_seconds": self.options.hold_seconds,
+                "step3_channels": self.options.step3_channels,
             },
         }
 
@@ -322,6 +324,8 @@ class TaskRunner:
             cmd.extend(["--start", str(task.options.start)])
         if task.options.end:
             cmd.extend(["--end", str(task.options.end)])
+        if task.options.step3_channels:
+            cmd.extend(["--step3-channels", task.options.step3_channels])
 
         await self.append_log(task, f"$ {' '.join(cmd)}")
         started = datetime.now()
@@ -426,6 +430,7 @@ async def upload_tasks(
     start: str = Form(""),
     end: str = Form(""),
     hold_seconds: int = Form(2),
+    step3_channels: str = Form(""),
     operator: str = Form(""),
 ) -> JSONResponse:
     created = []
@@ -438,6 +443,7 @@ async def upload_tasks(
         start=parse_int(start, 0) or None,
         end=parse_int(end, 0) or None,
         hold_seconds=max(0, hold_seconds),
+        step3_channels=step3_channels.strip(),
     )
     for f in files:
         lower = f.filename.lower()
@@ -518,6 +524,8 @@ UI_HTML = """
           <label title="开启后，第2步关键字段校验失败会立刻中断，建议联调用开，正式批量可关"><input id="strict_step2" type="checkbox" checked/> 严格校验第2步（推荐）</label>
           <label>并发任务数 <input id="concurrent" type="number" min="1" value="1" style="width:70px"/></label>
           <label>结束后保留浏览器(秒) <input id="hold_seconds" type="number" min="0" value="2" style="width:70px"/></label>
+          <label><input class="step3_channel" type="checkbox" value="会员通-发客户消息" checked/> 会员通-发客户消息</label>
+          <label><input class="step3_channel" type="checkbox" value="会员通-发客户朋友圈"/> 会员通-发客户朋友圈</label>
           <label>操作人 <input id="operator" style="width:140px" placeholder="自动识别"/></label>
           <button onclick="upload()">上传并开始执行</button>
           <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
@@ -565,6 +573,8 @@ async function upload(){
   fd.append('start', '');
   fd.append('end', '');
   fd.append('hold_seconds', document.getElementById('hold_seconds').value || '2');
+  const channels = Array.from(document.querySelectorAll('.step3_channel:checked')).map(el => el.value);
+  fd.append('step3_channels', channels.join(','));
   fd.append('operator', document.getElementById('operator').value || '');
   const r = await fetch('/api/tasks/upload', {method:'POST', body:fd});
   if(!r.ok){ alert(await r.text()); return; }
