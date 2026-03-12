@@ -18,3 +18,8 @@ screenshots/
 
 # Logs
 *.log
+
+# Runtime uploads / temp artifacts
+ui_uploads/
+release/windows-oneclick/
+data/ui-test/ui-test-*.csv

@@ -62,6 +62,22 @@
     - `moments_image_paths=本地保存路径（按上传顺序）`
   - 这样业务只需要在UI上传 CSV + 图片即可执行，不需要手工在企业页面点文件夹。
 
+### 本轮新增（Windows 一键使用）
+- 新增 Windows 一键启动脚本：`scripts/windows/windows_start_ui.bat`
+  - 自动创建 `.venv`
+  - 自动安装 `requirements.txt` + `requirements-ui.txt`
+  - 自动执行 `playwright install chromium`
+  - 自动打开 `http://127.0.0.1:8790`
+- 新增桌面图标生成脚本：`scripts/windows/create_desktop_shortcut.ps1`
+  - 一次执行后在桌面生成“精准营销自动化工具”快捷方式
+- 新增 Windows 打包脚本：`scripts/windows/build_windows_exe.bat`
+  - 在 Windows 上可打包 `dist/PrecisionMarketingUIStarter.exe`
+- README 已新增 Windows 使用说明，便于发给非技术执行同事。
+- 新增“单文件下载包”输出：
+  - 脚本：`scripts/windows/build_windows_release_zip.py`
+  - 产物：`release/precision-marketing-auto-windows-oneclick.zip`
+  - 同事可直接下载 zip，解压后双击 `scripts/windows/windows_start_ui.bat`。
+
 ---
 
 ## 维护约定
