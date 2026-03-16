@@ -36,6 +36,19 @@ from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
+# Windows 控制台默认 gbk，遇到 emoji 日志会抛 UnicodeEncodeError。
+def _enable_utf8_stdio():
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+_enable_utf8_stdio()
+
 # ============ 配置 ============
 
 BASE_URL = "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=594094287227023360"
@@ -46,10 +59,10 @@ DEFAULT_PLAN = {
     "region": "省区",
     "theme": "其他",
     "use_recommend": "否",
-    "start_time": "2026-03-01 08:00",
-    "end_time": "2026-03-01 08:00",
+    "start_time": "2026-03-16 08:00",
+    "end_time": "2026-03-27 08:00",
     "trigger_type": "定时-单次任务",
-    "send_time": "2026-03-01 08:00",
+    "send_time": "2026-03-20 08:00",
     "global_limit": "不限制",
     "set_target": "否",
     "group_name": "测试-≥20积分会员（未绑客）",
@@ -57,7 +70,7 @@ DEFAULT_PLAN = {
     "main_operating_area": "广佛省区",
     "coupon_ids": "1-20000005475",
     "sms_content": "短信内容测试",
-    "step3_end_time": "2026-03-08 08:00",
+    "step3_end_time": "2026-03-27 08:00",
     "executor_employees": "西北大区、湖北省区",
     "send_content": "企微1对1内容测试",
     "channels": "",
@@ -350,6 +363,101 @@ async def click_button_with_text(page, include_text: str, exclude_text: str = ""
     except:
         pass
 
+async def click_step2_next_button(page) -> bool:
+    """第2步完成后，优先点击主页面底部“下一步”，避免点中弹窗内无效按钮。"""
+    selectors = [
+        'button:has-text("下一步")',
+        '.el-button:has-text("下一步")',
+        '.ant-btn:has-text("下一步")',
+    ]
+    for sel in selectors:
+        try:
+            btns = page.locator(sel)
+            count = await btns.count()
+            for i in range(count):
+                btn = btns.nth(i)
+                if not await btn.is_visible():
+                    continue
+                txt = ((await btn.text_content()) or "").strip()
+                if "下一步" not in txt:
+                    continue
+                try:
+                    await btn.scroll_into_view_if_needed()
+                except Exception:
+                    pass
+                try:
+                    await btn.click(force=True)
+                    await asyncio.sleep(0.5)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    # 兜底：选取页面中最靠下的“下一步”按钮，通常是主页面底部按钮
+    try:
+        clicked = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const btns = Array.from(document.querySelectorAll('button')).filter(isVisible)
+                .filter(btn => ((btn.textContent || '').trim()).includes('下一步'))
+                .sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+            const btn = btns[0];
+            if (!btn) return false;
+            btn.click();
+            return true;
+        }""")
+        if clicked:
+            await asyncio.sleep(0.5)
+            return True
+    except Exception:
+        pass
+    return False
+
+async def read_visible_error_hint(page) -> str:
+    """读取页面当前可见的错误提示，优先抓 toast / 表单校验文本。"""
+    try:
+        msg = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const selectors = [
+                '.el-message__content',
+                '.ant-message-custom-content',
+                '.el-form-item__error',
+                '.ant-form-item-explain-error',
+                '.el-alert__content'
+            ];
+            for (const sel of selectors) {
+                const nodes = Array.from(document.querySelectorAll(sel)).filter(isVisible);
+                for (const node of nodes) {
+                    const text = (node.textContent || '').trim();
+                    if (text) return text;
+                }
+            }
+            const bodyText = (document.body?.innerText || '');
+            const known = [
+                '发送时间不能选历史时间',
+                '计划时间不能选历史时间',
+                '不能为空',
+                '请选择发送时间'
+            ];
+            for (const k of known) {
+                if (bodyText.includes(k)) return k;
+            }
+            return '';
+        }""")
+        return (msg or "").strip()
+    except Exception:
+        return ""
+
     try:
         return await page.evaluate(
             """({includeText, excludeText}) => {
@@ -448,6 +556,15 @@ async def fill_step3_end_time(page, end_time: str) -> bool:
             const rect = el.getBoundingClientRect();
             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
         };
+        const direct = Array.from(document.querySelectorAll('input')).find(inp => {
+            if (!isVisible(inp)) return false;
+            const ph = (inp.getAttribute('placeholder') || '').trim();
+            return ['请选择结束日期', '结束日期', '结束时间', '选择日期', '选择时间'].some(x => ph.includes(x));
+        });
+        if (direct) {
+            direct.setAttribute('data-step3-endtime-target', '1');
+            return true;
+        }
         const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
         for (const it of items) {
             const txt = (it.textContent || '').replace(/\\s+/g, '');
@@ -558,6 +675,7 @@ async def fill_step3_send_content(page, content: str) -> bool:
             const rect = el.getBoundingClientRect();
             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
         };
+        const allEditable = Array.from(document.querySelectorAll('.div-editable .editable[contenteditable="true"], .editable[contenteditable="true"]')).filter(isVisible);
         const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
         for (const it of items) {
             const txt = (it.textContent || '').replace(/\\s+/g, '');
@@ -568,6 +686,11 @@ async def fill_step3_send_content(page, content: str) -> bool:
                 ed.setAttribute('data-step3-send-target', '1');
                 return true;
             }
+        }
+        // 兜底：优先取最后一个可见编辑器。短信/发送内容场景通常发送内容在后面。
+        if (allEditable.length > 0) {
+            allEditable[allEditable.length - 1].setAttribute('data-step3-send-target', '1');
+            return true;
         }
         return false;
     }""")
@@ -1084,10 +1207,17 @@ async def read_step3_send_text(page) -> str:
 
 async def set_step3_distribution_mode(page, mode_text: str = "指定门店分配") -> bool:
     """第3步分配方式：点击单选文本。"""
-    return await page.evaluate(
+    clicked = await page.evaluate(
         """(modeText) => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
             const labels = Array.from(document.querySelectorAll('label, span, div'));
             for (const el of labels) {
+                if (!isVisible(el)) continue;
                 const txt = (el.textContent || '').replace(/\\s+/g, '');
                 if (txt.includes(modeText)) {
                     (el.closest('label') || el).click();
@@ -1098,6 +1228,9 @@ async def set_step3_distribution_mode(page, mode_text: str = "指定门店分配
         }""",
         mode_text
     )
+    if clicked:
+        await asyncio.sleep(0.25)
+    return bool(clicked)
 
 async def switch_step3_channel(page, channel_text: str) -> bool:
     """第3步切换渠道（如：会员通-发客户消息 / 会员通-发客户朋友圈）。"""
@@ -1160,6 +1293,12 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
         pass
 
     opened = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
         const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
         for (const label of labels) {
             const txt = (label.textContent || '').replace(/\\s+/g, '');
@@ -1172,6 +1311,12 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
                 return true;
             }
         }
+        const fallback = Array.from(document.querySelectorAll('.el-cascader input.el-input__inner, input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"]'))
+            .find(isVisible);
+        if (fallback) {
+            fallback.click();
+            return true;
+        }
         return false;
     }""")
     if not opened:
@@ -1180,6 +1325,12 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
 
     # 先清空字段内已有标签，避免营销模板默认区域残留
     await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        };
         const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
         for (const label of labels) {
             const txt = (label.textContent || '').replace(/\\s+/g, '');
@@ -1192,11 +1343,22 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
             if (input) input.click();
             return;
         }
+        const visibleTags = Array.from(document.querySelectorAll('.el-tag__close')).filter(isVisible);
+        for (const c of visibleTags) c.click();
+        const fallback = Array.from(document.querySelectorAll('.el-cascader input.el-input__inner, input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"]'))
+            .find(isVisible);
+        if (fallback) fallback.click();
     }""")
     await asyncio.sleep(0.25)
 
     async def reopen_executor_panel():
         await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
             const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
             for (const label of labels) {
                 const txt = (label.textContent || '').replace(/\\s+/g, '');
@@ -1209,6 +1371,9 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
                     return;
                 }
             }
+            const fallback = Array.from(document.querySelectorAll('.el-cascader input.el-input__inner, input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"]'))
+                .find(isVisible);
+            if (fallback) fallback.click();
         }""")
         await page.locator(".el-cascader-panel:visible").last.wait_for(timeout=5000)
         await asyncio.sleep(0.15)
@@ -1367,6 +1532,12 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
 
     # 回读校验：限定在“执行员工”字段容器内。
     readback = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        };
         const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
         for (const label of labels) {
             const txt = (label.textContent || '').replace(/\\s+/g, '');
@@ -1379,7 +1550,11 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
                 .filter(Boolean);
             return [input ? (input.value || '').trim() : '', ...tags].join(' ');
         }
-        return '';
+        const tags = Array.from(document.querySelectorAll('.el-cascader__tags span, .el-tag span'))
+            .filter(isVisible)
+            .map(n => (n.textContent || '').trim())
+            .filter(Boolean);
+        return tags.join(' ');
     }""")
     for t in targets:
         if t in readback:
@@ -1590,6 +1765,17 @@ async def fill_step1(page, data: dict, auto_next: bool = True):
         print("      ✅ 点击成功")
         results["第1步-下一步按钮"] = True
         await wait_and_log(page, 3, "等待页面跳转...")
+        try:
+            still_on_step1 = await page.evaluate("""() => {
+                const text = document.body?.innerText || '';
+                return text.includes('计划名称') && text.includes('计划时间') && text.includes('发送时间');
+            }""")
+            if still_on_step1:
+                err = await read_visible_error_hint(page)
+                if err:
+                    raise RuntimeError(f"第1步业务校验未通过: {err}")
+        except Exception:
+            raise
     else:
         print("   ⏭️  第2步自动化模式：第1步暂不点击下一步，由第2步完成后统一跳转")
     return results
@@ -2387,13 +2573,31 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step2-after-main.png')
     
     print("   ⏭️  点击下一步...")
-    clicked = await click_button_with_text(page, "下一步")
+    clicked = await click_step2_next_button(page)
     if not clicked:
         raise RuntimeError("第2步完成后未能点击“下一步”")
     print("      ✅ 点击成功")
     results["第2步-下一步按钮"] = True
     
     await wait_and_log(page, 2, "跳转到第3步...")
+    try:
+        still_on_step2 = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const text = Array.from(document.querySelectorAll('body *')).filter(isVisible).map(n => n.textContent || '').join(' ');
+            return text.includes('目标分群') || text.includes('编辑分群') || text.includes('预跑');
+        }""")
+        if still_on_step2:
+            print("      ⚠️ 点击后仍停留在第2步，执行一次补点...")
+            clicked_retry = await click_step2_next_button(page)
+            if clicked_retry:
+                await wait_and_log(page, 2, "再次尝试跳转到第3步...")
+    except Exception:
+        pass
     return results
 
 async def skip_step2(page):
@@ -2437,7 +2641,16 @@ async def fill_step3(
             };
             const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
             const text = items.map(n => n.textContent || '').join(' ');
-            return text.includes('短信内容') || text.includes('发送内容') || text.includes('结束时间');
+            const placeholders = Array.from(document.querySelectorAll('input, textarea'))
+                .filter(isVisible)
+                .map(i => i.getAttribute('placeholder') || '')
+                .join(' ');
+            const hasEditable = Array.from(document.querySelectorAll('[contenteditable="true"]')).some(isVisible);
+            const signalText = ['短信内容', '发送内容', '结束时间', '执行员工', '分配方式'];
+            const signalPlaceholder = ['结束时间', '结束日期', '选择时间', '选择日期'];
+            return signalText.some(s => text.includes(s))
+                || signalPlaceholder.some(s => placeholders.includes(s))
+                || hasEditable;
         }"""))
 
     async def wait_step3_ready(max_seconds: int = 30, interval: float = 0.5) -> bool:
@@ -2480,7 +2693,14 @@ async def fill_step3(
             const tick = () => {
                 const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
                 const text = items.map(n => n.textContent || '').join(' ');
-                if (text.includes('短信内容') || text.includes('发送内容') || text.includes('结束时间')) {
+                const placeholders = Array.from(document.querySelectorAll('input, textarea'))
+                    .filter(isVisible)
+                    .map(i => i.getAttribute('placeholder') || '')
+                    .join(' ');
+                const hasEditable = Array.from(document.querySelectorAll('[contenteditable="true"]')).some(isVisible);
+                const signalText = ['短信内容', '发送内容', '结束时间', '执行员工', '分配方式'];
+                const signalPlaceholder = ['结束时间', '结束日期', '选择时间', '选择日期'];
+                if (signalText.some(s => text.includes(s)) || signalPlaceholder.some(s => placeholders.includes(s)) || hasEditable) {
                     resolve(true);
                     return;
                 }
@@ -2519,7 +2739,8 @@ async def fill_step3(
         return false;
     }""")
     has_channel_filter = bool(selected_channels)
-    sms_required = ("会员通-发客户消息" in selected_channels) if has_channel_filter else bool(has_sms_editor)
+    sms_required = ("短信" in selected_channels) if has_channel_filter else bool(has_sms_editor)
+    customer_msg_required = ("会员通-发客户消息" in selected_channels) if has_channel_filter else True
     moments_required = ("会员通-发客户朋友圈" in selected_channels) if has_channel_filter else True
 
     print("   📝 短信内容...")
@@ -2542,7 +2763,7 @@ async def fill_step3(
         print("      ⏭️ 当前所选渠道无需短信内容，已跳过")
         results["第3步-短信内容"] = True
 
-    # 朋友圈渠道字段：结束时间、执行员工、发送内容
+    # 会员通-发客户消息 / 会员通-发客户朋友圈 共用字段
     step3_end_time = data.get("step3_end_time") or data.get("end_time")
     executor_vals = data.get("executor_employees", "")
     send_content = data.get("send_content", "")
@@ -2550,7 +2771,8 @@ async def fill_step3(
     moments_image_paths = data.get("moments_image_paths", "")
     moments_gate_ok = True
     moments_gate_errors = []
-    if moments_required:
+    message_like_required = customer_msg_required or moments_required
+    if message_like_required:
         print(f"   📅 结束时间: {step3_end_time}")
         end_ok = await fill_step3_end_time(page, step3_end_time)
         print(f"      {'✅' if end_ok else '⚠️'} 结束时间{'已填充' if end_ok else '未匹配到字段'}")
@@ -2605,16 +2827,20 @@ async def fill_step3(
             moments_gate_ok = False
             moments_gate_errors.append("发送内容")
 
-        print(f"   🖼️ 朋友圈图片: {'需要上传' if moments_add_images else '不上传'}")
-        if moments_add_images:
-            img_ok, img_msg = await upload_step3_moments_images(page, moments_image_paths)
-            print(f"      {'✅' if img_ok else '⚠️'} {img_msg}")
-            results["第3步-朋友圈图片"] = img_ok
-            if not img_ok:
-                moments_gate_ok = False
-                moments_gate_errors.append("朋友圈图片")
+        if moments_required:
+            print(f"   🖼️ 朋友圈图片: {'需要上传' if moments_add_images else '不上传'}")
+            if moments_add_images:
+                img_ok, img_msg = await upload_step3_moments_images(page, moments_image_paths)
+                print(f"      {'✅' if img_ok else '⚠️'} {img_msg}")
+                results["第3步-朋友圈图片"] = img_ok
+                if not img_ok:
+                    moments_gate_ok = False
+                    moments_gate_errors.append("朋友圈图片")
+            else:
+                print("      ⏭️ 未勾选图片上传，已跳过")
+                results["第3步-朋友圈图片"] = True
         else:
-            print("      ⏭️ 未勾选图片上传，已跳过")
+            print("   🖼️ 朋友圈图片: ⏭️ 当前所选渠道无需填写，已跳过")
             results["第3步-朋友圈图片"] = True
     else:
         print("   📅 结束时间: ⏭️ 当前所选渠道无需填写，已跳过")
@@ -2626,9 +2852,9 @@ async def fill_step3(
         results["第3步-发送内容"] = True
         results["第3步-朋友圈图片"] = True
 
-    # 朋友圈渠道下，必填失败直接中断，不进入保存动作
-    if moments_required and (not moments_gate_ok):
-        raise RuntimeError(f"朋友圈必填项未完成: {','.join(moments_gate_errors)}")
+    # 会员通消息/朋友圈渠道下，共用必填失败直接中断；朋友圈额外校验图片
+    if message_like_required and (not moments_gate_ok):
+        raise RuntimeError(f"会员通渠道必填项未完成: {','.join(moments_gate_errors)}")
 
     # 通知配置场景：将当前配置复制到其他地区，避免部分地区短信为空导致 P1114。
     # 默认不自动执行“渠道信息复制”，避免在部分页面触发内容重置副作用。
@@ -2649,13 +2875,13 @@ async def fill_step3(
         print(f"      🧪 保存前短信回读长度: {len(sms_before_save)}")
     else:
         print("      🧪 保存前短信回读: 已跳过（当前渠道无需短信）")
-    send_before_save = await read_step3_send_text(page) if moments_required else ""
-    if moments_required and len(send_before_save) == 0 and send_content:
+    send_before_save = await read_step3_send_text(page) if message_like_required else ""
+    if message_like_required and len(send_before_save) == 0 and send_content:
         print("      ⚠️ 保存前发送内容为空，执行一次重填...")
         refill_send_ok = await fill_step3_send_content(page, send_content)
         print(f"      {'✅' if refill_send_ok else '⚠️'} 重填发送内容{'成功' if refill_send_ok else '失败'}")
         send_before_save = await read_step3_send_text(page)
-    if moments_required:
+    if message_like_required:
         print(f"      🧪 保存前发送内容回读长度: {len(send_before_save)}")
     else:
         print("      🧪 保存前发送内容回读: 已跳过（当前渠道无需发送内容）")
@@ -2694,8 +2920,8 @@ async def fill_step3(
         print(f"      🧪 点击保存后短信回读长度: {len(sms_after_click)}")
     else:
         print("      🧪 点击保存后短信回读: 已跳过（当前渠道无需短信）")
-    send_after_click = await read_step3_send_text(page) if moments_required else ""
-    if moments_required:
+    send_after_click = await read_step3_send_text(page) if message_like_required else ""
+    if message_like_required:
         print(f"      🧪 点击保存后发送内容回读长度: {len(send_after_click)}")
     else:
         print("      🧪 点击保存后发送内容回读: 已跳过（当前渠道无需发送内容）")

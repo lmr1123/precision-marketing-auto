@@ -98,6 +98,10 @@ UI 支持：
 - 任务列表总览（状态、开始时间、完成时间、预计完成时间、耗时、成功/失败）
 - 失败任务一键重试（单条/全部失败）
 - 列表中可下载原始 CSV、显示操作人、自动提取复核链接
+- 第3步渠道多选：
+  - `短信` => 填写 `短信内容`
+  - `会员通-发客户消息` => 填写 `结束时间 / 执行员工 / 发送内容`
+  - `会员通-发客户朋友圈` => 填写 `结束时间 / 执行员工 / 发送内容 / 朋友圈图片`
 
 ### 一键部署（给其他同事）
 
@@ -180,6 +184,41 @@ scripts\\windows\\build_windows_exe.bat
 - `--strict-step2`：开启第2步严格校验（默认关闭，便于先联调其它流程）
 - `--skip-step2`：跳过第2步内容，仅验证第1步和第3步流程
 - `--manual-executor`：第3步“执行员工”改为手动勾选，终端回车后继续并自动打印调试信息
+- `--step3-channels`：第3步渠道多选，支持：
+  - `短信`
+  - `会员通-发客户消息`
+  - `会员通-发客户朋友圈`
+
+## 第3步渠道规则
+
+- `短信`
+  - 填写：`短信内容`
+- `会员通-发客户消息`
+  - 填写：`结束时间`、`执行员工`、`发送内容`
+- `会员通-发客户朋友圈`
+  - 填写：`结束时间`、`执行员工`、`发送内容`
+  - 可选：`朋友圈图片`
+  - 如果 `moments_add_images=是`，则 `moments_image_paths` 必填，且最多 9 张、仅支持 `jpg/png`、单张 `<10MB`
+
+## 常用测试指令
+
+短信：
+
+```bash
+python precision-auto-playwright-batch.py --csv data/plans.csv --start 1 --end 1 --connect-cdp --cdp-endpoint http://127.0.0.1:18800 --strict-step2 --step3-channels "短信" --hold-seconds 2
+```
+
+会员通-发客户消息：
+
+```bash
+python precision-auto-playwright-batch.py --csv data/plans.csv --start 1 --end 1 --connect-cdp --cdp-endpoint http://127.0.0.1:18800 --strict-step2 --step3-channels "会员通-发客户消息" --hold-seconds 2
+```
+
+会员通-发客户朋友圈：
+
+```bash
+python precision-auto-playwright-batch.py --csv data/ui-test/plans-moments-local2.csv --start 1 --end 1 --connect-cdp --cdp-endpoint http://127.0.0.1:18800 --strict-step2 --step3-channels "会员通-发客户朋友圈" --hold-seconds 30
+```
 
 ## 测试
 
