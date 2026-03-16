@@ -1390,12 +1390,40 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
             txt = ((await label.text_content()) or "").strip()
             if txt != target and target not in txt:
                 continue
-            await node.scroll_into_view_if_needed()
             postfix = node.locator(".el-cascader-node__postfix").first
+            clicked = False
             if await postfix.count() > 0:
-                await postfix.click(force=True)
-            else:
-                await label.click(force=True)
+                try:
+                    await postfix.click(force=True, timeout=1200)
+                    clicked = True
+                except Exception:
+                    try:
+                        await postfix.evaluate("""(el) => {
+                            ['pointerdown','mousedown','mouseup','click'].forEach(t => {
+                                el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+                            });
+                            if (typeof el.click === 'function') el.click();
+                        }""")
+                        clicked = True
+                    except Exception:
+                        clicked = False
+            if not clicked:
+                try:
+                    await label.click(force=True, timeout=1200)
+                    clicked = True
+                except Exception:
+                    try:
+                        await label.evaluate("""(el) => {
+                            ['pointerdown','mousedown','mouseup','click'].forEach(t => {
+                                el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+                            });
+                            if (typeof el.click === 'function') el.click();
+                        }""")
+                        clicked = True
+                    except Exception:
+                        clicked = False
+            if not clicked:
+                continue
             await asyncio.sleep(0.2)
             return True
         return False
@@ -1438,8 +1466,23 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
             cb = node.locator(".el-checkbox__input").first
             if await cb.count() == 0:
                 return False
-            await cb.scroll_into_view_if_needed()
-            await cb.click(force=True)
+            clicked = False
+            try:
+                await cb.click(force=True, timeout=1200)
+                clicked = True
+            except Exception:
+                try:
+                    await cb.evaluate("""(el) => {
+                        ['pointerdown','mousedown','mouseup','click'].forEach(t => {
+                            el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+                        });
+                        if (typeof el.click === 'function') el.click();
+                    }""")
+                    clicked = True
+                except Exception:
+                    clicked = False
+            if not clicked:
+                continue
             await asyncio.sleep(0.2)
             return True
         return False
@@ -1459,11 +1502,26 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
             checkbox = node.locator(".el-checkbox__input").first
             if await checkbox.count() == 0:
                 continue
-            await checkbox.scroll_into_view_if_needed()
             node_cls = (await node.get_attribute("class")) or ""
             cb_cls = (await checkbox.get_attribute("class")) or ""
             if ("in-checked-path" not in node_cls) and ("is-checked" not in cb_cls):
-                await checkbox.click(force=True)
+                clicked = False
+                try:
+                    await checkbox.click(force=True, timeout=1200)
+                    clicked = True
+                except Exception:
+                    try:
+                        await checkbox.evaluate("""(el) => {
+                            ['pointerdown','mousedown','mouseup','click'].forEach(t => {
+                                el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+                            });
+                            if (typeof el.click === 'function') el.click();
+                        }""")
+                        clicked = True
+                    except Exception:
+                        clicked = False
+                if not clicked:
+                    continue
                 await asyncio.sleep(0.15)
             return True
         return False
@@ -2631,27 +2689,34 @@ async def fill_step3(
     print("="*50)
     
     await wait_and_log(page, 2, "等待第3步加载...")
-    async def detect_step3_ready() -> bool:
-        return bool(await page.evaluate("""() => {
+    async def get_step3_signals() -> dict:
+        return await page.evaluate("""() => {
             const isVisible = (el) => {
                 if (!el) return false;
                 const style = window.getComputedStyle(el);
                 const rect = el.getBoundingClientRect();
                 return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
             };
-            const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
-            const text = items.map(n => n.textContent || '').join(' ');
+            const visibleNodes = Array.from(document.querySelectorAll('body *')).filter(isVisible);
+            const text = visibleNodes.map(n => (n.textContent || '').trim()).join(' ');
             const placeholders = Array.from(document.querySelectorAll('input, textarea'))
                 .filter(isVisible)
                 .map(i => i.getAttribute('placeholder') || '')
-                .join(' ');
+                .filter(Boolean);
+            const hasCascader = Array.from(document.querySelectorAll('.el-cascader, .el-cascader-panel')).some(isVisible);
             const hasEditable = Array.from(document.querySelectorAll('[contenteditable="true"]')).some(isVisible);
-            const signalText = ['短信内容', '发送内容', '结束时间', '执行员工', '分配方式'];
-            const signalPlaceholder = ['结束时间', '结束日期', '选择时间', '选择日期'];
-            return signalText.some(s => text.includes(s))
-                || signalPlaceholder.some(s => placeholders.includes(s))
-                || hasEditable;
-        }"""))
+            const strongSignals = [
+                '发送限制', '分配方式', '执行员工', '任务详情',
+                '发送内容', '短信内容', '添加图片', '结束时间'
+            ];
+            const hitSignals = strongSignals.filter(s => text.includes(s));
+            return { text, placeholders, hasCascader, hasEditable, hitSignals };
+        }""")
+
+    async def detect_step3_ready() -> bool:
+        sig = await get_step3_signals()
+        # 必须至少命中两个第3步强信号，避免把第1步/第2步误判成第3步
+        return len(sig.get("hitSignals", [])) >= 2
 
     async def wait_step3_ready(max_seconds: int = 30, interval: float = 0.5) -> bool:
         loops = int(max_seconds / interval)
@@ -2672,47 +2737,15 @@ async def fill_step3(
             await wait_and_log(page, 2, "重试进入第3步...")
             ready = await wait_step3_ready(max_seconds=30)
     if not ready:
-        debug = await page.evaluate("""() => {
-            const placeholders = Array.from(document.querySelectorAll('input'))
-                .map(i => i.getAttribute('placeholder') || '')
-                .filter(Boolean)
-                .slice(0, 20);
-            return { url: location.href, placeholders };
-        }""")
+        sig = await get_step3_signals()
+        debug = {
+            "url": await page.evaluate("() => location.href"),
+            "hitSignals": sig.get("hitSignals", []),
+            "placeholders": sig.get("placeholders", [])[:20],
+        }
         raise RuntimeError(f"未进入第3步页面，停止执行。诊断={debug}")
 
-    await page.evaluate("""() => {
-        const isVisible = (el) => {
-            if (!el) return false;
-            const style = window.getComputedStyle(el);
-            const rect = el.getBoundingClientRect();
-            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-        };
-        return new Promise((resolve) => {
-            const started = Date.now();
-            const tick = () => {
-                const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
-                const text = items.map(n => n.textContent || '').join(' ');
-                const placeholders = Array.from(document.querySelectorAll('input, textarea'))
-                    .filter(isVisible)
-                    .map(i => i.getAttribute('placeholder') || '')
-                    .join(' ');
-                const hasEditable = Array.from(document.querySelectorAll('[contenteditable="true"]')).some(isVisible);
-                const signalText = ['短信内容', '发送内容', '结束时间', '执行员工', '分配方式'];
-                const signalPlaceholder = ['结束时间', '结束日期', '选择时间', '选择日期'];
-                if (signalText.some(s => text.includes(s)) || signalPlaceholder.some(s => placeholders.includes(s)) || hasEditable) {
-                    resolve(true);
-                    return;
-                }
-                if (Date.now() - started > 12000) {
-                    resolve(false);
-                    return;
-                }
-                setTimeout(tick, 200);
-            };
-            tick();
-        });
-    }""")
+    await asyncio.sleep(0.2)
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step3-before.png')
     
     results = {}
