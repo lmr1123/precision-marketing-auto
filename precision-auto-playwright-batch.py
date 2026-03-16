@@ -76,6 +76,11 @@ DEFAULT_PLAN = {
     "channels": "",
     "moments_add_images": "否",
     "moments_image_paths": "",
+    "msg_add_mini_program": "否",
+    "msg_mini_program_name": "大参林健康",
+    "msg_mini_program_title": "",
+    "msg_mini_program_cover_path": "",
+    "msg_mini_program_page_path": "",
 }
 
 HEADLESS = False
@@ -119,6 +124,11 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "channels": row.get("channels", "").strip(),
                 "moments_add_images": row.get("moments_add_images", "").strip(),
                 "moments_image_paths": row.get("moments_image_paths", "").strip(),
+                "msg_add_mini_program": row.get("msg_add_mini_program", "").strip(),
+                "msg_mini_program_name": row.get("msg_mini_program_name", "").strip(),
+                "msg_mini_program_title": row.get("msg_mini_program_title", "").strip(),
+                "msg_mini_program_cover_path": row.get("msg_mini_program_cover_path", "").strip(),
+                "msg_mini_program_page_path": row.get("msg_mini_program_page_path", "").strip(),
             }
             plans.append(plan)
     return plans
@@ -916,6 +926,308 @@ async def upload_step3_moments_images(page, raw_paths: str):
         await asyncio.sleep(0.35)
 
     return True, f"已上传{len(resolved)}张"
+
+
+async def fill_step3_message_mini_program(
+    page,
+    program_name: str,
+    program_title: str,
+    cover_path: str,
+    page_path: str,
+):
+    """第3步（会员通-发客户消息）添加小程序。"""
+    program_name = (program_name or "大参林健康").strip()
+    program_title = (program_title or "").strip()
+    page_path = (page_path or "").strip()
+    cover_path = os.path.expanduser((cover_path or "").strip())
+
+    errors = []
+    if not program_title:
+        errors.append("小程序标题为空")
+    if not page_path:
+        errors.append("小程序功能页面为空")
+    if not cover_path:
+        errors.append("小程序封面路径为空")
+    elif not os.path.exists(cover_path):
+        errors.append(f"小程序封面不存在: {cover_path}")
+    if errors:
+        return False, " / ".join(errors)
+
+    clicked = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        };
+        const norm = (s) => (s || '').replace(/\\s+/g, '');
+        const fireClick = (el) => {
+            if (!el) return false;
+            ['pointerdown','mousedown','mouseup','click'].forEach(t => {
+                el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+            });
+            if (typeof el.click === 'function') el.click();
+            return true;
+        };
+
+        // 优先：命中上传块（添加小程序 / 添加文件/视频）
+        const uploadBtns = Array.from(document.querySelectorAll('.upload-btn')).filter(isVisible);
+        for (const btn of uploadBtns) {
+            const t = norm(btn.textContent || '');
+            if (t.includes('添加小程序') || t.includes('添加文件/视频') || t.includes('添加文件视频')) {
+                return fireClick(btn);
+            }
+        }
+
+        // 兜底：全局文本节点
+        const nodes = Array.from(document.querySelectorAll('button, a, span, div')).filter(isVisible);
+        const hit = nodes.find(n => {
+            const t = norm(n.textContent || '');
+            return t.includes('添加小程序') || t.includes('添加文件/视频') || t.includes('添加文件视频');
+        });
+        if (!hit) return false;
+        return fireClick(hit.closest('button,a,div,span,.el-upload,.upload-btn') || hit);
+    }""")
+    if not clicked:
+        clicked = await click_button_with_text(page, "添加小程序") or await click_button_with_text(page, "添加文件/视频")
+    if not clicked:
+        return False, "未找到“添加小程序/添加文件视频”入口"
+
+    # 以“配置小程序”字段出现作为弹窗成功标准，避免仅靠 wrapper 判断误差
+    modal_ready = False
+    for _ in range(20):
+        has_cfg = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const labels = Array.from(document.querySelectorAll('.el-dialog__wrapper .el-form-item__label, .el-dialog .el-form-item__label, .el-form-item__label'))
+                .filter(isVisible)
+                .map(n => (n.textContent || '').replace(/\\s+/g, ''));
+            return labels.some(t => t.includes('配置小程序'));
+        }""")
+        if has_cfg:
+            modal_ready = True
+            break
+        await asyncio.sleep(0.25)
+    if not modal_ready:
+        return False, "未弹出小程序配置弹窗"
+
+    modal = page.locator('.el-dialog__wrapper:visible, .el-dialog:visible').last
+
+    select_marked = await modal.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        };
+        const items = Array.from(document.querySelectorAll('.el-form-item')).filter(isVisible);
+        for (const it of items) {
+            const txt = (it.textContent || '').replace(/\\s+/g, '');
+            if (!txt.includes('配置小程序')) continue;
+            const inp = it.querySelector('input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"]');
+            if (!inp) continue;
+            inp.setAttribute('data-step3-mini-program-select', '1');
+            return true;
+        }
+        return false;
+    }""")
+    selected_ok = False
+    try:
+        for _ in range(3):
+            select_input = None
+            if select_marked:
+                cand = modal.locator('input[data-step3-mini-program-select="1"]').first
+                if await cand.count() > 0:
+                    select_input = cand
+            if select_input is None:
+                cand = modal.locator('.el-select input.el-input__inner[placeholder*="请选择"], .el-select input[placeholder*="请选择"]').first
+                if await cand.count() > 0:
+                    select_input = cand
+            if select_input is None:
+                break
+
+            await select_input.click(force=True)
+            await asyncio.sleep(0.2)
+
+            option = page.locator('.el-select-dropdown:visible .el-select-dropdown__item').filter(has_text=program_name).first
+            if await option.count() > 0:
+                await option.click(force=True)
+            else:
+                await click_button_with_text(page, program_name)
+
+            await asyncio.sleep(0.25)
+            selected_ok = await modal.evaluate("""(name) => {
+                const normalize = (s) => (s || '').replace(/\\s+/g, '');
+                const expect = normalize(name);
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                };
+
+                const wrappers = Array.from(document.querySelectorAll('.el-dialog__wrapper, .el-dialog')).filter(isVisible);
+                const root = wrappers.length ? wrappers[wrappers.length - 1] : document;
+                const item = Array.from(root.querySelectorAll('.el-form-item')).find(it =>
+                    normalize(it.textContent || '').includes('配置小程序')
+                );
+                const scope = item || root;
+
+                const inp = scope.querySelector('input[data-step3-mini-program-select="1"]')
+                    || scope.querySelector('.el-select input.el-input__inner')
+                    || scope.querySelector('input.el-input__inner[placeholder*="请选择"]');
+                const v = normalize(inp ? (inp.value || '') : '');
+                if (v.includes(expect)) return true;
+
+                const selectedNodeText = normalize(scope.textContent || '');
+                if (selectedNodeText.includes(expect)) return true;
+
+                const selectedDropdownItem = Array.from(document.querySelectorAll('.el-select-dropdown__item.selected, .el-select-dropdown__item.is-selected'))
+                    .map(n => normalize(n.textContent || ''))
+                    .join(' ');
+                if (selectedDropdownItem.includes(expect)) return true;
+                return false;
+            }""", program_name)
+            if selected_ok:
+                break
+    except Exception:
+        selected_ok = False
+
+    if not selected_ok:
+        errors.append(f"配置小程序未选中: {program_name}")
+
+    try:
+        title_input = modal.get_by_placeholder("请输入小程序标题").first
+        if await title_input.count() == 0:
+            errors.append("未找到小程序标题输入框")
+        else:
+            await fill_with_retry(title_input, program_title)
+    except Exception:
+        errors.append("填写小程序标题失败")
+
+    try:
+        page_input = modal.get_by_placeholder("请输入页面路径").first
+        if await page_input.count() == 0:
+            errors.append("未找到页面路径输入框")
+        else:
+            await fill_with_retry(page_input, page_path)
+    except Exception:
+        errors.append("填写页面路径失败")
+
+    cover_marked = await modal.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        };
+        const items = Array.from(document.querySelectorAll('.el-form-item')).filter(isVisible);
+        for (const it of items) {
+            const txt = (it.textContent || '').replace(/\\s+/g, '');
+            if (!txt.includes('小程序封面')) continue;
+            const input = it.querySelector('input[type="file"]');
+            if (!input) continue;
+            input.setAttribute('data-step3-mini-cover-input', '1');
+            return true;
+        }
+        return false;
+    }""")
+    if not cover_marked:
+        errors.append("未找到小程序封面上传控件")
+    try:
+        if cover_marked:
+            cover_input = modal.locator('input[data-step3-mini-cover-input="1"]').first
+            if await cover_input.count() > 0:
+                await cover_input.set_input_files(cover_path)
+            else:
+                fallback_cover = page.locator('input[data-step3-mini-cover-input="1"]').first
+                if await fallback_cover.count() == 0:
+                    errors.append("未找到小程序封面上传input")
+                else:
+                    await fallback_cover.set_input_files(cover_path)
+            await asyncio.sleep(0.6)
+    except Exception:
+        errors.append(f"上传小程序封面失败: {Path(cover_path).name}")
+
+    confirm_clicked = False
+    for _ in range(2):
+        try:
+            confirm_btn = modal.locator('button.el-button--primary:visible').filter(has_text='确定').first
+            if await confirm_btn.count() > 0:
+                await confirm_btn.click(force=True)
+                confirm_clicked = True
+            else:
+                save_btn = modal.locator('button.el-button--primary:visible').filter(has_text='保存').first
+                if await save_btn.count() > 0:
+                    await save_btn.click(force=True)
+                    confirm_clicked = True
+        except Exception:
+            confirm_clicked = False
+        await asyncio.sleep(0.35)
+        still_open = await modal.count() > 0 and await modal.is_visible()
+        if confirm_clicked and (not still_open):
+            break
+        # 兜底：直接在弹窗 footer 再点一次主按钮
+        try:
+            clicked_footer = await page.evaluate("""() => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                };
+                const wrappers = Array.from(document.querySelectorAll('.el-dialog__wrapper, .el-dialog')).filter(isVisible);
+                if (!wrappers.length) return false;
+                const current = wrappers[wrappers.length - 1];
+                const btns = Array.from(current.querySelectorAll('.el-dialog__footer button')).filter(isVisible);
+                const primary = btns.find(b => (b.textContent || '').replace(/\\s+/g, '').includes('确定'))
+                    || btns.find(b => (b.textContent || '').replace(/\\s+/g, '').includes('保存'))
+                    || btns.find(b => b.className.includes('el-button--primary'));
+                if (!primary) return false;
+                ['pointerdown','mousedown','mouseup','click'].forEach(t => {
+                    primary.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+                });
+                if (typeof primary.click === 'function') primary.click();
+                return true;
+            }""")
+            if clicked_footer:
+                confirm_clicked = True
+        except Exception:
+            pass
+
+    if not confirm_clicked:
+        errors.append("未找到小程序弹窗确认按钮")
+
+    await asyncio.sleep(0.4)
+    still_open_after = await modal.count() > 0 and await modal.is_visible()
+    if still_open_after:
+        errors.append("小程序弹窗未关闭（确认可能未生效）")
+
+    # 最终成功判定：以主页面出现“小程序”素材名称为准（例如：`（小程序）测试`）
+    # 这是业务侧真实成功信号，优先级高于下拉回读。
+    mini_created = await page.evaluate("""(titleText) => {
+        const normalize = (s) => (s || '').replace(/\\s+/g, '');
+        const t = normalize(titleText);
+        const nodes = Array.from(document.querySelectorAll('span,div,a'));
+        const texts = nodes.map(n => normalize(n.textContent || '')).filter(Boolean);
+        const hasMiniPrefix = texts.some(x => x.includes('（小程序）') || x.includes('(小程序)'));
+        if (!hasMiniPrefix) return false;
+        if (!t) return true;
+        return texts.some(x => (x.includes('（小程序）') || x.includes('(小程序)')) && x.includes(t));
+    }""", program_title)
+
+    if mini_created:
+        errors = [e for e in errors if not e.startswith("配置小程序未选中")]
+        errors = [e for e in errors if not e.startswith("小程序弹窗未关闭")]
+        return True, f"小程序已配置: {program_name} / {Path(cover_path).name}"
+
+    if errors:
+        return False, " / ".join(errors)
+    return True, f"小程序已配置: {program_name} / {Path(cover_path).name}"
 
 def extract_api_code_message(text: str):
     """从接口响应体中提取 code/message。"""
@@ -2813,6 +3125,11 @@ async def fill_step3(
     send_content = data.get("send_content", "")
     moments_add_images = parse_bool_flag(data.get("moments_add_images", "否"), default=False)
     moments_image_paths = data.get("moments_image_paths", "")
+    msg_add_mini_program = parse_bool_flag(data.get("msg_add_mini_program", "否"), default=False)
+    msg_mini_program_name = data.get("msg_mini_program_name", "大参林健康")
+    msg_mini_program_title = data.get("msg_mini_program_title", "")
+    msg_mini_program_cover_path = data.get("msg_mini_program_cover_path", "")
+    msg_mini_program_page_path = data.get("msg_mini_program_page_path", "")
     moments_gate_ok = True
     moments_gate_errors = []
     message_like_required = customer_msg_required or moments_required
@@ -2876,6 +3193,28 @@ async def fill_step3(
             moments_gate_ok = False
             moments_gate_errors.append("发送内容")
 
+        if customer_msg_required:
+            print(f"   🧩 添加小程序: {'需要配置' if msg_add_mini_program else '不配置'}")
+            if msg_add_mini_program:
+                mini_ok, mini_msg = await fill_step3_message_mini_program(
+                    page,
+                    msg_mini_program_name,
+                    msg_mini_program_title,
+                    msg_mini_program_cover_path,
+                    msg_mini_program_page_path,
+                )
+                print(f"      {'✅' if mini_ok else '⚠️'} {mini_msg}")
+                results["第3步-添加小程序"] = mini_ok
+                if not mini_ok:
+                    moments_gate_ok = False
+                    moments_gate_errors.append("添加小程序")
+            else:
+                print("      ⏭️ 未勾选添加小程序，已跳过")
+                results["第3步-添加小程序"] = True
+        else:
+            print("   🧩 添加小程序: ⏭️ 当前所选渠道无需填写，已跳过")
+            results["第3步-添加小程序"] = True
+
         if moments_required:
             print(f"   🖼️ 朋友圈图片: {'需要上传' if moments_add_images else '不上传'}")
             if moments_add_images:
@@ -2895,11 +3234,23 @@ async def fill_step3(
         print("   📅 结束时间: ⏭️ 当前所选渠道无需填写，已跳过")
         print("   👥 执行员工: ⏭️ 当前所选渠道无需填写，已跳过")
         print("   📝 发送内容: ⏭️ 当前所选渠道无需填写，已跳过")
+        print("   🧩 添加小程序: ⏭️ 当前所选渠道无需填写，已跳过")
         print("   🖼️ 朋友圈图片: ⏭️ 当前所选渠道无需填写，已跳过")
         results["第3步-结束时间"] = True
         results["第3步-执行员工"] = True
         results["第3步-发送内容"] = True
+        results["第3步-添加小程序"] = True
         results["第3步-朋友圈图片"] = True
+
+    # 显式约束：会员通-发客户消息始终要求结束时间/执行员工/发送内容都成功
+    if customer_msg_required:
+        must_keys = ["第3步-结束时间", "第3步-执行员工", "第3步-发送内容"]
+        missing = [k.replace("第3步-", "") for k in must_keys if not results.get(k, False)]
+        if missing:
+            moments_gate_ok = False
+            for m in missing:
+                if m not in moments_gate_errors:
+                    moments_gate_errors.append(m)
 
     # 会员通消息/朋友圈渠道下，共用必填失败直接中断；朋友圈额外校验图片
     if message_like_required and (not moments_gate_ok):
