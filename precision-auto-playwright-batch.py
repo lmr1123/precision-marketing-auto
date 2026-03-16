@@ -2722,6 +2722,13 @@ async def fill_step3(
     else:
         print("   📡 渠道选择: 未指定（按当前页面自动识别）")
 
+    # AB-B 分支：恢复“先切渠道再填字段”的行为，避免停留在默认渠道导致字段不可见。
+    if selected_channels:
+        primary_channel = selected_channels[0]
+        switched_primary = await switch_step3_channel(page, primary_channel)
+        print(f"   🔀 渠道切换(主): {primary_channel} -> {'成功' if switched_primary else '未命中(继续兜底)'}")
+        await asyncio.sleep(0.4)
+
     has_sms_editor = await page.evaluate("""() => {
         const isVisible = (el) => {
             if (!el) return false;
@@ -2750,6 +2757,10 @@ async def fill_step3(
         print(f"      ⚠️ 短信文案已自动清洗非法字符: {sms_content} -> {sms_content_clean}")
     sms_content = sms_content_clean
     if sms_required:
+        if has_channel_filter:
+            switched_sms = await switch_step3_channel(page, "短信")
+            print(f"      🧪 切换到短信渠道: {'成功' if switched_sms else '未命中'}")
+            await asyncio.sleep(0.3)
         try:
             sms_ok = await fill_step3_sms_content(page, sms_content)
             if not sms_ok:
@@ -2773,6 +2784,11 @@ async def fill_step3(
     moments_gate_errors = []
     message_like_required = customer_msg_required or moments_required
     if message_like_required:
+        if has_channel_filter:
+            target_msg_channel = "会员通-发客户朋友圈" if moments_required else "会员通-发客户消息"
+            switched_msg = await switch_step3_channel(page, target_msg_channel)
+            print(f"   🔀 渠道切换(会员通): {target_msg_channel} -> {'成功' if switched_msg else '未命中(按当前页继续)'}")
+            await asyncio.sleep(0.4)
         print(f"   📅 结束时间: {step3_end_time}")
         end_ok = await fill_step3_end_time(page, step3_end_time)
         print(f"      {'✅' if end_ok else '⚠️'} 结束时间{'已填充' if end_ok else '未匹配到字段'}")
