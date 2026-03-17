@@ -139,6 +139,10 @@ def _filter_template_fields(headers: List[str], sample: List[str]) -> tuple[List
     keep = [idx for idx, h in enumerate(headers) if h not in TEMPLATE_HIDE_FIELDS]
     out_headers = [headers[idx] for idx in keep]
     out_sample = [sample[idx] if idx < len(sample) else "" for idx in keep]
+    # 业务引导示例：第1步营销主题支持多选填写
+    if "theme" in out_headers:
+        idx = out_headers.index("theme")
+        out_sample[idx] = "其他、26年3月积分换券"
     # 业务引导示例：第2步主消费营运区支持多区域填写
     if "main_operating_area" in out_headers:
         idx = out_headers.index("main_operating_area")
@@ -922,7 +926,7 @@ UI_HTML = """
           <a class="link-pill" href="/api/template/xlsx">下载Excel模板</a>
           <a class="link-pill" href="/api/template/csv">下载CSV模板(防乱码)</a>
         </div>
-        <div class="tip" style="margin-top:8px">说明: 支持上传 CSV / XLSX。下载模板为中文表头，便于业务填写；上传时系统会自动识别中文表头并转换为脚本字段。Windows Excel 如遇 CSV 乱码，请优先下载“Excel模板”或“CSV模板(UTF-8 BOM)”。如勾选“朋友圈上传图片”，请在本页面选择图片文件（最多9张，jpg/png且<10MB），系统会自动写入任务CSV并按顺序上传。如勾选“会员通消息-添加小程序”，请填写标题、链接并上传封面，系统会自动注入到对应渠道行。</div>
+        <div class="tip" style="margin-top:8px">说明: 支持上传 CSV / XLSX。下载模板为中文表头，便于业务填写；上传时系统会自动识别中文表头并转换为脚本字段。营销主题支持多选，多个值请用“、/，/,/|”分隔（示例：其他、26年3月积分换券）。Windows Excel 如遇 CSV 乱码，请优先下载“Excel模板”或“CSV模板(UTF-8 BOM)”。如勾选“朋友圈上传图片”，请在本页面选择图片文件（最多9张，jpg/png且<10MB），系统会自动写入任务CSV并按顺序上传。如勾选“会员通消息-添加小程序”，请填写标题、链接并上传封面，系统会自动注入到对应渠道行。</div>
       </div>
 
       <div class="card">
