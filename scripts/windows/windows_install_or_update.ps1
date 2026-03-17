@@ -30,8 +30,24 @@ function Ensure-DesktopShortcut([string]$installDir) {
   $targetBat = Join-Path $installDir "scripts\windows\windows_start_ui.bat"
   if (!(Test-Path $targetBat)) { return }
 
-  $desktop = [Environment]::GetFolderPath("Desktop")
-  $shortcutPath = Join-Path $desktop "精准营销自动化工具.lnk"
+  $desktopCandidates = @()
+  $d1 = [Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop)
+  $d2 = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
+  if ($d1) { $desktopCandidates += $d1 }
+  if ($d2) { $desktopCandidates += $d2 }
+  if ($env:USERPROFILE) { $desktopCandidates += (Join-Path $env:USERPROFILE "Desktop") }
+  if ($env:OneDrive) { $desktopCandidates += (Join-Path $env:OneDrive "Desktop") }
+  $desktop = $null
+  foreach ($p in $desktopCandidates) {
+    if ($p -and (Test-Path $p)) { $desktop = $p; break }
+  }
+  if (-not $desktop) {
+    $desktop = Join-Path $env:USERPROFILE "Desktop"
+    New-Item -ItemType Directory -Path $desktop -Force | Out-Null
+  }
+  $shortcutPath = Join-Path $desktop "Precision Marketing Automation.lnk"
+  $shortcutPath = [System.IO.Path]::ChangeExtension($shortcutPath, ".lnk")
+  $shortcutPath = [System.IO.Path]::GetFullPath($shortcutPath)
   $wsh = New-Object -ComObject WScript.Shell
   $shortcut = $wsh.CreateShortcut($shortcutPath)
   $shortcut.TargetPath = $targetBat
