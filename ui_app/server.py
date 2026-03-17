@@ -139,6 +139,10 @@ def _filter_template_fields(headers: List[str], sample: List[str]) -> tuple[List
     keep = [idx for idx, h in enumerate(headers) if h not in TEMPLATE_HIDE_FIELDS]
     out_headers = [headers[idx] for idx in keep]
     out_sample = [sample[idx] if idx < len(sample) else "" for idx in keep]
+    # 业务引导示例：第2步主消费营运区支持多区域填写
+    if "main_operating_area" in out_headers:
+        idx = out_headers.index("main_operating_area")
+        out_sample[idx] = "辽宁省区、九江、南昌、广州二"
     return out_headers, out_sample
 
 

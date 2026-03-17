@@ -2460,122 +2460,49 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 if before_selected_count:
                                     print(f"      🧪 营运区确认前回读: {before_selected_count}")
                                 
-                                # 在树形选择器中选择营运区
-                                area = data['main_operating_area']
-                                print(f"      🔍 选择营运区: {area}")
-                                
-                                # 先找到包含"华南"的父节点并展开
-                                # 路径可传：华中大区-江西省区-九江（支持到营运区）
-                                print("      📂 先展开路径父节点...")
+                                area_raw = data['main_operating_area']
+                                area_targets = [x.strip() for x in re.split(r"[、，,|;\\n]+", area_raw) if x.strip()]
+                                if not area_targets:
+                                    area_targets = [area_raw.strip()]
+                                print(f"      🔍 选择营运区: {', '.join(area_targets)}")
 
-                                expand_result = await frame.evaluate("""
-                                async () => {
-                                    const path = '""" + area_escaped + """';
-                                    const segs = (path || '')
-                                        .split(/[\\-\\/、>|]/)
-                                        .map(s => (s || '').trim())
-                                        .filter(Boolean);
+                                multi_select_result = await frame.evaluate("""async (targets) => {
+                                    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+                                    const norm = (s) => (s || '').replace(/\\s+/g, '');
                                     const isVisible = (el) => {
                                         if (!el) return false;
                                         const style = window.getComputedStyle(el);
                                         const rect = el.getBoundingClientRect();
                                         return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
                                     };
-                                    const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
                                     const fireClick = (el) => {
                                         if (!el) return;
-                                        ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
+                                        ['pointerdown','mousedown','mouseup','click'].forEach(type => {
                                             el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
                                         });
                                         if (typeof el.click === 'function') el.click();
                                     };
-                                    let expanded = 0;
-                                    const trace = [];
-                                    for (const seg of segs.slice(0, -1)) {
-                                        const nodes = Array.from(document.querySelectorAll('.ant-tree-treenode')).filter(isVisible);
-                                        const key = norm(seg);
-                                        const target = nodes.find(node => {
-                                            const title = node.querySelector('.ant-tree-title');
-                                            const txt = norm(title?.textContent || '');
-                                            return txt === key || txt.includes(key);
-                                        });
-                                        if (!target) {
-                                            trace.push('miss:' + seg);
-                                            continue;
-                                        }
-                                        const switcher = target.querySelector('.ant-tree-switcher');
-                                        if (switcher && !switcher.classList.contains('ant-tree-switcher_open')) {
-                                            fireClick(switcher);
-                                            expanded += 1;
-                                            trace.push('expand:' + seg);
-                                            await sleep(500);
-                                        } else {
-                                            trace.push('open:' + seg);
-                                        }
-                                    }
-                                    return { status: 'ok', expanded, trace };
-                                }
-                                """)
-                                if isinstance(expand_result, dict):
-                                    print(f"         展开结果: expanded_parents_{expand_result.get('expanded', 0)}")
-                                    if expand_result.get("trace"):
-                                        print(f"         展开轨迹: {expand_result.get('trace')}")
-                                else:
-                                    print(f"         展开结果: {expand_result}")
-
-                                await asyncio.sleep(1.5)
-
-                                # 使用字符串拼接避免 f-string 问题
-                                js_find_node = """
-                                () => {
-                                    const targetArea = '""" + area_escaped + """';
-                                    const segs = (targetArea || '')
-                                        .split(/[\\-\\/、>|]/)
-                                        .map(s => (s || '').trim())
-                                        .filter(Boolean);
-                                    const targetLeaf = segs.length ? segs[segs.length - 1] : targetArea;
-                                    const isVisible = (el) => {
-                                        if (!el) return false;
-                                        const style = window.getComputedStyle(el);
-                                        const rect = el.getBoundingClientRect();
-                                        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-                                    };
-                                    const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                    const modalCandidates = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root'))
-                                        .filter(isVisible)
-                                        .map(el => ({
-                                            el,
-                                            area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
-                                            hasTree: !!el.querySelector('.ant-tree, .ant-tree-list-holder-inner'),
-                                        }))
-                                        .filter(x => x.hasTree)
-                                        .sort((a, b) => a.area - b.area);
-                                    const pickerModal = modalCandidates.length ? modalCandidates[0].el : null;
-                                    if (!pickerModal) return 'picker_modal_not_found';
+                                    const modals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
+                                    const pickerModal = modals.find(m => !!m.querySelector('.ant-tree, .ant-tree-list-holder-inner')) || null;
+                                    if (!pickerModal) return { ok: false, reason: 'picker_modal_not_found', items: [] };
                                     const treeHolder = pickerModal.querySelector('.ant-tree-list-holder, .ant-tree-list, .ant-tree');
-                                    const collectNodes = () => Array.from(pickerModal.querySelectorAll('.ant-tree-treenode'));
-                                    const findNode = () => {
-                                        const leafNorm = norm(targetLeaf);
-                                        const matchFromNodes = (nodes, keyNorm) => {
-                                            for (const n of nodes) {
-                                                const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
-                                                const txt = norm((title?.textContent || '').trim());
-                                                if (txt === keyNorm || txt.includes(keyNorm)) return n;
-                                            }
-                                            return null;
-                                        };
-                                        if (treeHolder && typeof treeHolder.scrollTop === 'number') {
-                                            treeHolder.scrollTop = 0;
+
+                                    const findNodeByText = (key) => {
+                                        const keyNorm = norm(key);
+                                        const nodes = Array.from(pickerModal.querySelectorAll('.ant-tree-treenode'));
+                                        for (const n of nodes) {
+                                            const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
+                                            const txt = norm((title?.textContent || '').trim());
+                                            if (txt === keyNorm || txt.includes(keyNorm)) return n;
                                         }
-                                        for (let attempt = 0; attempt < 24; attempt += 1) {
-                                            const nodes = collectNodes();
-                                            let hit = matchFromNodes(nodes, leafNorm);
-                                            if (!hit && segs.length >= 2) {
-                                                const provinceNorm = norm(segs[segs.length - 2]);
-                                                hit = matchFromNodes(nodes, provinceNorm);
-                                            }
-                                            if (hit) return hit;
+                                        return null;
+                                    };
+
+                                    const findNodeByScroll = (key) => {
+                                        if (treeHolder && typeof treeHolder.scrollTop === 'number') treeHolder.scrollTop = 0;
+                                        for (let i = 0; i < 24; i += 1) {
+                                            const node = findNodeByText(key);
+                                            if (node) return node;
                                             if (!treeHolder || typeof treeHolder.scrollTop !== 'number') break;
                                             const nextTop = treeHolder.scrollTop + Math.max(120, Math.floor((treeHolder.clientHeight || 240) * 0.8));
                                             if (nextTop === treeHolder.scrollTop) break;
@@ -2583,47 +2510,54 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         }
                                         return null;
                                     };
-                                    const fireClick = (el) => {
-                                        if (!el) return;
-                                        ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
-                                            el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-                                        });
-                                        if (typeof el.click === 'function') el.click();
-                                    };
-                                    const node = findNode();
-                                    if (!node) return { status: 'not_found', matched: false };
-                                    node.scrollIntoView({ block: 'center' });
-                                    const checkbox = node.querySelector('.ant-tree-checkbox');
-                                    if (!checkbox) return { status: 'checkbox_not_found', matched: true };
-                                    if (checkbox.classList.contains('ant-tree-checkbox-checked')) return { status: 'already_checked', matched: true };
-                                    fireClick(checkbox);
-                                    if (!checkbox.classList.contains('ant-tree-checkbox-checked')) {
-                                        const inner = checkbox.querySelector('.ant-tree-checkbox-inner');
-                                        fireClick(inner);
-                                    }
-                                    if (!checkbox.classList.contains('ant-tree-checkbox-checked')) {
-                                        const origin = checkbox.querySelector('.ant-tree-checkbox-input, input[type="checkbox"]');
-                                        fireClick(origin);
-                                    }
-                                    if (!checkbox.classList.contains('ant-tree-checkbox-checked')) {
-                                        const titleWrap = node.querySelector('.ant-tree-node-content-wrapper');
-                                        fireClick(titleWrap);
-                                    }
-                                    return {
-                                        status: checkbox.classList.contains('ant-tree-checkbox-checked') ? 'checked' : 'click_no_effect',
-                                        matched: true
-                                    };
-                                }
-                                """
-                                selected_result = await frame.evaluate(js_find_node)
-                                selected = selected_result.get('status') if isinstance(selected_result, dict) else selected_result
-                                matched_area_node = bool(selected_result.get('matched')) if isinstance(selected_result, dict) else selected in ['checked', 'already_checked', 'click_no_effect', 'checkbox_not_found']
 
-                                if matched_area_node:
-                                    if selected in ['checked', 'already_checked']:
-                                        print(f"      ✅ 已选择营运区: {area}")
-                                    else:
-                                        print(f"      ⚠️ 营运区勾选状态未确认，继续尝试小弹窗确定并用已选条数校验: {area} ({selected})")
+                                    const items = [];
+                                    for (const target of targets || []) {
+                                        const segs = (target || '').split(/[\\-\\/、>|]/).map(s => (s || '').trim()).filter(Boolean);
+                                        const leaf = segs.length ? segs[segs.length - 1] : target;
+                                        const trace = [];
+                                        for (const seg of segs.slice(0, -1)) {
+                                            const parentNode = findNodeByText(seg);
+                                            if (!parentNode) { trace.push('miss:' + seg); continue; }
+                                            const sw = parentNode.querySelector('.ant-tree-switcher');
+                                            if (sw && !sw.classList.contains('ant-tree-switcher_open')) {
+                                                fireClick(sw);
+                                                trace.push('expand:' + seg);
+                                                await sleep(400);
+                                            } else {
+                                                trace.push('open:' + seg);
+                                            }
+                                        }
+                                        const node = findNodeByScroll(leaf);
+                                        if (!node) {
+                                            items.push({ area: target, status: 'not_found', trace });
+                                            continue;
+                                        }
+                                        node.scrollIntoView({ block: 'center' });
+                                        const cb = node.querySelector('.ant-tree-checkbox');
+                                        if (!cb) {
+                                            items.push({ area: target, status: 'checkbox_not_found', trace });
+                                            continue;
+                                        }
+                                        if (!cb.classList.contains('ant-tree-checkbox-checked')) {
+                                            fireClick(cb);
+                                            if (!cb.classList.contains('ant-tree-checkbox-checked')) fireClick(cb.querySelector('.ant-tree-checkbox-inner'));
+                                            if (!cb.classList.contains('ant-tree-checkbox-checked')) fireClick(cb.querySelector('.ant-tree-checkbox-input, input[type=\"checkbox\"]'));
+                                            if (!cb.classList.contains('ant-tree-checkbox-checked')) fireClick(node.querySelector('.ant-tree-node-content-wrapper'));
+                                        }
+                                        items.push({ area: target, status: cb.classList.contains('ant-tree-checkbox-checked') ? 'checked' : 'click_no_effect', trace });
+                                        await sleep(250);
+                                    }
+                                    return { ok: true, items };
+                                }""", area_targets)
+
+                                items = (multi_select_result or {}).get("items", []) if isinstance(multi_select_result, dict) else []
+                                ok_items = [it for it in items if (it.get("status") in ("checked", "already_checked"))]
+                                bad_items = [it for it in items if (it.get("status") not in ("checked", "already_checked"))]
+                                for it in items:
+                                    print(f"         选择结果: {it.get('area')} -> {it.get('status')} | trace={it.get('trace', [])}")
+                                if bad_items:
+                                    print(f"      ⚠️ 营运区未全部勾选成功: {[x.get('area') for x in bad_items]}")
                                     # 只关闭“选择数据”小弹窗，不关闭“编辑分群”大弹窗。
                                     confirm_area_result = await frame.evaluate("""() => {
                                         const isVisible = (el) => {
@@ -2673,7 +2607,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     }""")
                                     picker_still_visible = bool(confirm_area_result.get("pickerStillVisible"))
                                     selected_num = int(re.search(r'(\d+)', selected_count_text).group(1)) if selected_count_text and re.search(r'(\d+)', selected_count_text) else 0
-                                    if confirm_area_result.get("ok") and selected_num > 0:
+                                    if confirm_area_result.get("ok") and selected_num > 0 and len(ok_items) == len(area_targets):
                                         print(f"      ✅ 营运区已确认: {selected_count_text}")
                                         if picker_still_visible:
                                             print("      ⚠️ 选择数据弹窗关闭状态未可靠识别，当前按已点击“确定”且已回读到已选条数放行")
@@ -2685,10 +2619,9 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             f"pickerStillVisible={picker_still_visible}, "
                                             f"selectedCountBefore={before_selected_count}, "
                                             f"selectedCountAfter={selected_count_text or confirm_area_result.get('selectedCount','')}, "
-                                            f"selectedNum={selected_num}"
+                                            f"selectedNum={selected_num}, "
+                                            f"selectedAreas={len(ok_items)}/{len(area_targets)}"
                                         )
-                                else:
-                                    print(f"      ⚠️ 营运区勾选失败: {area} ({selected})")
                             else:
                                 # 兜底2：某些页面树已默认展开，直接尝试勾选
                                 print("      ⚠️ 未找到选择数据按钮，尝试直接在当前树中勾选...")

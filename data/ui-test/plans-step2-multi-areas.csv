@@ -1,0 +1,2 @@
+name,region,theme,use_recommend,start_time,end_time,trigger_type,send_time,global_limit,set_target,group_name,update_type,main_operating_area,coupon_ids,sms_content,step3_end_time,executor_employees,send_content,channels
+测试-营运区多区域-4项,省区,其他,否,2026-03-16 08:00,2026-03-27 08:00,定时-单次任务,2026-03-20 08:00,不限制,否,测试-≥20积分会员（未绑客）,自动更新,辽宁省区、九江、南昌、广州二,1-20000005475,我现在是测试的内容,2026-03-27 08:00,西北大区、湖北省区,企微1对1内容测试,会员通-发客户消息
