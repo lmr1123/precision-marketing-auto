@@ -2616,41 +2616,28 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         print(f"      ⚠️ 营运区勾选状态未确认，继续尝试小弹窗确定并用已选条数校验: {area} ({selected})")
                                     # 只关闭“选择数据”小弹窗，不关闭“编辑分群”大弹窗。
                                     confirm_area_result = await frame.evaluate("""() => {
-                                        const norm = (s) => (s || '').replace(/\\s+/g, '');
                                         const isVisible = (el) => {
                                             if (!el) return false;
                                             const style = window.getComputedStyle(el);
                                             const rect = el.getBoundingClientRect();
                                             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
                                         };
-                                        const textOf = (el) => norm(el?.textContent || '');
-                                        const modalCandidates = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root'))
-                                            .filter(isVisible)
-                                            .map(el => ({
-                                                el,
-                                                area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
-                                                hasTree: !!el.querySelector('.ant-tree, .ant-tree-list-holder-inner'),
-                                            }))
-                                            .filter(x => x.hasTree)
-                                            .sort((a, b) => a.area - b.area);
-                                        const pickerModal = modalCandidates.length ? modalCandidates[0].el : null;
-                                        if (!pickerModal) {
-                                            return { ok: false, reason: 'picker_modal_not_found' };
-                                        }
-                                        const btn = Array.from(pickerModal.querySelectorAll('button.ant-btn.ant-btn-primary'))
-                                            .find(b => {
-                                                const t = textOf(b);
-                                                return t === '确定' || t === '确 定';
-                                            }
-                                            });
-                                        if (!btn) {
-                                            return { ok: false, reason: 'picker_confirm_not_found' };
-                                        }
+                                        const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                        const modals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
+                                        const pickerModal = modals.find(m => !!m.querySelector('.ant-tree, .ant-tree-list-holder-inner')) || null;
+                                        if (!pickerModal) return { ok: false, reason: 'picker_modal_not_found' };
+
+                                        const btns = Array.from(pickerModal.querySelectorAll('button.ant-btn.ant-btn-primary')).filter(isVisible);
+                                        const btn = btns.find(b => {
+                                            const t = norm(b.textContent || '');
+                                            return t === '确定' || t === '确 定';
+                                        });
+                                        if (!btn) return { ok: false, reason: 'picker_confirm_not_found' };
+
                                         btn.click();
                                         const pickerStillVisible = isVisible(pickerModal);
-                                        const countNode = Array.from(document.querySelectorAll('.condition, .box, .ant-form-item, div'))
+                                        const countNode = Array.from(document.querySelectorAll('.ml-2, div, span'))
                                             .filter(isVisible)
-                                            .map(node => node.querySelector('.ml-2') || node)
                                             .find(n => /已选[:：]\\s*\\d+/.test((n.textContent || '').trim()));
                                         return {
                                             ok: true,
