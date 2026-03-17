@@ -23,8 +23,7 @@ echo Installed to:
 echo   %USER_DIR%
 echo.
 echo You can now start from desktop shortcut:
-echo   精准营销自动化工具
+echo   Precision Marketing Automation
 pause
 endlocal
 exit /b 0
-
