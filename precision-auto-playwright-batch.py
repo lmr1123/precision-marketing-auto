@@ -2511,6 +2511,32 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         return null;
                                     };
 
+                                    const expandByName = async (name) => {
+                                        const node = findNodeByText(name);
+                                        if (!node) return false;
+                                        const sw = node.querySelector('.ant-tree-switcher');
+                                        if (sw && !sw.classList.contains('ant-tree-switcher_open')) {
+                                            fireClick(sw);
+                                            await sleep(350);
+                                        }
+                                        return true;
+                                    };
+
+                                    // 业务高频节点父链提示，避免单段名称（如“九江”）找不到。
+                                    const parentHints = {
+                                        '辽宁省区': ['北方大区'],
+                                        '九江': ['华中大区', '江西省区'],
+                                        '南昌': ['华中大区', '江西省区'],
+                                        '广州二': ['华南大区', '广佛省区'],
+                                    };
+
+                                    const expandTopRegions = async () => {
+                                        const roots = ['北方大区', '华中大区', '西北大区', '西南大区', '华南大区', '华东大区'];
+                                        for (const r of roots) {
+                                            await expandByName(r);
+                                        }
+                                    };
+
                                     const items = [];
                                     for (const target of targets || []) {
                                         const segs = (target || '').split(/[\\-\\/、>|]/).map(s => (s || '').trim()).filter(Boolean);
@@ -2528,7 +2554,23 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                                 trace.push('open:' + seg);
                                             }
                                         }
-                                        const node = findNodeByScroll(leaf);
+                                        // 单段目标优先按业务父链提示展开（如“九江”）
+                                        if (segs.length <= 1) {
+                                            const hints = parentHints[leaf] || [];
+                                            for (const h of hints) {
+                                                const ok = await expandByName(h);
+                                                trace.push((ok ? 'expand_hint:' : 'miss_hint:') + h);
+                                            }
+                                        }
+
+                                        let node = findNodeByScroll(leaf);
+                                        // 仍找不到时，尝试先把根大区展开再搜索一次
+                                        if (!node) {
+                                            await expandTopRegions();
+                                            trace.push('expand_roots');
+                                            await sleep(300);
+                                            node = findNodeByScroll(leaf);
+                                        }
                                         if (!node) {
                                             items.push({ area: target, status: 'not_found', trace });
                                             continue;
