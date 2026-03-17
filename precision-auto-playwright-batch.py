@@ -2470,7 +2470,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 print("      📂 先展开路径父节点...")
 
                                 expand_result = await frame.evaluate("""
-                                () => {
+                                async () => {
                                     const path = '""" + area_escaped + """';
                                     const segs = (path || '')
                                         .split(/[\\-\\/、>|]/)
@@ -2482,27 +2482,48 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         const rect = el.getBoundingClientRect();
                                         return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
                                     };
-                                    const nodes = Array.from(document.querySelectorAll('.ant-tree-treenode')).filter(isVisible);
                                     const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+                                    const fireClick = (el) => {
+                                        if (!el) return;
+                                        ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
+                                            el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                                        });
+                                        if (typeof el.click === 'function') el.click();
+                                    };
                                     let expanded = 0;
+                                    const trace = [];
                                     for (const seg of segs.slice(0, -1)) {
+                                        const nodes = Array.from(document.querySelectorAll('.ant-tree-treenode')).filter(isVisible);
+                                        const key = norm(seg);
                                         const target = nodes.find(node => {
                                             const title = node.querySelector('.ant-tree-title');
                                             const txt = norm(title?.textContent || '');
-                                            const key = norm(seg);
                                             return txt === key || txt.includes(key);
                                         });
-                                        if (!target) continue;
+                                        if (!target) {
+                                            trace.push('miss:' + seg);
+                                            continue;
+                                        }
                                         const switcher = target.querySelector('.ant-tree-switcher');
                                         if (switcher && !switcher.classList.contains('ant-tree-switcher_open')) {
-                                            switcher.click();
+                                            fireClick(switcher);
                                             expanded += 1;
+                                            trace.push('expand:' + seg);
+                                            await sleep(500);
+                                        } else {
+                                            trace.push('open:' + seg);
                                         }
                                     }
-                                    return 'expanded_parents_' + expanded;
+                                    return { status: 'ok', expanded, trace };
                                 }
                                 """)
-                                print(f"         展开结果: {expand_result}")
+                                if isinstance(expand_result, dict):
+                                    print(f"         展开结果: expanded_parents_{expand_result.get('expanded', 0)}")
+                                    if expand_result.get("trace"):
+                                        print(f"         展开轨迹: {expand_result.get('trace')}")
+                                else:
+                                    print(f"         展开结果: {expand_result}")
 
                                 await asyncio.sleep(1.5)
 
@@ -2545,6 +2566,14 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
                                             const txt = norm((title?.textContent || '').trim());
                                             if (txt.includes(leafNorm)) return n;
+                                        }
+                                        if (segs.length >= 2) {
+                                            const provinceNorm = norm(segs[segs.length - 2]);
+                                            for (const n of nodes) {
+                                                const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
+                                                const txt = norm((title?.textContent || '').trim());
+                                                if (txt === provinceNorm || txt.includes(provinceNorm)) return n;
+                                            }
                                         }
                                         return null;
                                     };
