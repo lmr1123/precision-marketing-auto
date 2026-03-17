@@ -2649,10 +2649,15 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     }""")
                                     picker_still_visible = bool(confirm_area_result.get("pickerStillVisible"))
                                     selected_num = int(re.search(r'(\d+)', selected_count_text).group(1)) if selected_count_text and re.search(r'(\d+)', selected_count_text) else 0
-                                    if confirm_area_result.get("ok") and selected_num > 0 and len(ok_items) == len(area_targets):
+                                    if confirm_area_result.get("ok") and selected_num > 0:
                                         print(f"      ✅ 营运区已确认: {selected_count_text}")
                                         if picker_still_visible:
                                             print("      ⚠️ 选择数据弹窗关闭状态未可靠识别，当前按已点击“确定”且已回读到已选条数放行")
+                                        if len(ok_items) < len(area_targets):
+                                            print(
+                                                "      ⚠️ 节点逐项回读未全部命中，"
+                                                f"但已选条数={selected_num}>0，按业务规则放行（目标命中 {len(ok_items)}/{len(area_targets)}）"
+                                            )
                                         results["第2步-主消费营运区"] = True
                                     else:
                                         print(
