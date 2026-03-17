@@ -1,10 +1,10 @@
-$ErrorActionPreference = "Stop"
-
 param(
   [string]$InstallDir = "$env:LOCALAPPDATA\PrecisionMarketingAuto",
   [string]$Repo = "lmr1123/precision-marketing-auto",
   [string]$AssetName = "precision-marketing-auto-windows-oneclick.zip"
 )
+
+$ErrorActionPreference = "Stop"
 
 function Write-Step([string]$msg) {
   Write-Host "[Installer] $msg"
@@ -82,4 +82,3 @@ Write-Host ""
 Write-Host "Next step:"
 Write-Host "1) Open: $InstallDir"
 Write-Host "2) Double click: scripts\windows\windows_start_ui.bat"
-
