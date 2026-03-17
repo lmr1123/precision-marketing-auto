@@ -213,42 +213,72 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
     """选择下拉选项（Element UI / Ant Design）"""
     print(f"   🏷️  {label}: {value}")
 
-    item = await get_form_item_by_label(page, label)
-    if item:
-        try:
-            # 三步走：点击输入框 -> 等待弹层 -> 点击文本
-            await item.locator(
-                '.el-input__inner, .el-select .el-input, .ant-select-selector, .ant-select-selection-item'
-            ).first.click(force=True)
-            await page.locator('.el-select-dropdown:visible, .ant-select-dropdown:visible').first.wait_for(timeout=3000)
+    targets = [value]
+    if is_multi:
+        targets = [x.strip() for x in re.split(r"[、，,|;\\n]+", str(value or "")) if x.strip()]
+        if not targets:
+            targets = [str(value or "").strip()]
 
-            option = page.locator(
-                '.el-select-dropdown__item:visible, .ant-select-item-option:visible, .ant-select-item:visible'
-            ).filter(has_text=value).first
+    async def click_field(item_locator):
+        await item_locator.locator(
+            '.el-input__inner, .el-select .el-input, .ant-select-selector, .ant-select-selection-item'
+        ).first.click(force=True)
+        await page.locator('.el-select-dropdown:visible, .ant-select-dropdown:visible').first.wait_for(timeout=3000)
+
+    async def pick_one(target: str, item_locator=None) -> bool:
+        if item_locator is not None:
+            try:
+                await click_field(item_locator)
+            except Exception:
+                pass
+
+        option = page.locator(
+            '.el-select-dropdown__item:visible, .ant-select-item-option:visible, .ant-select-item:visible'
+        ).filter(has_text=target).first
+        try:
             if await option.count() > 0:
                 await option.click(force=True)
-                print(f"      ✅ 已选择: {value}")
                 await asyncio.sleep(0.2)
                 return True
-        except:
+        except Exception:
             pass
 
-    # 兜底：直接按文本点击可见选项
-    options = page.locator('.el-select-dropdown__item:visible, .ant-select-item:visible')
-    opt_count = await options.count()
-    for j in range(opt_count):
-        try:
-            opt_text = (await options.nth(j).text_content() or "").strip()
-            if value in opt_text or opt_text in value:
-                await options.nth(j).click(force=True)
-                print(f"      ✅ 已选择: {opt_text}")
-                await asyncio.sleep(0.2)
-                return True
-        except:
-            continue
+        # 兜底：直接按文本点击可见选项
+        options = page.locator('.el-select-dropdown__item:visible, .ant-select-item:visible')
+        opt_count = await options.count()
+        for j in range(opt_count):
+            try:
+                opt_text = (await options.nth(j).text_content() or "").strip()
+                if target in opt_text or opt_text in target:
+                    await options.nth(j).click(force=True)
+                    await asyncio.sleep(0.2)
+                    return True
+            except Exception:
+                continue
+        return False
 
-    print(f"      ⚠️ 未找到字段: {label}")
-    return False
+    item = await get_form_item_by_label(page, label)
+    if item:
+        ok_count = 0
+        for t in targets:
+            picked = await pick_one(t, item)
+            if picked:
+                ok_count += 1
+                print(f"      ✅ 已选择: {t}")
+            else:
+                print(f"      ⚠️ 未找到选项: {t}")
+        return ok_count == len(targets)
+
+    # 标签块没命中时，仍尝试直接在当前下拉上选（用于兜底）
+    ok_count = 0
+    for t in targets:
+        picked = await pick_one(t, None)
+        if picked:
+            ok_count += 1
+            print(f"      ✅ 已选择: {t}")
+        else:
+            print(f"      ⚠️ 未找到字段: {label} / 选项: {t}")
+    return ok_count == len(targets)
 
 async def fill_input(page, label: str, value: str):
     """填充文本输入框"""
@@ -2115,10 +2145,12 @@ async def fill_step1(page, data: dict, auto_next: bool = True):
     if not region_ok:
         raise RuntimeError("第1步失败：计划区域未选择成功")
     results["第1步-计划区域"] = True
-    theme_ok = await select_option(page, "营销主题", data.get("theme", "其他"))
+    theme_val = data.get("theme", "其他")
+    theme_is_multi = bool(re.search(r"[、，,|;\\n]", str(theme_val or "")))
+    theme_ok = await select_option(page, "营销主题", theme_val, is_multi=theme_is_multi)
     if not theme_ok:
         await asyncio.sleep(0.5)
-        theme_ok = await select_option(page, "营销主题", data.get("theme", "其他"))
+        theme_ok = await select_option(page, "营销主题", theme_val, is_multi=theme_is_multi)
     if not theme_ok:
         raise RuntimeError("第1步失败：营销主题未选择成功")
     results["第1步-营销主题"] = True
