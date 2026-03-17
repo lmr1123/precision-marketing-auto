@@ -2181,6 +2181,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
         "第2步-预跑按钮": False,
         "第2步-下一步按钮": False,
     }
+    step2_has_pick_btn = True
+    step2_has_coupon_row = True
     
     await wait_and_log(page, 2, "等待第2步加载...")
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step2-before.png')
@@ -2361,6 +2363,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                         raise RuntimeError(
                             f"第2步 iframe 控件未就绪（textLen={ready.get('textLen', 0)}），请检查网络/VPN或重试"
                         )
+                    step2_has_pick_btn = bool(ready.get("hasPickBtn"))
+                    step2_has_coupon_row = bool(ready.get("hasCouponRow"))
 
                     # 第2步“名称”输入框自动填充已关闭，避免触发该弹窗异常关闭。
                     print("   📝 名称: ⏭️ 已跳过自动填充")
@@ -2368,7 +2372,14 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                     # 在 iframe 内选择更新方式（回读校验）
                     print("   ⚪ 更新方式: " + data.get("update_type", "自动更新"))
                     try:
-                        if "自动" in data.get("update_type", ""):
+                        has_update_field = await frame.evaluate("""() => {
+                            const txt = (document.body?.innerText || '').replace(/\\s+/g, '');
+                            return txt.includes('自动更新') || txt.includes('手动更新') || txt.includes('更新方式');
+                        }""")
+                        if not has_update_field:
+                            print("      ⏭️ 当前页面未检测到“更新方式”字段，自动跳过")
+                            results["第2步-更新方式"] = True
+                        elif "自动" in data.get("update_type", ""):
                             await frame.evaluate('''() => {
                                 const els = document.querySelectorAll('*');
                                 for (const el of els) {
@@ -2390,6 +2401,9 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 results["第2步-更新方式"] = True
                             else:
                                 print("      ⚠️ 更新方式回读失败（未选中自动更新）")
+                        else:
+                            # 非“自动更新”场景当前不强控，避免误伤其它配置
+                            results["第2步-更新方式"] = True
                     except Exception as e:
                         print(f"      ⚠️ 更新方式选择失败: {e}")
                     
@@ -2397,6 +2411,10 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                     if data.get("main_operating_area"):
                         print(f"   🏢 主消费营运区: {data['main_operating_area']}")
                         try:
+                            if not step2_has_pick_btn:
+                                print("      ⏭️ 当前页面未检测到“选择数据”控件，主消费营运区自动跳过")
+                                results["第2步-主消费营运区"] = True
+                                raise RuntimeError("__skip_main_operating_area__")
                             area_escaped = escape_js_string(data["main_operating_area"])
                             clicked = await frame.evaluate('''() => {
                                 const btns = document.querySelectorAll('button');
@@ -2448,41 +2466,62 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 print(f"      🔍 选择营运区: {area}")
                                 
                                 # 先找到包含"华南"的父节点并展开
-                                parent_keyword = "华南"  # 广佛省区的父节点
-                                print(f"      📂 先展开父节点: {parent_keyword}")
-                                
+                                # 路径可传：华中大区-江西省区-九江（支持到营运区）
+                                print("      📂 先展开路径父节点...")
+
                                 expand_result = await frame.evaluate("""
                                 () => {
-                                    const keyword = '""" + parent_keyword + """';
-                                    const nodes = document.querySelectorAll('.ant-tree-treenode');
-                                    for (const node of nodes) {
-                                        const title = node.querySelector('.ant-tree-title');
-                                        if (title && title.textContent.includes(keyword)) {
-                                            const switcher = node.querySelector('.ant-tree-switcher');
-                                            if (switcher && !switcher.classList.contains('ant-tree-switcher_open')) {
-                                                switcher.click();
-                                                return 'expanded_' + title.textContent;
-                                            }
-                                            return 'already_open_' + title.textContent;
-                                        }
-                                    }
-                                    return 'not_found';
-                                }
-                                """)
-                                print(f"         展开结果: {expand_result}")
-                                
-                                await asyncio.sleep(1.5)
-                                
-                                # 使用字符串拼接避免 f-string 问题
-                                js_find_node = """
-                                () => {
-                                    const targetArea = '""" + area + """';
+                                    const path = '""" + area_escaped + """';
+                                    const segs = (path || '')
+                                        .split(/[\\-\\/、>|]/)
+                                        .map(s => (s || '').trim())
+                                        .filter(Boolean);
                                     const isVisible = (el) => {
                                         if (!el) return false;
                                         const style = window.getComputedStyle(el);
                                         const rect = el.getBoundingClientRect();
                                         return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
                                     };
+                                    const nodes = Array.from(document.querySelectorAll('.ant-tree-treenode')).filter(isVisible);
+                                    const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                    let expanded = 0;
+                                    for (const seg of segs.slice(0, -1)) {
+                                        const target = nodes.find(node => {
+                                            const title = node.querySelector('.ant-tree-title');
+                                            const txt = norm(title?.textContent || '');
+                                            const key = norm(seg);
+                                            return txt === key || txt.includes(key);
+                                        });
+                                        if (!target) continue;
+                                        const switcher = target.querySelector('.ant-tree-switcher');
+                                        if (switcher && !switcher.classList.contains('ant-tree-switcher_open')) {
+                                            switcher.click();
+                                            expanded += 1;
+                                        }
+                                    }
+                                    return 'expanded_parents_' + expanded;
+                                }
+                                """)
+                                print(f"         展开结果: {expand_result}")
+
+                                await asyncio.sleep(1.5)
+
+                                # 使用字符串拼接避免 f-string 问题
+                                js_find_node = """
+                                () => {
+                                    const targetArea = '""" + area_escaped + """';
+                                    const segs = (targetArea || '')
+                                        .split(/[\\-\\/、>|]/)
+                                        .map(s => (s || '').trim())
+                                        .filter(Boolean);
+                                    const targetLeaf = segs.length ? segs[segs.length - 1] : targetArea;
+                                    const isVisible = (el) => {
+                                        if (!el) return false;
+                                        const style = window.getComputedStyle(el);
+                                        const rect = el.getBoundingClientRect();
+                                        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                                    };
+                                    const norm = (s) => (s || '').replace(/\\s+/g, '');
                                     const modalCandidates = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root'))
                                         .filter(isVisible)
                                         .map(el => ({
@@ -2496,15 +2535,16 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     if (!pickerModal) return 'picker_modal_not_found';
                                     const nodes = Array.from(pickerModal.querySelectorAll('.ant-tree-treenode'));
                                     const findNode = () => {
+                                        const leafNorm = norm(targetLeaf);
                                         for (const n of nodes) {
                                             const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
-                                            const txt = (title?.textContent || '').trim();
-                                            if (txt === targetArea) return n;
+                                            const txt = norm((title?.textContent || '').trim());
+                                            if (txt === leafNorm) return n;
                                         }
                                         for (const n of nodes) {
                                             const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
-                                            const txt = (title?.textContent || '').trim();
-                                            if (txt.includes(targetArea)) return n;
+                                            const txt = norm((title?.textContent || '').trim());
+                                            if (txt.includes(leafNorm)) return n;
                                         }
                                         return null;
                                     };
@@ -2539,7 +2579,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 selected_result = await frame.evaluate(js_find_node)
                                 selected = selected_result.get('status') if isinstance(selected_result, dict) else selected_result
                                 matched_area_node = bool(selected_result.get('matched')) if isinstance(selected_result, dict) else selected in ['checked', 'already_checked', 'click_no_effect', 'checkbox_not_found']
-                                
+
                                 if matched_area_node:
                                     if selected in ['checked', 'already_checked']:
                                         print(f"      ✅ 已选择营运区: {area}")
@@ -2572,6 +2612,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             .find(b => {
                                                 const t = textOf(b);
                                                 return t === '确定' || t === '确 定';
+                                            }
                                             });
                                         if (!btn) {
                                             return { ok: false, reason: 'picker_confirm_not_found' };
@@ -2657,7 +2698,12 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     for (const n of nodes) {
                                         const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
                                         const txt = (title?.textContent || '').trim();
-                                        if (!(txt === targetArea || txt.includes(targetArea))) continue;
+                                        const segs = (targetArea || '')
+                                            .split(/[\\-\\/、>|]/)
+                                            .map(s => (s || '').trim())
+                                            .filter(Boolean);
+                                        const leaf = segs.length ? segs[segs.length - 1] : targetArea;
+                                        if (!(txt === leaf || txt.includes(leaf))) continue;
                                         n.scrollIntoView({ block: 'center' });
                                         const cb = n.querySelector('.ant-tree-checkbox');
                                         if (!cb) return { status: 'checkbox_not_found', matched: true };
@@ -2781,65 +2827,76 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 else:
                                     print(f"      ⚠️ 直接勾选失败: {selected_direct}，请检查第2步页面是否空白/未加载完整")
                         except Exception as e:
-                            print(f"      ⚠️ 主消费营运区操作失败: {e}")
+                            if "__skip_main_operating_area__" in str(e):
+                                pass
+                            else:
+                                print(f"      ⚠️ 主消费营运区操作失败: {e}")
                     
                     # 在 iframe 内填充券规则ID（按标签就近定位 + 回读）
                     if data.get("coupon_ids"):
                         print(f"   🎫 券规则ID: {data['coupon_ids']}")
-                        try:
-                            coupon_val = data["coupon_ids"]
-                            coupon_result = await frame.evaluate("""(val) => {
-                                const isVisible = (el) => {
-                                    if (!el) return false;
-                                    const style = window.getComputedStyle(el);
-                                    const rect = el.getBoundingClientRect();
-                                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-                                };
-                                const write = (inp, v) => {
-                                    if (!inp || !isVisible(inp)) return false;
-                                    inp.focus();
-                                    inp.value = v;
-                                    inp.setAttribute('value', v);
-                                    inp.dispatchEvent(new Event('input', { bubbles: true }));
-                                    inp.dispatchEvent(new Event('keyup', { bubbles: true }));
-                                    inp.dispatchEvent(new Event('change', { bubbles: true }));
-                                    inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-                                    inp.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
-                                    inp.blur();
-                                    return ((inp.value || '').trim());
-                                };
-                                // 优先：精准命中“券规则ID”对应的 event-row，再写入该行 box 中可见输入框
-                                const preciseRows = Array.from(document.querySelectorAll('.event-row'))
-                                    .filter(r => isVisible(r) && r.querySelector('.ant-select-selection-item[title="券规则ID"]'));
-                                for (const row of preciseRows) {
-                                    const target = Array.from(row.querySelectorAll('.box input.ant-input, .box input[type="text"], .box input'))
-                                        .find(inp => isVisible(inp) && !inp.disabled && !inp.readOnly);
-                                    if (!target) continue;
-                                    const rb = write(target, val);
-                                    return { ok: (rb === val), readback: rb || '', mode: 'precise_event_row' };
-                                }
-                                // 兜底：在含“券规则ID”文本的可见块内找最后一个可写 input
-                                const rows = Array.from(document.querySelectorAll('.event-row, .ant-row, .ant-form-item, div')).filter(isVisible);
-                                for (const row of rows) {
-                                    const txt = (row.textContent || '').replace(/\\s+/g, '');
-                                    if (!txt.includes('券规则ID')) continue;
-                                    const inputs = Array.from(row.querySelectorAll('input.ant-input, input[type="text"], input'))
-                                        .filter(inp => isVisible(inp) && !inp.disabled && !inp.readOnly);
-                                    const target = inputs.length ? inputs[inputs.length - 1] : null;
-                                    if (!target) continue;
-                                    const rb = write(target, val);
-                                    return { ok: (rb === val), readback: rb || '', mode: 'fallback_row' };
-                                }
-                                return { ok: false, readback: '', mode: 'not_found' };
-                            }""", coupon_val)
-                            coupon_ok = bool(coupon_result and coupon_result.get("ok"))
-                            if coupon_ok:
-                                print("      ✅ 已填充券规则ID")
-                                results["第2步-券规则ID"] = True
-                            else:
-                                print(f"      ⚠️ 券规则ID回读不一致: mode={coupon_result.get('mode','')}, readback={coupon_result.get('readback','')}")
-                        except Exception as e:
-                            print(f"      ⚠️ 券规则ID填充失败: {e}")
+                        if not step2_has_coupon_row:
+                            print("      ⏭️ 当前页面未检测到“券规则ID”字段，自动跳过")
+                            results["第2步-券规则ID"] = True
+                        else:
+                            try:
+                                coupon_val = data["coupon_ids"]
+                                coupon_result = await frame.evaluate("""(val) => {
+                                    const isVisible = (el) => {
+                                        if (!el) return false;
+                                        const style = window.getComputedStyle(el);
+                                        const rect = el.getBoundingClientRect();
+                                        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                                    };
+                                    const write = (inp, v) => {
+                                        if (!inp || !isVisible(inp)) return false;
+                                        inp.focus();
+                                        inp.value = v;
+                                        inp.setAttribute('value', v);
+                                        inp.dispatchEvent(new Event('input', { bubbles: true }));
+                                        inp.dispatchEvent(new Event('keyup', { bubbles: true }));
+                                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+                                        inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+                                        inp.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+                                        inp.blur();
+                                        return ((inp.value || '').trim());
+                                    };
+                                    // 优先：精准命中“券规则ID”对应的 event-row，再写入该行 box 中可见输入框
+                                    const preciseRows = Array.from(document.querySelectorAll('.event-row'))
+                                        .filter(r => isVisible(r) && r.querySelector('.ant-select-selection-item[title="券规则ID"]'));
+                                    for (const row of preciseRows) {
+                                        const target = Array.from(row.querySelectorAll('.box input.ant-input, .box input[type="text"], .box input'))
+                                            .find(inp => isVisible(inp) && !inp.disabled && !inp.readOnly);
+                                        if (!target) continue;
+                                        const rb = write(target, val);
+                                        return { ok: (rb === val), readback: rb || '', mode: 'precise_event_row' };
+                                    }
+                                    // 兜底：在含“券规则ID”文本的可见块内找最后一个可写 input
+                                    const rows = Array.from(document.querySelectorAll('.event-row, .ant-row, .ant-form-item, div')).filter(isVisible);
+                                    for (const row of rows) {
+                                        const txt = (row.textContent || '').replace(/\\s+/g, '');
+                                        if (!txt.includes('券规则ID')) continue;
+                                        const inputs = Array.from(row.querySelectorAll('input.ant-input, input[type="text"], input'))
+                                            .filter(inp => isVisible(inp) && !inp.disabled && !inp.readOnly);
+                                        const target = inputs.length ? inputs[inputs.length - 1] : null;
+                                        if (!target) continue;
+                                        const rb = write(target, val);
+                                        return { ok: (rb === val), readback: rb || '', mode: 'fallback_row' };
+                                    }
+                                    return { ok: false, readback: '', mode: 'not_found' };
+                                }""", coupon_val)
+                                coupon_ok = bool(coupon_result and coupon_result.get("ok"))
+                                if coupon_ok:
+                                    print("      ✅ 已填充券规则ID")
+                                    results["第2步-券规则ID"] = True
+                                else:
+                                    if (coupon_result or {}).get("mode") == "not_found":
+                                        print("      ⏭️ 券规则ID字段未找到，自动跳过")
+                                        results["第2步-券规则ID"] = True
+                                    else:
+                                        print(f"      ⚠️ 券规则ID回读不一致: mode={coupon_result.get('mode','')}, readback={coupon_result.get('readback','')}")
+                            except Exception as e:
+                                print(f"      ⚠️ 券规则ID填充失败: {e}")
 
                 else:
                     print("   ⚠️ 无法获取 frame 内容")
@@ -2854,7 +2911,13 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
         await select_radio(page, "更新方式", data.get("update_type", "自动更新"))
         results["第2步-更新方式"] = True
         if data.get("coupon_ids"):
-            await fill_input(page, "券规则ID", data["coupon_ids"])
+            ok_coupon = await fill_input(page, "券规则ID", data["coupon_ids"])
+            if ok_coupon:
+                results["第2步-券规则ID"] = True
+            else:
+                print("      ⏭️ 当前页面未检测到“券规则ID”字段，自动跳过")
+                results["第2步-券规则ID"] = True
+        else:
             results["第2步-券规则ID"] = True
 
     # 严格模式下，第2步异常直接终止当前计划；默认先放行便于联调全流程。
@@ -2909,13 +2972,18 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
             results["第2步-预跑按钮"] = True
             await wait_and_log(page, 3, "预跑执行中...")
         else:
-            print("      ⚠️ 未找到预跑按钮")
+            print("      ⏭️ 未检测到预跑按钮，自动跳过")
+            results["第2步-预跑按钮"] = True
     except Exception as e:
         print(f"      ⚠️ 预跑点击失败: {e}")
 
     # 严格模式下，字段级回读失败也要终止，避免“日志看着成功”。
     if strict_step2:
-        required_keys = ["第2步-编辑按钮", "第2步-弹窗可见", "第2步-更新方式", "第2步-主消费营运区", "第2步-券规则ID", "第2步-预跑按钮"]
+        required_keys = ["第2步-编辑按钮", "第2步-弹窗可见", "第2步-更新方式", "第2步-预跑按钮"]
+        if data.get("main_operating_area"):
+            required_keys.append("第2步-主消费营运区")
+        if data.get("coupon_ids"):
+            required_keys.append("第2步-券规则ID")
         failed = [k for k in required_keys if not results.get(k, False)]
         if failed:
             raise RuntimeError(f"第2步字段回读未通过: {failed}")

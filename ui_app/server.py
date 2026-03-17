@@ -57,6 +57,17 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "msg_mini_program_page_path": "小程序链接",
 }
 HEADER_CN_TO_EN: Dict[str, str] = {v: k for k, v in HEADER_EN_TO_CN.items()}
+TEMPLATE_HIDE_FIELDS = {
+    "group_name",
+    "channels",
+    "moments_add_images",
+    "moments_image_paths",
+    "msg_add_mini_program",
+    "msg_mini_program_name",
+    "msg_mini_program_title",
+    "msg_mini_program_cover_path",
+    "msg_mini_program_page_path",
+}
 
 
 def now_iso() -> str:
@@ -124,8 +135,16 @@ def load_template_headers_and_sample() -> tuple[List[str], List[str]]:
     return headers, [""] * len(headers)
 
 
+def _filter_template_fields(headers: List[str], sample: List[str]) -> tuple[List[str], List[str]]:
+    keep = [idx for idx, h in enumerate(headers) if h not in TEMPLATE_HIDE_FIELDS]
+    out_headers = [headers[idx] for idx in keep]
+    out_sample = [sample[idx] if idx < len(sample) else "" for idx in keep]
+    return out_headers, out_sample
+
+
 def write_template_csv(path: Path) -> None:
     headers, sample = load_template_headers_and_sample()
+    headers, sample = _filter_template_fields(headers, sample)
     cn_headers = [HEADER_EN_TO_CN.get(h, h) for h in headers]
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
@@ -137,6 +156,7 @@ def write_template_xlsx(path: Path) -> None:
     if Workbook is None:
         raise RuntimeError("openpyxl is not installed")
     headers, sample = load_template_headers_and_sample()
+    headers, sample = _filter_template_fields(headers, sample)
     cn_headers = [HEADER_EN_TO_CN.get(h, h) for h in headers]
     wb = Workbook()
     ws = wb.active
