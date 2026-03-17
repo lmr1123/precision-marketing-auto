@@ -126,44 +126,40 @@ bash scripts/one_click_ui.sh 8793
 
 ### Windows 一键启动（桌面图标）
 
-给 Windows 同事推荐这套方式（双击即可）：
+给 Windows 同事推荐以下标准流程（双击即可）：
 
-#### 方式A：直接下载一键包（推荐）
-
-仓库内提供单文件安装包：
+1. 下载并解压发布包：
 
 ```text
 release/precision-marketing-auto-windows-oneclick.zip
 ```
 
-同事操作：
-1. 下载并解压 zip
-2. 双击 `scripts\\windows\\windows_start_ui.bat`
-3. 打开 `http://127.0.0.1:8790`
+2. 首次安装/更新（推荐）：
 
-1. 拉取项目到本地后，先双击：
+```text
+scripts\\windows\\install_or_update_from_github.bat
+```
+
+说明：
+- 会自动下载最新版本到本机目录（默认 `%LOCALAPPDATA%\\PrecisionMarketingAuto`）
+- 自动创建桌面图标“精准营销自动化工具”
+- 后续新版本也可重复运行此脚本一键更新
+
+3. 启动工具：
 
 ```text
 scripts\\windows\\windows_start_ui.bat
 ```
 
-这一步会自动创建 `.venv`、安装依赖、安装 Chromium，并启动 UI（`http://127.0.0.1:8790`）。
+打开：`http://127.0.0.1:8790`
 
-2. 生成桌面图标（可选，执行一次）：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\\windows\\create_desktop_shortcut.ps1
-```
-
-桌面会生成“精准营销自动化工具”快捷方式，后续直接双击即可。
-
-3. 如需打包成 EXE（需在 Windows 上执行）：
+4. 本地目录内一键更新：
 
 ```text
-scripts\\windows\\build_windows_exe.bat
+scripts\\windows\\windows_update.bat
 ```
 
-输出：`dist\\PrecisionMarketingUIStarter.exe`
+可用于已安装机器快速升级，无需同一局域网。
 
 > 维护者如需重新生成一键包：
 >

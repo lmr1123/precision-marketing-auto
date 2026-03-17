@@ -145,3 +145,39 @@
     - 填写小程序标题、页面路径
     - 上传小程序封面（本地文件）
     - 点击弹窗确认
+
+## 2026-03-17 进展补充
+
+### 今天处理了什么
+- 完成业务端 UI 调整：
+  - 去掉“操作人”输入项。
+  - 新增本地缓存（任务列表、日志、渠道勾选、高级配置参数）。
+  - 优化第1/2/3步布局和对齐（高级配置按钮同排、渠道默认不勾选会员通消息、字段对齐）。
+  - 第3步“小程序链接”文案与提示统一。
+- 模板体验优化：
+  - 下载 CSV/XLSX 模板改为中文表头，便于业务直接填写。
+  - 上传时自动把中文表头映射回脚本英文字段，兼容旧逻辑。
+- Windows 安装与升级链路落地：
+  - 重写 `scripts/windows/windows_start_ui.bat`（稳定检查 Python、自动建 venv、依赖安装打标记、启动 UI）。
+  - 新增 `scripts/windows/windows_install_or_update.ps1`（从 GitHub Release 拉取最新 zip 并安装/覆盖更新）。
+  - 新增 `scripts/windows/install_or_update_from_github.bat`（业务双击安装/更新入口）。
+  - 新增 `scripts/windows/windows_update.bat`（已安装目录内一键更新）。
+  - 更新 `scripts/windows/build_windows_release_zip.py`，将新脚本打入发布包并更新快速说明。
+  - 更新 `README.md` 的 Windows 使用说明，改为“安装/启动/更新”标准路径。
+
+### 当前已完成
+- 新发布包已可生成：`release/precision-marketing-auto-windows-oneclick.zip`
+- 发布包已包含：
+  - `scripts/windows/windows_start_ui.bat`
+  - `scripts/windows/windows_update.bat`
+  - `scripts/windows/install_or_update_from_github.bat`
+  - `scripts/windows/windows_install_or_update.ps1`
+- Python 语法检查通过：
+  - `ui_app/server.py`
+  - `scripts/windows/build_windows_release_zip.py`
+  - `precision-auto-playwright-batch.py`
+
+### 下一步
+- 在 1 台 Windows 业务机走一遍真实安装流程（仅双击安装脚本），确认首次启动耗时与失败率。
+- 将 Release 页面固定为“最新稳定包下载入口”（便于全国同事统一获取）。
+- 增加“启动前环境自检页面提示”（Chrome/CDP/端口占用）以降低支持成本。
