@@ -2174,7 +2174,6 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
     results = {
         "第2步-编辑按钮": False,
         "第2步-弹窗可见": False,
-        "第2步-分群名称": False,
         "第2步-更新方式": False,
         "第2步-主消费营运区": False,
         "第2步-券规则ID": False,
