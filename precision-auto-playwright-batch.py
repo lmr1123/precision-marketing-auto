@@ -2554,26 +2554,33 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         .sort((a, b) => a.area - b.area);
                                     const pickerModal = modalCandidates.length ? modalCandidates[0].el : null;
                                     if (!pickerModal) return 'picker_modal_not_found';
-                                    const nodes = Array.from(pickerModal.querySelectorAll('.ant-tree-treenode'));
+                                    const treeHolder = pickerModal.querySelector('.ant-tree-list-holder, .ant-tree-list, .ant-tree');
+                                    const collectNodes = () => Array.from(pickerModal.querySelectorAll('.ant-tree-treenode'));
                                     const findNode = () => {
                                         const leafNorm = norm(targetLeaf);
-                                        for (const n of nodes) {
-                                            const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
-                                            const txt = norm((title?.textContent || '').trim());
-                                            if (txt === leafNorm) return n;
-                                        }
-                                        for (const n of nodes) {
-                                            const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
-                                            const txt = norm((title?.textContent || '').trim());
-                                            if (txt.includes(leafNorm)) return n;
-                                        }
-                                        if (segs.length >= 2) {
-                                            const provinceNorm = norm(segs[segs.length - 2]);
+                                        const matchFromNodes = (nodes, keyNorm) => {
                                             for (const n of nodes) {
                                                 const title = n.querySelector('.ant-tree-title') || n.querySelector('[title]');
                                                 const txt = norm((title?.textContent || '').trim());
-                                                if (txt === provinceNorm || txt.includes(provinceNorm)) return n;
+                                                if (txt === keyNorm || txt.includes(keyNorm)) return n;
                                             }
+                                            return null;
+                                        };
+                                        if (treeHolder && typeof treeHolder.scrollTop === 'number') {
+                                            treeHolder.scrollTop = 0;
+                                        }
+                                        for (let attempt = 0; attempt < 24; attempt += 1) {
+                                            const nodes = collectNodes();
+                                            let hit = matchFromNodes(nodes, leafNorm);
+                                            if (!hit && segs.length >= 2) {
+                                                const provinceNorm = norm(segs[segs.length - 2]);
+                                                hit = matchFromNodes(nodes, provinceNorm);
+                                            }
+                                            if (hit) return hit;
+                                            if (!treeHolder || typeof treeHolder.scrollTop !== 'number') break;
+                                            const nextTop = treeHolder.scrollTop + Math.max(120, Math.floor((treeHolder.clientHeight || 240) * 0.8));
+                                            if (nextTop === treeHolder.scrollTop) break;
+                                            treeHolder.scrollTop = nextTop;
                                         }
                                         return null;
                                     };
@@ -2594,6 +2601,10 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     if (!checkbox.classList.contains('ant-tree-checkbox-checked')) {
                                         const inner = checkbox.querySelector('.ant-tree-checkbox-inner');
                                         fireClick(inner);
+                                    }
+                                    if (!checkbox.classList.contains('ant-tree-checkbox-checked')) {
+                                        const origin = checkbox.querySelector('.ant-tree-checkbox-input, input[type="checkbox"]');
+                                        fireClick(origin);
                                     }
                                     if (!checkbox.classList.contains('ant-tree-checkbox-checked')) {
                                         const titleWrap = node.querySelector('.ant-tree-node-content-wrapper');
