@@ -16,11 +16,14 @@ function Get-LatestRelease([string]$repo) {
 }
 
 function Resolve-AssetUrl($release, [string]$assetName, [string]$repo) {
+  $urls = @()
   if ($release -and $release.assets) {
     $asset = $release.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
-    if ($asset -and $asset.browser_download_url) { return $asset.browser_download_url }
+    if ($asset -and $asset.browser_download_url) { $urls += [string]$asset.browser_download_url }
   }
-  return "https://github.com/$repo/releases/latest/download/$assetName"
+  $urls += "https://github.com/$repo/releases/latest/download/$assetName"
+  $urls += "https://github.com/$repo/archive/refs/heads/main.zip"
+  return $urls
 }
 
 function Ensure-DesktopShortcut([string]$installDir) {
@@ -51,9 +54,23 @@ Write-Step "Fetching latest release info..."
 $release = $null
 try { $release = Get-LatestRelease -repo $Repo } catch {}
 
-$assetUrl = Resolve-AssetUrl -release $release -assetName $AssetName -repo $Repo
+$assetUrls = Resolve-AssetUrl -release $release -assetName $AssetName -repo $Repo
 Write-Step "Downloading package..."
-Invoke-WebRequest -Uri $assetUrl -OutFile $zipPath -UseBasicParsing
+$downloadOk = $false
+$downloadErr = ""
+foreach ($assetUrl in $assetUrls) {
+  try {
+    Write-Step "Try: $assetUrl"
+    Invoke-WebRequest -Uri $assetUrl -OutFile $zipPath -UseBasicParsing
+    $downloadOk = $true
+    break
+  } catch {
+    $downloadErr = $_.Exception.Message
+  }
+}
+if (-not $downloadOk) {
+  throw "Download failed. Last error: $downloadErr"
+}
 
 Write-Step "Extracting package..."
 Expand-Archive -Path $zipPath -DestinationPath $extractRoot -Force
