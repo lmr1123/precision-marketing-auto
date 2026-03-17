@@ -10,6 +10,8 @@ echo   %DEFAULT_DIR%
 echo.
 set /p USER_DIR=Press Enter to use default, or input custom path: 
 if "%USER_DIR%"=="" set "USER_DIR=%DEFAULT_DIR%"
+REM Handle drive-root input like D:\ which can break quoted args in cmd->powershell
+if "%USER_DIR:~-1%"=="\" set "USER_DIR=%USER_DIR%."
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0windows_install_or_update.ps1" -InstallDir "%USER_DIR%"
 if errorlevel 1 (
