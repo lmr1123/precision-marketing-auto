@@ -52,6 +52,12 @@ _enable_utf8_stdio()
 # ============ 配置 ============
 
 BASE_URL = "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=594094287227023360"
+CHANNEL_CREATE_URLS = {
+    "会员通-发客户消息": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=594094287227023360",
+    "会员通-发客户朋友圈": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702926159527936",
+    "短信": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702746907561984",
+    "会员通-发短信": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702746907561984",
+}
 
 # 默认测试数据
 DEFAULT_PLAN = {
@@ -508,6 +514,15 @@ def parse_step3_channels(raw: str) -> list:
         out.append(v)
         seen.add(v)
     return out
+
+
+def resolve_base_url_by_channel(plan: dict, step3_channels_override: str = "") -> tuple[str, str]:
+    """根据渠道选择创建链接。优先 CLI 覆盖，其次 CSV channels；多选时取第一个。"""
+    channels = parse_step3_channels(step3_channels_override) or parse_step3_channels(plan.get("channels", ""))
+    if not channels:
+        return BASE_URL, ""
+    primary = channels[0]
+    return CHANNEL_CREATE_URLS.get(primary, BASE_URL), primary
 
 
 def parse_bool_flag(raw: str, default: bool = False) -> bool:
@@ -2347,10 +2362,12 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                             f"第2步 iframe 控件未就绪（textLen={ready.get('textLen', 0)}），请检查网络/VPN或重试"
                         )
 
-                    # 在 iframe 内填充名称（按标签就近定位 + 回读）
-                    print("   📝 名称: " + data.get("group_name", "测试分群"))
+                    # 在 iframe 内填充名称（业务规则：计划名称 + copy）
+                    plan_name = (data.get("name") or "").strip()
+                    step2_group_name = f"{plan_name}copy" if plan_name else data.get("group_name", "测试分群")
+                    print("   📝 名称: " + step2_group_name)
                     try:
-                        group_name_val = data.get("group_name", "测试分群")
+                        group_name_val = step2_group_name
                         name_ok = await frame.evaluate("""(val) => {
                             const labels = Array.from(document.querySelectorAll('label, span, div'));
                             const write = (inp, v) => {
@@ -2866,7 +2883,9 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
             step2_error = str(e)
     else:
         print("   ⚠️ 未检测到 iframe，使用普通方式填充")
-        await fill_input(page, "名称", data.get("group_name", "测试分群"))
+        plan_name = (data.get("name") or "").strip()
+        step2_group_name = f"{plan_name}copy" if plan_name else data.get("group_name", "测试分群")
+        await fill_input(page, "名称", step2_group_name)
         results["第2步-分群名称"] = True
         await select_radio(page, "更新方式", data.get("update_type", "自动更新"))
         results["第2步-更新方式"] = True
@@ -3471,7 +3490,12 @@ async def process_single_plan(
 
         for attempt in range(MAX_RETRIES):
             try:
-                await page.goto(BASE_URL)
+                current_base_url, primary_channel = resolve_base_url_by_channel(plan, step3_channels_override)
+                if primary_channel:
+                    print(f"   🔗 创建链接: 渠道={primary_channel} -> {current_base_url}")
+                else:
+                    print(f"   🔗 创建链接: 默认 -> {current_base_url}")
+                await page.goto(current_base_url)
                 await wait_and_log(page, 2, "页面加载中...")
 
                 if skip_step2_mode:
