@@ -2362,41 +2362,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                             f"第2步 iframe 控件未就绪（textLen={ready.get('textLen', 0)}），请检查网络/VPN或重试"
                         )
 
-                    # 在 iframe 内填充名称（业务规则：计划名称 + copy）
-                    plan_name = (data.get("name") or "").strip()
-                    step2_group_name = f"{plan_name}copy" if plan_name else data.get("group_name", "测试分群")
-                    print("   📝 名称: " + step2_group_name)
-                    try:
-                        group_name_val = step2_group_name
-                        name_ok = await frame.evaluate("""(val) => {
-                            const labels = Array.from(document.querySelectorAll('label, span, div'));
-                            const write = (inp, v) => {
-                                if (!inp) return false;
-                                inp.focus();
-                                inp.value = v;
-                                inp.dispatchEvent(new Event('input', { bubbles: true }));
-                                inp.dispatchEvent(new Event('change', { bubbles: true }));
-                                inp.blur();
-                                return (inp.value || '').includes(v);
-                            };
-                            for (const lb of labels) {
-                                const t = (lb.textContent || '').replace(/\\s+/g, '');
-                                if (!t.includes('名称')) continue;
-                                const scope = lb.closest('.ant-form-item, .el-form-item, .item') || lb.parentElement;
-                                if (!scope) continue;
-                                const inp = scope.querySelector('input');
-                                if (write(inp, val)) return true;
-                            }
-                            const fallback = document.querySelector('input[placeholder*="名称"], input[placeholder*="请输入"]');
-                            return write(fallback, val);
-                        }""", group_name_val)
-                        if name_ok:
-                            print("      ✅ 已填充名称")
-                            results["第2步-分群名称"] = True
-                        else:
-                            print("      ⚠️ 名称回读不一致")
-                    except Exception as e:
-                        print(f"      ⚠️ 填充名称失败: {e}")
+                    # 第2步“名称”输入框自动填充已关闭，避免触发该弹窗异常关闭。
+                    print("   📝 名称: ⏭️ 已跳过自动填充")
                     
                     # 在 iframe 内选择更新方式（回读校验）
                     print("   ⚪ 更新方式: " + data.get("update_type", "自动更新"))
@@ -2883,10 +2850,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
             step2_error = str(e)
     else:
         print("   ⚠️ 未检测到 iframe，使用普通方式填充")
-        plan_name = (data.get("name") or "").strip()
-        step2_group_name = f"{plan_name}copy" if plan_name else data.get("group_name", "测试分群")
-        await fill_input(page, "名称", step2_group_name)
-        results["第2步-分群名称"] = True
+        print("   📝 名称: ⏭️ 已跳过自动填充")
         await select_radio(page, "更新方式", data.get("update_type", "自动更新"))
         results["第2步-更新方式"] = True
         if data.get("coupon_ids"):
@@ -2951,7 +2915,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
 
     # 严格模式下，字段级回读失败也要终止，避免“日志看着成功”。
     if strict_step2:
-        required_keys = ["第2步-编辑按钮", "第2步-弹窗可见", "第2步-分群名称", "第2步-更新方式", "第2步-主消费营运区", "第2步-券规则ID", "第2步-预跑按钮"]
+        required_keys = ["第2步-编辑按钮", "第2步-弹窗可见", "第2步-更新方式", "第2步-主消费营运区", "第2步-券规则ID", "第2步-预跑按钮"]
         failed = [k for k in required_keys if not results.get(k, False)]
         if failed:
             raise RuntimeError(f"第2步字段回读未通过: {failed}")
