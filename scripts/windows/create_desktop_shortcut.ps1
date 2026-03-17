@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $targetBat = Join-Path $repoRoot "scripts\windows\windows_start_ui.bat"
 if (!(Test-Path $targetBat)) {
   throw "Cannot find: $targetBat"
