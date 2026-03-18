@@ -207,6 +207,19 @@ def convert_uploaded_xlsx_to_csv(upload: UploadFile, dst_csv: Path) -> None:
             writer.writerow(["" if v is None else str(v) for v in row])
     wb.close()
 
+def _is_valid_jpeg_png_bytes(data: bytes) -> bool:
+    """校验图片真实格式（避免仅后缀正确但内容非法/加密）。"""
+    if not data or len(data) < 16:
+        return False
+    # JPEG: starts with SOI(FFD8), and contains EOI(FFD9) later.
+    # 不强制 EOI 在最后两个字节，避免被尾部扩展数据误伤。
+    if data.startswith(b"\xff\xd8") and (b"\xff\xd9" in data[2:]):
+        return True
+    # PNG: signature + tail has IEND
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and (b"IEND" in data[-128:]):
+        return True
+    return False
+
 
 def save_uploaded_moments_images(task_id: str, images: List[tuple[str, bytes]]) -> List[str]:
     """保存UI上传的朋友圈图片，返回本地绝对路径（按上传顺序）。"""
@@ -339,6 +352,7 @@ class TaskOptions:
     end: Optional[int] = None
     hold_seconds: int = 2
     step3_channels: str = ""
+    create_url: str = ""
 
 
 @dataclass
@@ -392,6 +406,7 @@ class Task:
                 "end": self.options.end,
                 "hold_seconds": self.options.hold_seconds,
                 "step3_channels": self.options.step3_channels,
+                "create_url": self.options.create_url,
             },
         }
 
@@ -540,6 +555,8 @@ class TaskRunner:
             cmd.extend(["--end", str(task.options.end)])
         if task.options.step3_channels:
             cmd.extend(["--step3-channels", task.options.step3_channels])
+        if task.options.create_url:
+            cmd.extend(["--create-url", task.options.create_url])
 
         await self.append_log(task, f"$ {' '.join(cmd)}")
         started = datetime.now()
@@ -647,6 +664,7 @@ async def upload_tasks(
     end: str = Form(""),
     hold_seconds: int = Form(2),
     step3_channels: str = Form(""),
+    create_url: str = Form(""),
     moments_add_images: bool = Form(False),
     msg_add_mini_program: bool = Form(False),
     msg_mini_program_name: str = Form("大参林健康"),
@@ -665,6 +683,7 @@ async def upload_tasks(
         end=parse_int(end, 0) or None,
         hold_seconds=max(0, hold_seconds),
         step3_channels=step3_channels.strip(),
+        create_url=create_url.strip(),
     )
 
     # 朋友圈图片（由本UI上传），按上传顺序透传到任务CSV
@@ -835,6 +854,13 @@ UI_HTML = """
               </div>
               <button id="advToggleBtn" type="button" class="adv-toggle" onclick="toggleAdvancedConfig()">高级配置（展开）</button>
             </div>
+            <div class="field full">
+              <span class="label">创建链接</span>
+              <input id="create_url" type="text" style="width:min(860px,100%)" placeholder="可选：手动填写创建链接；不填则按渠道自动匹配"/>
+            </div>
+            <div class="field full">
+              <span class="hint" id="create_url_hint">自动匹配：短信=599702746907561984；会员通-发客户消息=594094287227023360；会员通-发客户朋友圈=599702926159527936；短信+会员通-发客户消息=600035736992907264</span>
+            </div>
           </div>
           <div id="advancedConfig" class="adv-panel">
             <div class="form-grid">
@@ -985,6 +1011,32 @@ function selectedChannels(){
   return Array.from(document.querySelectorAll('.step3_channel:checked')).map(el => el.value);
 }
 
+function updateCreateUrlHint(){
+  const channels = selectedChannels();
+  const hintEl = document.getElementById('create_url_hint');
+  if(!hintEl) return;
+  const hasSms = channels.includes('短信');
+  const hasMsg = channels.includes('会员通-发客户消息');
+  const hasMoments = channels.includes('会员通-发客户朋友圈');
+  if(hasSms && hasMsg){
+    hintEl.textContent = '当前自动匹配链接：短信 + 会员通-发客户消息 -> useId=600035736992907264（如需可手动覆盖）';
+    return;
+  }
+  if(hasSms && !hasMsg && !hasMoments){
+    hintEl.textContent = '当前自动匹配链接：短信 -> useId=599702746907561984（如需可手动覆盖）';
+    return;
+  }
+  if(hasMsg && !hasSms && !hasMoments){
+    hintEl.textContent = '当前自动匹配链接：会员通-发客户消息 -> useId=594094287227023360（如需可手动覆盖）';
+    return;
+  }
+  if(hasMoments && !hasSms && !hasMsg){
+    hintEl.textContent = '当前自动匹配链接：会员通-发客户朋友圈 -> useId=599702926159527936（如需可手动覆盖）';
+    return;
+  }
+  hintEl.textContent = '自动匹配：短信=599702746907561984；会员通-发客户消息=594094287227023360；会员通-发客户朋友圈=599702926159527936；短信+会员通-发客户消息=600035736992907264';
+}
+
 function syncChannelMaterials(){
   const channels = selectedChannels();
   const showMoments = channels.includes('会员通-发客户朋友圈');
@@ -1011,6 +1063,7 @@ function syncChannelMaterials(){
     if(cover) cover.value = '';
   }
   if(emptyTip) emptyTip.style.display = (showMoments || showMsg) ? 'none' : 'block';
+  updateCreateUrlHint();
   saveUiPrefs();
 }
 
@@ -1037,6 +1090,7 @@ async function upload(){
   fd.append('start', '');
   fd.append('end', '');
   fd.append('hold_seconds', document.getElementById('hold_seconds').value || '2');
+  fd.append('create_url', document.getElementById('create_url').value || '');
   const channels = selectedChannels();
   if(!channels.length){ alert('请至少选择一个发送渠道'); return; }
   fd.append('step3_channels', channels.join(','));
@@ -1120,6 +1174,14 @@ async function refreshTasks(){
       saveLocal(LS_KEYS.logsText, "");
       saveLocal(LS_KEYS.logsTitle, document.getElementById('logTitle').textContent);
     }
+  }else{
+    const exists = rows.some(t => t.id === selectedTaskId);
+    if(!exists){
+      selectedTaskId = "";
+      logOffset = 0;
+      saveLocal(LS_KEYS.selectedTaskId, "");
+      document.getElementById('logTitle').textContent = '任务不存在（可能服务重启），请重新选择';
+    }
   }
   renderTasks(rows);
 }
@@ -1129,7 +1191,14 @@ async function selectTask(id){
   saveLocal(LS_KEYS.selectedTaskId, selectedTaskId);
   logOffset = 0;
   document.getElementById('logs').textContent = "";
-  const t = await (await fetch('/api/tasks/' + id)).json();
+  const resp = await fetch('/api/tasks/' + id);
+  if(resp.status === 404){
+    selectedTaskId = "";
+    saveLocal(LS_KEYS.selectedTaskId, "");
+    document.getElementById('logTitle').textContent = '任务不存在（可能服务重启），请重新选择';
+    return;
+  }
+  const t = await resp.json();
   document.getElementById('logTitle').textContent = `任务 ${t.filename} (${t.status})`;
   saveLocal(LS_KEYS.logsTitle, document.getElementById('logTitle').textContent);
   saveLocal(LS_KEYS.logsText, "");
@@ -1139,6 +1208,13 @@ async function selectTask(id){
 async function pollLogs(reset=false){
   if(!selectedTaskId) return;
   const r = await fetch(`/api/tasks/${selectedTaskId}/logs?offset=${logOffset}&limit=500`);
+  if(r.status === 404){
+    selectedTaskId = "";
+    logOffset = 0;
+    saveLocal(LS_KEYS.selectedTaskId, "");
+    document.getElementById('logTitle').textContent = '任务不存在（可能服务重启），已清除旧任务选择';
+    return;
+  }
   const data = await r.json();
   const logs = data.logs || [];
   if(logs.length){
@@ -1158,6 +1234,7 @@ function saveUiPrefs(){
     strict_step2: !!document.getElementById('strict_step2')?.checked,
     concurrent: document.getElementById('concurrent')?.value || '1',
     hold_seconds: document.getElementById('hold_seconds')?.value || '2',
+    create_url: document.getElementById('create_url')?.value || '',
     channels: selectedChannels(),
     moments_add_images: !!document.getElementById('moments_add_images')?.checked,
     msg_add_mini_program: !!document.getElementById('msg_add_mini_program')?.checked,
@@ -1177,6 +1254,7 @@ function restoreUiFromCache(){
     if(document.getElementById('strict_step2')) document.getElementById('strict_step2').checked = !!prefs.strict_step2;
     if(document.getElementById('concurrent')) document.getElementById('concurrent').value = prefs.concurrent || '1';
     if(document.getElementById('hold_seconds')) document.getElementById('hold_seconds').value = prefs.hold_seconds || '2';
+    if(document.getElementById('create_url')) document.getElementById('create_url').value = prefs.create_url || '';
     const channels = new Set(prefs.channels || []);
     document.querySelectorAll('.step3_channel').forEach(el => { el.checked = channels.has(el.value); });
     if(document.getElementById('moments_add_images')) document.getElementById('moments_add_images').checked = !!prefs.moments_add_images;
@@ -1207,7 +1285,7 @@ function restoreUiFromCache(){
 
 setInterval(async ()=>{ await refreshTasks(); await pollLogs(); }, 2000);
 document.querySelectorAll('.step3_channel').forEach(el => el.addEventListener('change', syncChannelMaterials));
-['connect_cdp','cdp_endpoint','strict_step2','concurrent','hold_seconds','moments_add_images','msg_add_mini_program','msg_mini_program_name','msg_mini_program_title','msg_mini_program_page_path']
+['connect_cdp','cdp_endpoint','strict_step2','concurrent','hold_seconds','create_url','moments_add_images','msg_add_mini_program','msg_mini_program_name','msg_mini_program_title','msg_mini_program_page_path']
   .forEach(id => {
     const el = document.getElementById(id);
     if(el){ el.addEventListener('change', saveUiPrefs); el.addEventListener('input', saveUiPrefs); }
