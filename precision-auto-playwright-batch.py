@@ -1472,6 +1472,18 @@ def extract_api_code_message(text: str):
         return str(code), str(msg)
     return "", ""
 
+def extract_review_link_from_text(text: str) -> str:
+    """从文本中提取营销计划复核链接（优先 viewPlan，其次 editPlan）。"""
+    if not text:
+        return ""
+    m_view = re.search(r"(https?://[^\s\"']+#/marketingPlan/viewPlan\?[^\s\"']+)", text)
+    if m_view:
+        return m_view.group(1).strip().rstrip(".,)")
+    m_edit = re.search(r"(https?://[^\s\"']+#/marketingPlan/editPlan\?[^\s\"']+)", text)
+    if m_edit:
+        return m_edit.group(1).strip().rstrip(".,)")
+    return ""
+
 def summarize_content_fields_from_payload(post_data: str) -> str:
     """解析保存请求体，摘要短信/内容相关字段长度，便于定位长度=0原因。"""
     if not post_data:
@@ -1528,12 +1540,14 @@ async def ensure_step3_saved(page, save_resp_task=None) -> bool:
 
     # 读取保存接口响应，输出 status/code/message 便于后端定位。
     api_diag = ""
+    api_body = ""
     if save_resp_task is not None:
         try:
             resp = await asyncio.wait_for(save_resp_task, timeout=12)
             if resp is not None:
                 body = await resp.text()
-                code, msg = extract_api_code_message(body)
+                api_body = body or ""
+                code, msg = extract_api_code_message(api_body)
                 post_data = ""
                 try:
                     post_data = resp.request.post_data or ""
@@ -1608,6 +1622,24 @@ async def ensure_step3_saved(page, save_resp_task=None) -> bool:
             raise
         except Exception:
             pass
+    if moved:
+        # 优先从当前URL获取复核链接
+        final_url = page.url
+        if ("#/marketingPlan/editPlan?" in final_url) or ("#/marketingPlan/viewPlan?" in final_url):
+            print(f"      🔗 复核链接: {final_url}")
+        else:
+            # 等待短暂跳转，兼容异步路由变更
+            for _ in range(10):
+                await asyncio.sleep(0.25)
+                final_url = page.url
+                if ("#/marketingPlan/editPlan?" in final_url) or ("#/marketingPlan/viewPlan?" in final_url):
+                    print(f"      🔗 复核链接: {final_url}")
+                    break
+            else:
+                # 再从接口响应体里兜底提取
+                api_review_link = extract_review_link_from_text(api_body)
+                if api_review_link:
+                    print(f"      🔗 复核链接: {api_review_link}")
     return moved
 
 async def click_step3_save_button(page) -> bool:

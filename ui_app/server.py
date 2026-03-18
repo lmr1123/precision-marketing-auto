@@ -376,6 +376,16 @@ class Task:
     logs: List[str] = field(default_factory=list)
     generated_links: List[str] = field(default_factory=list)
 
+    def _latest_link_for_ui(self) -> str:
+        # 优先给业务展示真正可复核的 viewPlan 链接，其次 editPlan。
+        for u in reversed(self.generated_links):
+            if "#/marketingPlan/viewPlan?" in u:
+                return u
+        for u in reversed(self.generated_links):
+            if "#/marketingPlan/editPlan?" in u:
+                return u
+        return self.generated_links[-1] if self.generated_links else ""
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -395,7 +405,7 @@ class Task:
             "error": self.error,
             "logs_count": len(self.logs),
             "generated_links": self.generated_links,
-            "latest_link": self.generated_links[-1] if self.generated_links else "",
+            "latest_link": self._latest_link_for_ui(),
             "options": {
                 "connect_cdp": self.options.connect_cdp,
                 "cdp_endpoint": self.options.cdp_endpoint,
@@ -496,9 +506,16 @@ class TaskRunner:
         # Extract review links from runtime logs for business users.
         urls = re.findall(r"(https?://[^\s]+)", line)
         for u in urls:
+            u = u.strip().rstrip(".,)")
             if "precision.dslyy.com" not in u:
                 continue
-            if "#/marketingTemplate/use?" in u or "useId=" in u or "#/marketingTemplate/" in u:
+            if (
+                "#/marketingPlan/viewPlan?" in u
+                or "#/marketingPlan/editPlan?" in u
+                or "#/marketingTemplate/use?" in u
+                or "useId=" in u
+                or "#/marketingTemplate/" in u
+            ):
                 if u not in task.generated_links:
                     task.generated_links.append(u)
                     if len(task.generated_links) > 20:
@@ -1123,7 +1140,9 @@ function fmtStatus(s){return '<span class="status-'+s+'">'+s+'</span>';}
 
 function renderReviewLink(task){
   if(task.latest_link){
-    return `<a class="link-pill" href="${task.latest_link}" target="_blank">打开生成页</a>`;
+    const label = (task.latest_link.includes('#/marketingPlan/viewPlan?') || task.latest_link.includes('#/marketingPlan/editPlan?'))
+      ? '打开复核页' : '打开生成页';
+    return `<a class="link-pill" href="${task.latest_link}" target="_blank">${label}</a>`;
   }
   return '<span class="hint">待生成</span>';
 }
