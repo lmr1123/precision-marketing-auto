@@ -81,6 +81,7 @@ DEFAULT_PLAN = {
     "sms_content": "短信内容测试",
     "step3_end_time": "2026-03-27 08:00",
     "executor_employees": "西北大区、湖北省区",
+    "executor_include_franchise": "否",
     "send_content": "企微1对1内容测试",
     "channels": "",
     "create_url": "",
@@ -130,6 +131,7 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "sms_content": row.get("sms_content", "").strip(),
                 "step3_end_time": row.get("step3_end_time", "").strip(),
                 "executor_employees": row.get("executor_employees", "").strip(),
+                "executor_include_franchise": row.get("executor_include_franchise", "").strip(),
                 "send_content": row.get("send_content", "").strip(),
                 "channels": row.get("channels", "").strip(),
                 "create_url": row.get("create_url", "").strip(),
@@ -663,6 +665,23 @@ def split_multi_values(raw: str) -> list:
         return []
     vals = [v.strip() for v in re.split(r"[、,，/]", raw) if v.strip()]
     return vals
+
+
+def normalize_area_alias(area: str) -> str:
+    """区域名称别名标准化（业务常用简称 -> 系统节点名）。"""
+    a = (area or "").strip()
+    if not a:
+        return a
+    alias_map = {
+        "郑州": "大郑州营运区",
+        "郑州加盟": "大郑州营运区加盟",
+    }
+    return alias_map.get(a, a)
+
+
+def normalize_area_for_step2(area: str) -> str:
+    """第2步主消费营运区：保持业务原值，不做郑州->大郑州映射。"""
+    return (area or "").strip()
 
 
 def parse_step3_channels(raw: str) -> list:
@@ -1843,9 +1862,27 @@ async def switch_step3_channel(page, channel_text: str) -> bool:
         await asyncio.sleep(0.5)
     return bool(switched)
 
-async def fill_step3_executor(page, raw_values: str) -> bool:
+async def fill_step3_executor(page, raw_values: str, include_franchise: bool = False) -> bool:
     """第3步执行员工：按级联面板（全国->大区->省区/门店）多选。"""
-    targets = split_multi_values(raw_values)
+    targets = [normalize_area_alias(x) for x in split_multi_values(raw_values)]
+    if include_franchise:
+        extended = []
+        for t in targets:
+            tt = (t or "").strip()
+            if not tt:
+                continue
+            extended.append(tt)
+            if "加盟" not in tt:
+                extended.append(normalize_area_alias(f"{tt}加盟"))
+        # 去重保序
+        dedup = []
+        seen = set()
+        for t in extended:
+            if t in seen:
+                continue
+            dedup.append(t)
+            seen.add(t)
+        targets = dedup
     if not targets:
         return True
 
@@ -2099,6 +2136,41 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
             return True
         return False
 
+    area_path_hints = {
+        "广佛省区": ["华南大区", "广佛省区"],
+        "广佛省区加盟": ["华南大区加盟", "广佛省区加盟"],
+        "大郑州营运区": ["西北大区", "河南省区", "大郑州营运区"],
+        "大郑州营运区加盟": ["西北大区加盟", "河南省区加盟", "大郑州营运区加盟"],
+        "郑州": ["西北大区", "河南省区", "大郑州营运区"],
+        "郑州加盟": ["西北大区加盟", "河南省区加盟", "大郑州营运区加盟"],
+    }
+
+    async def select_target_with_hints(target: str) -> bool:
+        target = normalize_area_alias(target)
+        # 先尝试在各层直接勾选
+        for idx in (1, 2, 3, 4):
+            if await check_in_menu(idx, target):
+                return True
+
+        path = area_path_hints.get(target, [])
+        # 按路径逐层处理：中间层只展开，不勾选；仅末级做勾选。
+        # 例如 大郑州营运区：展开 西北大区 -> 河南省区，最后仅勾选 大郑州营运区，
+        # 避免误勾整层“河南省区”。
+        if path:
+            last_idx = len(path) - 1
+            for i, seg in enumerate(path):
+                menu_idx = i + 1
+                if i < last_idx:
+                    await expand_in_menu(menu_idx, seg)
+                else:
+                    await check_in_menu(menu_idx, seg)
+
+        # 再次在各层兜底勾选
+        for idx in (1, 2, 3, 4):
+            if await check_in_menu(idx, target):
+                return True
+        return False
+
     # 先按业务规则双击“全国”：第一次全选，第二次清空。
     await reopen_executor_panel()
     nation_before = await get_menu_checked_state(0, "全国")
@@ -2116,29 +2188,35 @@ async def fill_step3_executor(page, raw_values: str) -> bool:
     await expand_in_menu(0, "全国")
 
     selected = {t: False for t in targets}
-    region_targets = [t for t in targets if "大区" in t]
-    province_targets = [t for t in targets if "省区" in t or "营运区" in t or "店" in t]
 
-    # 先选大区目标（例如西北大区）
-    for rt in region_targets:
-        selected[rt] = await check_in_menu(1, rt)
+    # 逐个目标命中（先按路径提示，再走深层兜底）
+    for t in targets:
+        ok = await select_target_with_hints(t)
+        if ok:
+            selected[t] = True
 
-    # 再跨大区选省区目标（例如湖北省区）
-    region_nodes = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(1).locator(".el-cascader-node .el-cascader-node__label")
-    region_count = await region_nodes.count()
-    region_names = []
-    for i in range(region_count):
-        txt = ((await region_nodes.nth(i).text_content()) or "").strip()
-        if txt.endswith("大区"):
-            region_names.append(txt)
-
-    for region in region_names:
-        await expand_in_menu(1, region)
-        for pt in province_targets:
-            if selected.get(pt):
-                continue
-            if await check_in_menu(2, pt):
-                selected[pt] = True
+    # 深层兜底：遍历大区后，再次尝试未命中目标（覆盖视口/延迟渲染场景）
+    unresolved = [k for k, v in selected.items() if not v]
+    if unresolved:
+        region_nodes = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(1).locator(".el-cascader-node .el-cascader-node__label")
+        region_count = await region_nodes.count()
+        region_names = []
+        for i in range(region_count):
+            txt = ((await region_nodes.nth(i).text_content()) or "").strip()
+            if "大区" in txt:
+                region_names.append(txt)
+        for region in region_names:
+            await expand_in_menu(1, region)
+            for t in list(unresolved):
+                if selected.get(t):
+                    continue
+                for idx in (2, 3, 4):
+                    if await check_in_menu(idx, t):
+                        selected[t] = True
+                        break
+            unresolved = [k for k, v in selected.items() if not v]
+            if not unresolved:
+                break
 
     selected_labels = await page.evaluate("""() => {
         const isVisible = (el) => {
@@ -2712,6 +2790,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 area_targets = [x.strip() for x in re.split(r"[、，,|;\\n]+", area_raw) if x.strip()]
                                 if not area_targets:
                                     area_targets = [area_raw.strip()]
+                                area_targets = [normalize_area_for_step2(x) for x in area_targets if x]
                                 print(f"      🔍 选择营运区: {', '.join(area_targets)}")
 
                                 multi_select_result = await frame.evaluate("""async (targets) => {
@@ -2773,6 +2852,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     // 业务高频节点父链提示，避免单段名称（如“九江”）找不到。
                                     const parentHints = {
                                         '辽宁省区': ['北方大区'],
+                                        '郑州': ['西北大区', '河南省区'],
+                                        '大郑州营运区': ['西北大区', '河南省区'],
                                         '九江': ['华中大区', '江西省区'],
                                         '南昌': ['华中大区', '江西省区'],
                                         '广州二': ['华南大区', '广佛省区'],
@@ -2782,6 +2863,29 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         const roots = ['北方大区', '华中大区', '西北大区', '西南大区', '华南大区', '华东大区'];
                                         for (const r of roots) {
                                             await expandByName(r);
+                                        }
+                                    };
+
+                                    const expandAllVisibleClosed = async (maxRounds = 4) => {
+                                        for (let round = 0; round < maxRounds; round += 1) {
+                                            const closedSwitchers = Array.from(
+                                                pickerModal.querySelectorAll('.ant-tree-treenode .ant-tree-switcher.ant-tree-switcher_close')
+                                            ).filter(isVisible);
+                                            if (!closedSwitchers.length) break;
+                                            let clicked = 0;
+                                            for (const sw of closedSwitchers) {
+                                                const node = sw.closest('.ant-tree-treenode');
+                                                if (!node) continue;
+                                                const title = node.querySelector('.ant-tree-title') || node.querySelector('[title]');
+                                                // 优先展开中间层（大区/省区/营运区），避免展开过深太慢
+                                                const t = norm((title?.textContent || '').trim());
+                                                if (!(t.includes('大区') || t.includes('省区') || t.includes('营运区'))) continue;
+                                                fireClick(sw);
+                                                clicked += 1;
+                                                if (clicked >= 12) break;
+                                            }
+                                            await sleep(300);
+                                            if (!clicked) break;
                                         }
                                     };
 
@@ -2816,6 +2920,13 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         if (!node) {
                                             await expandTopRegions();
                                             trace.push('expand_roots');
+                                            await sleep(300);
+                                            node = findNodeByScroll(leaf);
+                                        }
+                                        // 仍找不到，兜底：逐轮展开可见闭合节点，再搜索
+                                        if (!node) {
+                                            await expandAllVisibleClosed(5);
+                                            trace.push('expand_visible_closed');
                                             await sleep(300);
                                             node = findNodeByScroll(leaf);
                                         }
@@ -3318,6 +3429,7 @@ async def fill_step3(
     manual_executor_mode: bool = False,
     executor_check_override: str = "",
     step3_channels_override: str = "",
+    executor_include_franchise_override: bool = False,
 ):
     """填充第3步：触达内容/短信内容"""
     print("\n📋 第3步：短信内容")
@@ -3445,6 +3557,9 @@ async def fill_step3(
     # 会员通-发客户消息 / 会员通-发客户朋友圈 共用字段
     step3_end_time = data.get("step3_end_time") or data.get("end_time")
     executor_vals = data.get("executor_employees", "")
+    executor_include_franchise = executor_include_franchise_override or parse_bool_flag(
+        data.get("executor_include_franchise", "否"), default=False
+    )
     send_content = data.get("send_content", "")
     moments_add_images = parse_bool_flag(data.get("moments_add_images", "否"), default=False)
     moments_image_paths = data.get("moments_image_paths", "")
@@ -3473,6 +3588,8 @@ async def fill_step3(
         mode_ok = await set_step3_distribution_mode(page, "指定门店分配")
         print(f"   ⚙️ 分配方式: {'指定门店分配' if mode_ok else '未找到分配方式控件'}")
         print(f"   👥 执行员工: {executor_vals}")
+        if executor_include_franchise:
+            print("      🧩 包含加盟区域: 是")
         if manual_executor_mode:
             print("      ⏸️ 手动模式：请在浏览器中手工勾选执行员工后，回到终端按回车继续...")
             await asyncio.to_thread(input, "Press Enter to continue after manual executor selection...")
@@ -3496,7 +3613,7 @@ async def fill_step3(
                 moments_gate_ok = False
                 moments_gate_errors.append("执行员工")
         else:
-            exec_ok = await fill_step3_executor(page, executor_vals)
+            exec_ok = await fill_step3_executor(page, executor_vals, include_franchise=executor_include_franchise)
             print(f"      {'✅' if exec_ok else '⚠️'} 执行员工{'已选择' if exec_ok else '未完整选择'}")
             results["第3步-执行员工"] = exec_ok
             if not exec_ok:
@@ -3781,6 +3898,7 @@ async def process_single_plan(
     executor_check_override: str = "",
     step3_channels_override: str = "",
     create_url_override: str = "",
+    executor_include_franchise_override: bool = False,
 ) -> bool:
     """使用信号量控制并发，处理单个计划"""
     async with semaphore:
@@ -3817,6 +3935,7 @@ async def process_single_plan(
                     manual_executor_mode=manual_executor_mode,
                     executor_check_override=executor_check_override,
                     step3_channels_override=step3_channels_override,
+                    executor_include_franchise_override=executor_include_franchise_override,
                 ))
                 
                 print(f"\n   ✅ 计划 {plan_index} 完成！")
@@ -3881,6 +4000,7 @@ async def main():
     parser.add_argument('--skip-step2', action='store_true', help='跳过第2步内容（仅联调第1步和第3步）')
     parser.add_argument('--manual-executor', action='store_true', help='第3步执行员工改为手动勾选（终端回车后继续）')
     parser.add_argument('--executor-check-only', type=str, default='', help='仅校验指定执行员工目标（例如 湖北省区）')
+    parser.add_argument('--executor-include-franchise', action='store_true', help='执行员工自动包含加盟区域（如 广佛省区 -> 广佛省区加盟）')
     parser.add_argument(
         '--step3-channels',
         type=str,
@@ -3941,6 +4061,7 @@ async def main():
                 args.executor_check_only,
                 args.step3_channels,
                 args.create_url,
+                args.executor_include_franchise,
             )
             tasks.append(task)
 
