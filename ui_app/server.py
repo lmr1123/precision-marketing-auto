@@ -42,6 +42,8 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "group_name": "分群名称",
     "update_type": "更新方式",
     "main_operating_area": "主消费营运区",
+    "main_store_file_path": "主消费门店文件路径",
+    "step2_store_file_path": "第2步门店信息文件路径",
     "coupon_ids": "券规则ID",
     "sms_content": "短信内容",
     "step3_end_time": "第3步结束时间",
@@ -50,6 +52,8 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "channels": "第3步渠道(可多选)",
     "moments_add_images": "朋友圈是否上传图片",
     "moments_image_paths": "朋友圈图片路径(用|分隔)",
+    "upload_stores": "是否上传门店",
+    "store_file_path": "门店文件路径",
     "msg_add_mini_program": "会员通消息是否添加小程序",
     "msg_mini_program_name": "小程序名称",
     "msg_mini_program_title": "小程序标题",
@@ -62,6 +66,10 @@ TEMPLATE_HIDE_FIELDS = {
     "channels",
     "moments_add_images",
     "moments_image_paths",
+    "upload_stores",
+    "store_file_path",
+    "main_store_file_path",
+    "step2_store_file_path",
     "msg_add_mini_program",
     "msg_mini_program_name",
     "msg_mini_program_title",
@@ -96,6 +104,8 @@ def _default_headers() -> List[str]:
         "group_name",
         "update_type",
         "main_operating_area",
+        "main_store_file_path",
+        "step2_store_file_path",
         "coupon_ids",
         "sms_content",
         "step3_end_time",
@@ -104,6 +114,8 @@ def _default_headers() -> List[str]:
         "channels",
         "moments_add_images",
         "moments_image_paths",
+        "upload_stores",
+        "store_file_path",
         "msg_add_mini_program",
         "msg_mini_program_name",
         "msg_mini_program_title",
@@ -261,6 +273,36 @@ def save_uploaded_mini_program_cover(task_id: str, image: tuple[str, bytes]) -> 
     return str(dst.resolve())
 
 
+def save_uploaded_store_file(task_id: str, store_file: tuple[str, bytes]) -> str:
+    """保存UI上传的门店文件，返回本地绝对路径。"""
+    name, data = store_file
+    out_dir = UPLOAD_DIR / f"{task_id}_store_file"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(name).suffix.lower()
+    if ext not in {".xlsx", ".xls"}:
+        raise HTTPException(status_code=400, detail=f"门店文件格式仅支持 xlsx/xls: {name}")
+    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", Path(name).name)
+    dst = out_dir / f"store_{safe}"
+    with dst.open("wb") as f:
+        f.write(data)
+    return str(dst.resolve())
+
+
+def save_uploaded_main_store_file(task_id: str, store_file: tuple[str, bytes]) -> str:
+    """保存第2步主消费门店上传文件，返回本地绝对路径。"""
+    name, data = store_file
+    out_dir = UPLOAD_DIR / f"{task_id}_step2_main_store"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(name).suffix.lower()
+    if ext not in {".xlsx", ".xls"}:
+        raise HTTPException(status_code=400, detail=f"主消费门店文件格式仅支持 xlsx/xls: {name}")
+    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", Path(name).name)
+    dst = out_dir / f"step2_main_store_{safe}"
+    with dst.open("wb") as f:
+        f.write(data)
+    return str(dst.resolve())
+
+
 def inject_moments_images_to_csv(dst_csv: Path, image_paths: List[str], step3_channels: str) -> None:
     """将上传图片信息回写到任务CSV（覆盖朋友圈场景行）。"""
     if not image_paths:
@@ -341,6 +383,69 @@ def inject_message_mini_program_to_csv(
             writer.writerow({k: row.get(k, "") for k in headers})
 
 
+def inject_store_file_to_csv(
+    dst_csv: Path,
+    step3_channels: str,
+    enabled: bool,
+    store_file_path: str,
+) -> None:
+    """将上传门店配置回写到任务CSV（会员通消息/朋友圈渠道）。"""
+    if not enabled:
+        return
+    with dst_csv.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not headers:
+        return
+
+    for col in ("upload_stores", "store_file_path", "channels"):
+        if col not in headers:
+            headers.append(col)
+
+    ui_channels = step3_channels or ""
+    for row in rows:
+        row_channels = str(row.get("channels", "") or "").strip()
+        channel_scope = row_channels or ui_channels
+        if ("会员通-发客户消息" not in channel_scope) and ("会员通-发客户朋友圈" not in channel_scope):
+            continue
+        row["upload_stores"] = "是"
+        row["store_file_path"] = store_file_path or ""
+
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in headers})
+
+
+def inject_step2_main_store_file_to_csv(
+    dst_csv: Path,
+    main_store_file_path: str,
+) -> None:
+    """将第2步主消费门店上传文件路径注入任务CSV。"""
+    if not main_store_file_path:
+        return
+    with dst_csv.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not headers:
+        return
+    if "main_store_file_path" not in headers:
+        headers.append("main_store_file_path")
+    if "step2_store_file_path" not in headers:
+        headers.append("step2_store_file_path")
+    for row in rows:
+        row["main_store_file_path"] = main_store_file_path
+        row["step2_store_file_path"] = main_store_file_path
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in headers})
+
+
 @dataclass
 class TaskOptions:
     connect_cdp: bool = True
@@ -353,6 +458,7 @@ class TaskOptions:
     hold_seconds: int = 2
     step3_channels: str = ""
     create_url: str = ""
+    executor_include_franchise: bool = False
 
 
 @dataclass
@@ -417,6 +523,7 @@ class Task:
                 "hold_seconds": self.options.hold_seconds,
                 "step3_channels": self.options.step3_channels,
                 "create_url": self.options.create_url,
+                "executor_include_franchise": self.options.executor_include_franchise,
             },
         }
 
@@ -574,6 +681,8 @@ class TaskRunner:
             cmd.extend(["--step3-channels", task.options.step3_channels])
         if task.options.create_url:
             cmd.extend(["--create-url", task.options.create_url])
+        if task.options.executor_include_franchise:
+            cmd.append("--executor-include-franchise")
 
         await self.append_log(task, f"$ {' '.join(cmd)}")
         started = datetime.now()
@@ -672,6 +781,8 @@ async def upload_tasks(
     files: List[UploadFile] = File(...),
     moments_images: List[UploadFile] = File(default=[]),
     mini_program_cover: Optional[UploadFile] = File(default=None),
+    store_file: Optional[UploadFile] = File(default=None),
+    step2_main_store_file: Optional[UploadFile] = File(default=None),
     connect_cdp: bool = Form(True),
     cdp_endpoint: str = Form("http://127.0.0.1:18800"),
     strict_step2: bool = Form(True),
@@ -682,7 +793,9 @@ async def upload_tasks(
     hold_seconds: int = Form(2),
     step3_channels: str = Form(""),
     create_url: str = Form(""),
+    executor_include_franchise: bool = Form(False),
     moments_add_images: bool = Form(False),
+    upload_stores: bool = Form(False),
     msg_add_mini_program: bool = Form(False),
     msg_mini_program_name: str = Form("大参林健康"),
     msg_mini_program_title: str = Form(""),
@@ -701,6 +814,7 @@ async def upload_tasks(
         hold_seconds=max(0, hold_seconds),
         step3_channels=step3_channels.strip(),
         create_url=create_url.strip(),
+        executor_include_franchise=executor_include_franchise,
     )
 
     # 朋友圈图片（由本UI上传），按上传顺序透传到任务CSV
@@ -725,6 +839,21 @@ async def upload_tasks(
         if not b:
             raise HTTPException(status_code=400, detail="小程序封面文件为空")
         mini_cover_blob = (mini_program_cover.filename or "mini_cover.jpg", b)
+
+    store_file_blob: Optional[tuple[str, bytes]] = None
+    if upload_stores:
+        if store_file is None:
+            raise HTTPException(status_code=400, detail="已勾选上传门店，但未选择门店文件")
+        b = await store_file.read()
+        if not b:
+            raise HTTPException(status_code=400, detail="门店文件为空")
+        store_file_blob = (store_file.filename or "stores.xlsx", b)
+
+    step2_main_store_blob: Optional[tuple[str, bytes]] = None
+    if step2_main_store_file is not None:
+        b = await step2_main_store_file.read()
+        if b:
+            step2_main_store_blob = (step2_main_store_file.filename or "step2_main_store.xlsx", b)
 
     for f in files:
         lower = f.filename.lower()
@@ -753,6 +882,17 @@ async def upload_tasks(
                 mini_cover_path,
                 msg_mini_program_page_path.strip(),
             )
+        if upload_stores and store_file_blob:
+            store_path = save_uploaded_store_file(tid, store_file_blob)
+            inject_store_file_to_csv(
+                dst,
+                options.step3_channels,
+                True,
+                store_path,
+            )
+        if step2_main_store_blob:
+            step2_store_path = save_uploaded_main_store_file(tid, step2_main_store_blob)
+            inject_step2_main_store_file_to_csv(dst, step2_store_path)
         op = operator.strip() or os.getenv("USER") or getpass.getuser() or "unknown"
         task = Task(id=tid, filename=f.filename, file_path=str(dst), options=options, operator=op)
         await runner.add_task(task)
@@ -876,6 +1016,10 @@ UI_HTML = """
               <input id="create_url" type="text" style="width:min(860px,100%)" placeholder="可选：手动填写创建链接；不填则按渠道自动匹配"/>
             </div>
             <div class="field full">
+              <span class="label">第2步主消费门店文件</span>
+              <input id="step2_main_store_file" type="file" accept=".xlsx,.xls"/>
+            </div>
+            <div class="field full">
               <span class="hint" id="create_url_hint">自动匹配：短信=599702746907561984；会员通-发客户消息=594094287227023360；会员通-发客户朋友圈=599702926159527936；短信+会员通-发客户消息=600035736992907264</span>
             </div>
           </div>
@@ -921,16 +1065,20 @@ UI_HTML = """
                 <input class="step3_channel" type="checkbox" value="会员通-发客户消息"/>
                 <span>
                   <div class="channel-main">会员通-发客户消息</div>
-                  <div class="channel-desc">填写结束时间、执行员工、发送内容，可选小程序。</div>
+                  <div class="channel-desc">填写结束时间、执行员工、发送内容，可选小程序、上传门店。</div>
                 </span>
               </label>
               <label class="channel-item">
                 <input class="step3_channel" type="checkbox" value="会员通-发客户朋友圈"/>
                 <span>
                   <div class="channel-main">会员通-发客户朋友圈</div>
-                  <div class="channel-desc">填写结束时间、执行员工、发送内容，可选上传图片。</div>
+                  <div class="channel-desc">填写结束时间、执行员工、发送内容，可选上传图片、上传门店。</div>
                 </span>
               </label>
+            </div>
+            <div style="margin-top:10px">
+              <label class="inline-check"><input id="executor_include_franchise" type="checkbox"/> 执行员工包含加盟区域（自动同步勾选“xx加盟”节点）</label>
+              <div class="tiny" style="margin-top:4px">示例：执行员工=广佛省区，勾选后会自动追加广佛省区加盟；执行员工=大郑州营运区，勾选后自动追加大郑州营运区加盟。</div>
             </div>
           </div>
           <div class="step-caption">可单选或多选。系统将只填选中渠道对应字段。</div>
@@ -958,6 +1106,12 @@ UI_HTML = """
               </div>
               <span class="tiny">仅当选择“会员通-发客户消息”时展示。启用后请完整填写标题、链接并上传封面。</span>
             </div>
+            <div id="materialStoreFile" class="field vertical hidden material-panel">
+              <div class="material-title">上传门店（可选）</div>
+              <label class="inline-check"><input id="upload_stores" type="checkbox"/> 启用上传门店</label>
+              <input id="store_file" type="file" accept=".xlsx,.xls"/>
+              <span class="tiny">当渠道包含“会员通-发客户消息”或“会员通-发客户朋友圈”时可用。非必填，支持 xlsx/xls。</span>
+            </div>
           </div>
           <div id="materialEmptyTip" class="step-caption">当前渠道无需附加素材，直接执行即可。</div>
         </div>
@@ -969,7 +1123,7 @@ UI_HTML = """
           <a class="link-pill" href="/api/template/xlsx">下载Excel模板</a>
           <a class="link-pill" href="/api/template/csv">下载CSV模板(防乱码)</a>
         </div>
-        <div class="tip" style="margin-top:8px">说明: 支持上传 CSV / XLSX。下载模板为中文表头，便于业务填写；上传时系统会自动识别中文表头并转换为脚本字段。营销主题支持多选，多个值请用“、/，/,/|”分隔（示例：其他、26年3月积分换券）。Windows Excel 如遇 CSV 乱码，请优先下载“Excel模板”或“CSV模板(UTF-8 BOM)”。如勾选“朋友圈上传图片”，请在本页面选择图片文件（最多9张，jpg/png且<10MB），系统会自动写入任务CSV并按顺序上传。如勾选“会员通消息-添加小程序”，请填写标题、链接并上传封面，系统会自动注入到对应渠道行。</div>
+        <div class="tip" style="margin-top:8px">说明: 支持上传 CSV / XLSX。下载模板为中文表头，便于业务填写；上传时系统会自动识别中文表头并转换为脚本字段。营销主题支持多选，多个值请用“、/，/,/|”分隔（示例：其他、26年3月积分换券）。Windows Excel 如遇 CSV 乱码，请优先下载“Excel模板”或“CSV模板(UTF-8 BOM)”。如需第2步配置“主消费门店”，可在上方上传门店文件（xlsx/xls），系统会自动注入并在第2步弹窗执行“选择数据->上传文件”。如勾选“朋友圈上传图片”，请在本页面选择图片文件（最多9张，jpg/png且<10MB），系统会自动写入任务CSV并按顺序上传。如勾选“会员通消息-添加小程序”，请填写标题、链接并上传封面，系统会自动注入到对应渠道行。如勾选“上传门店”，请选择本地 xlsx/xls 文件，系统会注入到会员通相关渠道行。</div>
       </div>
 
       <div class="card">
@@ -1058,11 +1212,14 @@ function syncChannelMaterials(){
   const channels = selectedChannels();
   const showMoments = channels.includes('会员通-发客户朋友圈');
   const showMsg = channels.includes('会员通-发客户消息');
+  const showStore = showMsg || showMoments;
   const momentsBox = document.getElementById('materialMoments');
   const msgBox = document.getElementById('materialMiniProgram');
+  const storeBox = document.getElementById('materialStoreFile');
   const emptyTip = document.getElementById('materialEmptyTip');
   if(momentsBox) momentsBox.classList.toggle('hidden', !showMoments);
   if(msgBox) msgBox.classList.toggle('hidden', !showMsg);
+  if(storeBox) storeBox.classList.toggle('hidden', !showStore);
   if(!showMoments){
     const chk = document.getElementById('moments_add_images');
     const file = document.getElementById('moments_images');
@@ -1079,7 +1236,13 @@ function syncChannelMaterials(){
     if(page) page.value = '';
     if(cover) cover.value = '';
   }
-  if(emptyTip) emptyTip.style.display = (showMoments || showMsg) ? 'none' : 'block';
+  if(!showStore){
+    const chk = document.getElementById('upload_stores');
+    const file = document.getElementById('store_file');
+    if(chk) chk.checked = false;
+    if(file) file.value = '';
+  }
+  if(emptyTip) emptyTip.style.display = (showMoments || showMsg || showStore) ? 'none' : 'block';
   updateCreateUrlHint();
   saveUiPrefs();
 }
@@ -1108,12 +1271,18 @@ async function upload(){
   fd.append('end', '');
   fd.append('hold_seconds', document.getElementById('hold_seconds').value || '2');
   fd.append('create_url', document.getElementById('create_url').value || '');
+  const step2MainStoreFile = document.getElementById('step2_main_store_file').files[0];
+  if(step2MainStoreFile){ fd.append('step2_main_store_file', step2MainStoreFile); }
   const channels = selectedChannels();
   if(!channels.length){ alert('请至少选择一个发送渠道'); return; }
   fd.append('step3_channels', channels.join(','));
+  fd.append('executor_include_franchise', document.getElementById('executor_include_franchise').checked ? 'true' : 'false');
   fd.append('moments_add_images', document.getElementById('moments_add_images').checked ? 'true' : 'false');
   const momentImgs = document.getElementById('moments_images').files;
   for(const img of momentImgs){ fd.append('moments_images', img); }
+  fd.append('upload_stores', document.getElementById('upload_stores').checked ? 'true' : 'false');
+  const storeFile = document.getElementById('store_file').files[0];
+  if(storeFile){ fd.append('store_file', storeFile); }
   fd.append('msg_add_mini_program', document.getElementById('msg_add_mini_program').checked ? 'true' : 'false');
   fd.append('msg_mini_program_name', document.getElementById('msg_mini_program_name').value || '大参林健康');
   fd.append('msg_mini_program_title', document.getElementById('msg_mini_program_title').value || '');
@@ -1255,7 +1424,9 @@ function saveUiPrefs(){
     hold_seconds: document.getElementById('hold_seconds')?.value || '2',
     create_url: document.getElementById('create_url')?.value || '',
     channels: selectedChannels(),
+    executor_include_franchise: !!document.getElementById('executor_include_franchise')?.checked,
     moments_add_images: !!document.getElementById('moments_add_images')?.checked,
+    upload_stores: !!document.getElementById('upload_stores')?.checked,
     msg_add_mini_program: !!document.getElementById('msg_add_mini_program')?.checked,
     msg_mini_program_name: document.getElementById('msg_mini_program_name')?.value || '大参林健康',
     msg_mini_program_title: document.getElementById('msg_mini_program_title')?.value || '',
@@ -1276,7 +1447,9 @@ function restoreUiFromCache(){
     if(document.getElementById('create_url')) document.getElementById('create_url').value = prefs.create_url || '';
     const channels = new Set(prefs.channels || []);
     document.querySelectorAll('.step3_channel').forEach(el => { el.checked = channels.has(el.value); });
+    if(document.getElementById('executor_include_franchise')) document.getElementById('executor_include_franchise').checked = !!prefs.executor_include_franchise;
     if(document.getElementById('moments_add_images')) document.getElementById('moments_add_images').checked = !!prefs.moments_add_images;
+    if(document.getElementById('upload_stores')) document.getElementById('upload_stores').checked = !!prefs.upload_stores;
     if(document.getElementById('msg_add_mini_program')) document.getElementById('msg_add_mini_program').checked = !!prefs.msg_add_mini_program;
     if(document.getElementById('msg_mini_program_name')) document.getElementById('msg_mini_program_name').value = prefs.msg_mini_program_name || '大参林健康';
     if(document.getElementById('msg_mini_program_title')) document.getElementById('msg_mini_program_title').value = prefs.msg_mini_program_title || '';
@@ -1304,7 +1477,7 @@ function restoreUiFromCache(){
 
 setInterval(async ()=>{ await refreshTasks(); await pollLogs(); }, 2000);
 document.querySelectorAll('.step3_channel').forEach(el => el.addEventListener('change', syncChannelMaterials));
-['connect_cdp','cdp_endpoint','strict_step2','concurrent','hold_seconds','create_url','moments_add_images','msg_add_mini_program','msg_mini_program_name','msg_mini_program_title','msg_mini_program_page_path']
+['connect_cdp','cdp_endpoint','strict_step2','concurrent','hold_seconds','create_url','executor_include_franchise','moments_add_images','upload_stores','msg_add_mini_program','msg_mini_program_name','msg_mini_program_title','msg_mini_program_page_path']
   .forEach(id => {
     const el = document.getElementById(id);
     if(el){ el.addEventListener('change', saveUiPrefs); el.addEventListener('input', saveUiPrefs); }

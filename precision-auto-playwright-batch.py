@@ -77,6 +77,8 @@ DEFAULT_PLAN = {
     "group_name": "测试-≥20积分会员（未绑客）",
     "update_type": "自动更新",
     "main_operating_area": "广佛省区",
+    "main_store_file_path": "",
+    "step2_store_file_path": "",
     "coupon_ids": "1-20000005475",
     "sms_content": "短信内容测试",
     "step3_end_time": "2026-03-27 08:00",
@@ -87,6 +89,8 @@ DEFAULT_PLAN = {
     "create_url": "",
     "moments_add_images": "否",
     "moments_image_paths": "",
+    "upload_stores": "否",
+    "store_file_path": "",
     "msg_add_mini_program": "否",
     "msg_mini_program_name": "大参林健康",
     "msg_mini_program_title": "",
@@ -127,6 +131,8 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "group_name": row.get("group_name", "").strip(),
                 "update_type": row.get("update_type", "").strip(),
                 "main_operating_area": row.get("main_operating_area", "").strip(),
+                "main_store_file_path": row.get("main_store_file_path", "").strip(),
+                "step2_store_file_path": row.get("step2_store_file_path", "").strip(),
                 "coupon_ids": row.get("coupon_ids", "").strip(),
                 "sms_content": row.get("sms_content", "").strip(),
                 "step3_end_time": row.get("step3_end_time", "").strip(),
@@ -137,6 +143,8 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "create_url": row.get("create_url", "").strip(),
                 "moments_add_images": row.get("moments_add_images", "").strip(),
                 "moments_image_paths": row.get("moments_image_paths", "").strip(),
+                "upload_stores": row.get("upload_stores", "").strip(),
+                "store_file_path": row.get("store_file_path", "").strip(),
                 "msg_add_mini_program": row.get("msg_add_mini_program", "").strip(),
                 "msg_mini_program_name": row.get("msg_mini_program_name", "").strip(),
                 "msg_mini_program_title": row.get("msg_mini_program_title", "").strip(),
@@ -1477,6 +1485,101 @@ async def fill_step3_message_mini_program(
         return False, " / ".join(errors)
     return True, f"小程序已配置: {program_name} / {Path(cover_path).name}"
 
+
+async def upload_step3_store_file(page, raw_path: str):
+    """第3步上传门店：可选上传本地 xlsx/xls 文件。"""
+    p = (raw_path or "").strip()
+    if not p:
+        return False, "未提供门店文件路径"
+    path = Path(os.path.expanduser(p))
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    if not path.exists():
+        return False, f"门店文件不存在: {path}"
+    if path.suffix.lower() not in {".xlsx", ".xls"}:
+        return False, f"门店文件格式仅支持 xlsx/xls: {path.name}"
+
+    locate_info = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        };
+        const norm = (s) => (s || '').replace(/\\s+/g, '');
+        const fireClick = (el) => {
+            if (!el) return false;
+            ['pointerdown','mousedown','mouseup','click'].forEach(t => {
+                el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+            });
+            if (typeof el.click === 'function') el.click();
+            return true;
+        };
+        // 优先：定位“执行员工”字段附近的“上传门店”按钮，避免误点到其它上传入口。
+        const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label')).filter(isVisible);
+        for (const lb of labels) {
+            const lt = norm(lb.textContent || '');
+            if (!lt.includes('执行员工')) continue;
+            const item = lb.closest('.item, .el-form-item, .ant-form-item') || lb.parentElement;
+            if (!item) continue;
+            const container = item.parentElement || item;
+            const candidates = Array.from(container.querySelectorAll('button.el-button, button, .el-button')).filter(isVisible);
+            const btn = candidates.find(x => norm(x.textContent || '') === '上传门店' || norm(x.textContent || '').includes('上传门店'));
+            if (!btn) continue;
+            btn.setAttribute('data-step3-store-trigger', '1');
+            const root = btn.closest('.item, .el-form-item, .ant-form-item, .channel, .module, .card') || btn.parentElement || btn;
+            if (root) root.setAttribute('data-step3-store-root', '1');
+            fireClick(btn);
+            return { ok: true, mode: 'near_executor' };
+        }
+
+        // 兜底：全局精确命中 button 文本=上传门店（不再扫 span/div 文本，避免误命中）
+        const btns = Array.from(document.querySelectorAll('button.el-button, button')).filter(isVisible);
+        const hit = btns.find(b => {
+            const t = norm(b.textContent || '');
+            return t === '上传门店' || t.includes('上传门店');
+        });
+        if (!hit) return { ok: false, mode: 'not_found' };
+        hit.setAttribute('data-step3-store-trigger', '1');
+        const root = hit.closest('.item, .el-form-item, .ant-form-item, .channel, .module, .card') || hit.parentElement || hit;
+        if (root) root.setAttribute('data-step3-store-root', '1');
+        fireClick(hit);
+        return { ok: true, mode: 'global_button' };
+    }""")
+    if not locate_info or not locate_info.get("ok"):
+        return False, "未找到“上传门店”入口"
+
+    trigger = page.locator('[data-step3-store-trigger="1"]').first
+    uploaded = False
+    try:
+        async with page.expect_file_chooser(timeout=3500) as fc_info:
+            try:
+                await trigger.click(force=True)
+            except Exception:
+                await page.evaluate("""() => {
+                    const t = document.querySelector('[data-step3-store-trigger="1"]');
+                    if (t) t.click();
+                }""")
+        chooser = await fc_info.value
+        await chooser.set_files(str(path))
+        uploaded = True
+    except Exception:
+        uploaded = False
+
+    if not uploaded:
+        try:
+            scoped_input = page.locator('[data-step3-store-root="1"] input[type="file"]').last
+            if await scoped_input.count() > 0:
+                await scoped_input.set_input_files(str(path))
+                uploaded = True
+        except Exception:
+            uploaded = False
+
+    if not uploaded:
+        return False, f"上传门店失败: {path.name}"
+    await asyncio.sleep(0.4)
+    return True, f"门店文件已上传: {path.name}"
+
 def extract_api_code_message(text: str):
     """从接口响应体中提取 code/message。"""
     if not text:
@@ -2502,6 +2605,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
         "第2步-弹窗可见": False,
         "第2步-更新方式": False,
         "第2步-主消费营运区": False,
+        "第2步-主消费门店": False,
+        "第2步-门店信息已选": False,
         "第2步-券规则ID": False,
         "第2步-预跑按钮": False,
         "第2步-下一步按钮": False,
@@ -3197,6 +3302,200 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                             else:
                                 print(f"      ⚠️ 主消费营运区操作失败: {e}")
                     
+                    # 第2步：门店信息通用上传（选择数据 -> 上传文件，非必填）
+                    step2_store_file_path = (data.get("step2_store_file_path", "") or data.get("main_store_file_path", "")).strip()
+                    if step2_store_file_path:
+                        print(f"   🏬 第2步门店信息文件: {step2_store_file_path}")
+                        try:
+                            store_path = Path(os.path.expanduser(step2_store_file_path))
+                            if not store_path.is_absolute():
+                                store_path = Path.cwd() / store_path
+                            if (not store_path.exists()) or store_path.suffix.lower() not in {".xlsx", ".xls"}:
+                                print(f"      ⚠️ 第2步门店信息文件无效: {store_path}")
+                            else:
+                                open_store_picker_info = await frame.evaluate("""() => {
+                                    const isVisible = (el) => {
+                                        if (!el) return false;
+                                        const s = window.getComputedStyle(el);
+                                        const r = el.getBoundingClientRect();
+                                        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                    };
+                                    const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                    const fireClick = (el) => {
+                                        if (!el) return false;
+                                        ['pointerdown','mousedown','mouseup','click'].forEach(t => {
+                                            el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+                                        });
+                                        if (typeof el.click === 'function') el.click();
+                                        return true;
+                                    };
+                                    const visibleModals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
+                                    const openedModal = visibleModals.find(m => {
+                                        const t = norm(m.textContent || '');
+                                        return t.includes('选择数据') && t.includes('上传文件');
+                                    });
+                                    if (openedModal) {
+                                        openedModal.setAttribute('data-step2-store-modal', '1');
+                                        return { opened: true, source: 'already_open' };
+                                    }
+                                    const keywordHints = [
+                                        '入会门店','入会片区','入会营运区','入会大区','入会省区',
+                                        '至尊升级门店','至尊升级片区','至尊升级营运区','至尊升级大区','至尊升级省区',
+                                        '至尊续费门店','至尊续费片区','至尊续费营运区','至尊续费大区','至尊续费省区',
+                                        '会员通绑定门店','会员通绑定片区','会员通绑定营运区','会员通绑定大区','会员通绑定省区',
+                                        '最后消费门店','最后消费片区','最后消费营运区','最后消费大区','最后消费省区',
+                                        '主要消费门店','主要消费片区','主要消费营运区','主要消费大区','主要消费省区',
+                                        '消费过的门店','消费过的片区','消费过的营运区','消费过的大区','消费过的省区'
+                                    ];
+                                    const rows = Array.from(document.querySelectorAll('.condition, .event-row, .ant-form-item, .ant-row, div')).filter(isVisible);
+                                    for (const row of rows) {
+                                        const txt = norm(row.textContent || '');
+                                        if (!keywordHints.some(k => txt.includes(norm(k)))) continue;
+                                        const btn = Array.from(row.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
+                                            .find(b => norm(b.textContent || '').includes('选择数据'));
+                                        if (btn) return { opened: fireClick(btn), source: 'keyword_row_button' };
+                                    }
+                                    // 通用兜底：点击当前可见的第一个“选择数据”按钮（适配任意门店信息类型）
+                                    const firstBtn = Array.from(document.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
+                                        .filter(isVisible)
+                                        .find(b => norm(b.textContent || '').includes('选择数据'));
+                                    if (firstBtn) return { opened: fireClick(firstBtn), source: 'first_select_data' };
+                                    return { opened: false, source: 'not_found' };
+                                }""")
+                                if not open_store_picker_info or (not open_store_picker_info.get("opened")):
+                                    print("      ⚠️ 未找到门店信息“选择数据”按钮")
+                                else:
+                                    print(f"      🧪 门店信息选择器来源: {open_store_picker_info.get('source','unknown')}")
+                                    await asyncio.sleep(1.0)
+                                    await frame.evaluate("""() => {
+                                        const isVisible = (el) => {
+                                            if (!el) return false;
+                                            const s = window.getComputedStyle(el);
+                                            const r = el.getBoundingClientRect();
+                                            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                        };
+                                        const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                        const visibleModals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
+                                        const openedModal = visibleModals.find(m => {
+                                            const t = norm(m.textContent || '');
+                                            return t.includes('选择数据') && t.includes('上传文件');
+                                        });
+                                        if (openedModal) openedModal.setAttribute('data-step2-store-modal', '1');
+                                    }""")
+                                    # 优先用可见 modal 内的 file input 直接上传
+                                    uploaded_store = False
+                                    try:
+                                        file_input = frame.locator('[data-step2-store-modal=\"1\"] input[type=\"file\"]').last
+                                        if await file_input.count() > 0:
+                                            await file_input.set_input_files(str(store_path))
+                                            uploaded_store = True
+                                    except Exception:
+                                        uploaded_store = False
+
+                                    if not uploaded_store:
+                                        try:
+                                            async with page.expect_file_chooser(timeout=3000) as fc_info:
+                                                await frame.evaluate("""() => {
+                                                    const isVisible = (el) => {
+                                                        if (!el) return false;
+                                                        const s = window.getComputedStyle(el);
+                                                        const r = el.getBoundingClientRect();
+                                                        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                                    };
+                                                    const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                                    const modal = document.querySelector('[data-step2-store-modal=\"1\"]');
+                                                    const scope = modal || document;
+                                                    const btn = Array.from(scope.querySelectorAll('button.ant-btn'))
+                                                        .filter(isVisible)
+                                                        .find(b => {
+                                                            const t = norm(b.textContent || '');
+                                                            return t === '上传文件' || t.includes('上传文件');
+                                                        });
+                                                    if (btn) btn.click();
+                                                }""")
+                                            chooser = await fc_info.value
+                                            await chooser.set_files(str(store_path))
+                                            uploaded_store = True
+                                        except Exception:
+                                            uploaded_store = False
+
+                                    if not uploaded_store:
+                                        print(f"      ⚠️ 主消费门店上传失败: {store_path.name}")
+                                    else:
+                                        # 上传后等待“已选中(N)”生效，避免过早点击确认导致 N=0
+                                        selected_ready = False
+                                        selected_text = ""
+                                        file_ready = False
+                                        for _ in range(40):  # 最多等待约20秒
+                                            ready_info = await frame.evaluate("""(fileName) => {
+                                                const isVisible = (el) => {
+                                                    if (!el) return false;
+                                                    const s = window.getComputedStyle(el);
+                                                    const r = el.getBoundingClientRect();
+                                                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                                };
+                                                const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                                const modal = document.querySelector('[data-step2-store-modal=\"1\"]');
+                                                const scope = modal || document;
+                                                const txt = (scope.textContent || '').trim();
+                                                const txtNorm = norm(txt);
+                                                // 直接从整段文本解析“已选中(数字)”更稳
+                                                let selectedText = '';
+                                                const m1 = txt.match(/已选中\\s*[（(]\\s*\\d+\\s*[)）]/);
+                                                if (m1) selectedText = m1[0];
+                                                if (!selectedText) {
+                                                    const m2 = txt.match(/已选中\\s*\\d+/);
+                                                    if (m2) selectedText = m2[0];
+                                                }
+                                                const fileNorm = norm(fileName || '');
+                                                const fileHit = !!(fileNorm && txtNorm.includes(fileNorm));
+                                                return { selectedText, fileHit };
+                                            }""", store_path.name)
+                                            selected_text = (ready_info or {}).get("selectedText", "")
+                                            file_ready = bool((ready_info or {}).get("fileHit"))
+                                            m = re.search(r'(\\d+)', selected_text or "")
+                                            n = int(m.group(1)) if m else 0
+                                            if n > 0 or file_ready:
+                                                selected_ready = True
+                                                break
+                                            await asyncio.sleep(0.5)
+                                        if selected_text:
+                                            print(f"      🧪 门店信息上传后回读: {selected_text}")
+                                        if file_ready:
+                                            print("      🧪 门店信息上传后回读: 已检测到上传文件名")
+                                        if not selected_ready:
+                                            print("      ⚠️ 门店信息已选中数量仍为0，继续尝试点击确认（可能后台仍在处理）")
+
+                                        # 点击选择数据弹窗“确认/确定”
+                                        confirm_store = await frame.evaluate("""() => {
+                                            const isVisible = (el) => {
+                                                if (!el) return false;
+                                                const s = window.getComputedStyle(el);
+                                                const r = el.getBoundingClientRect();
+                                                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                            };
+                                            const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                            const modal = document.querySelector('[data-step2-store-modal=\"1\"]');
+                                            const scope = modal || document;
+                                            const primaryBtns = Array.from(scope.querySelectorAll('button.ant-btn.ant-btn-primary')).filter(isVisible);
+                                            const btn = primaryBtns.find(b => {
+                                                const t = norm(b.textContent || '');
+                                                return t === '确认' || t.includes('确认') || t === '确定' || t.includes('确定');
+                                            });
+                                            if (!btn) return false;
+                                            btn.click();
+                                            return true;
+                                        }""")
+                                        if confirm_store:
+                                            print(f"      ✅ 第2步门店信息已上传: {store_path.name}")
+                                            results["第2步-主消费门店"] = True
+                                        else:
+                                            print("      ⚠️ 门店信息上传后未找到确认/确定按钮")
+                        except Exception as e:
+                            print(f"      ⚠️ 第2步门店信息操作失败: {e}")
+                    else:
+                        results["第2步-主消费门店"] = True
+
                     # 在 iframe 内填充券规则ID（按标签就近定位 + 回读）
                     if data.get("coupon_ids"):
                         print(f"   🎫 券规则ID: {data['coupon_ids']}")
@@ -3360,14 +3659,63 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
     except Exception as e:
         print(f"      ⚠️ 预跑点击失败: {e}")
 
+    # 门店信息通用回读：只要出现“已选：N/已选中(N)”且 N>0 即认为门店信息条件生效。
+    try:
+        if iframe_info:
+            frame_handle = await page.query_selector('iframe')
+            if frame_handle:
+                frame_probe = await frame_handle.content_frame()
+            else:
+                frame_probe = None
+            if frame_probe:
+                selected_info_text = await frame_probe.evaluate("""() => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const s = window.getComputedStyle(el);
+                        const r = el.getBoundingClientRect();
+                        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                    };
+                    const nodes = Array.from(document.querySelectorAll('span,div,b,strong')).filter(isVisible);
+                    const hit = nodes.find(n => {
+                        const t = (n.textContent || '').replace(/\\s+/g, '');
+                        return /已选[:：]\\d+/.test(t) || /已选中[（(]\\d+[)）]/.test(t);
+                    });
+                    return hit ? (hit.textContent || '').trim() : '';
+                }""")
+                m = re.search(r'(\\d+)', selected_info_text or "")
+                n = int(m.group(1)) if m else 0
+                if n > 0:
+                    results["第2步-门店信息已选"] = True
+                    print(f"      ✅ 门店信息回读通过: {selected_info_text}")
+                elif selected_info_text:
+                    print(f"      ⚠️ 门店信息回读为0: {selected_info_text}")
+    except Exception:
+        pass
+
     # 严格模式下，字段级回读失败也要终止，避免“日志看着成功”。
     if strict_step2:
         required_keys = ["第2步-编辑按钮", "第2步-弹窗可见", "第2步-更新方式", "第2步-预跑按钮"]
-        if data.get("main_operating_area"):
-            required_keys.append("第2步-主消费营运区")
+        has_main_area_cfg = bool((data.get("main_operating_area", "") or "").strip())
+        has_main_store_cfg = bool(
+            (data.get("step2_store_file_path", "") or "").strip()
+            or (data.get("main_store_file_path", "") or "").strip()
+        )
+        has_store_cfg = has_main_area_cfg or has_main_store_cfg
+        # 通用放行规则：门店信息相关配置时，只要“主消费营运区/主消费门店/门店信息回读”任一成功即放行。
+        # 适配“入会门店/主要消费门店/主要消费片区/主要消费营运区/主要消费大区/主要消费省区”等类型。
+        if has_store_cfg:
+            store_ok = any([
+                results.get("第2步-主消费营运区", False),
+                results.get("第2步-主消费门店", False),
+                results.get("第2步-门店信息已选", False),
+            ])
+            if not store_ok:
+                required_keys.append("第2步-主消费营运区")
         if data.get("coupon_ids"):
             required_keys.append("第2步-券规则ID")
         failed = [k for k in required_keys if not results.get(k, False)]
+        if has_store_cfg and not failed:
+            print("      ✅ 第2步门店信息按通用规则放行（至少一项成功）")
         if failed:
             raise RuntimeError(f"第2步字段回读未通过: {failed}")
     
@@ -3563,6 +3911,8 @@ async def fill_step3(
     send_content = data.get("send_content", "")
     moments_add_images = parse_bool_flag(data.get("moments_add_images", "否"), default=False)
     moments_image_paths = data.get("moments_image_paths", "")
+    upload_stores = parse_bool_flag(data.get("upload_stores", "否"), default=False)
+    store_file_path = data.get("store_file_path", "")
     msg_add_mini_program = parse_bool_flag(data.get("msg_add_mini_program", "否"), default=False)
     msg_mini_program_name = data.get("msg_mini_program_name", "大参林健康")
     msg_mini_program_title = data.get("msg_mini_program_title", "")
@@ -3633,6 +3983,18 @@ async def fill_step3(
             moments_gate_ok = False
             moments_gate_errors.append("发送内容")
 
+        print(f"   🏬 上传门店: {'需要上传' if upload_stores else '不上传'}")
+        if upload_stores:
+            store_ok, store_msg = await upload_step3_store_file(page, store_file_path)
+            print(f"      {'✅' if store_ok else '⚠️'} {store_msg}")
+            results["第3步-上传门店"] = store_ok
+            if not store_ok:
+                moments_gate_ok = False
+                moments_gate_errors.append("上传门店")
+        else:
+            print("      ⏭️ 未勾选上传门店，已跳过")
+            results["第3步-上传门店"] = True
+
         if customer_msg_required:
             print(f"   🧩 添加小程序: {'需要配置' if msg_add_mini_program else '不配置'}")
             if msg_add_mini_program:
@@ -3674,11 +4036,13 @@ async def fill_step3(
         print("   📅 结束时间: ⏭️ 当前所选渠道无需填写，已跳过")
         print("   👥 执行员工: ⏭️ 当前所选渠道无需填写，已跳过")
         print("   📝 发送内容: ⏭️ 当前所选渠道无需填写，已跳过")
+        print("   🏬 上传门店: ⏭️ 当前所选渠道无需填写，已跳过")
         print("   🧩 添加小程序: ⏭️ 当前所选渠道无需填写，已跳过")
         print("   🖼️ 朋友圈图片: ⏭️ 当前所选渠道无需填写，已跳过")
         results["第3步-结束时间"] = True
         results["第3步-执行员工"] = True
         results["第3步-发送内容"] = True
+        results["第3步-上传门店"] = True
         results["第3步-添加小程序"] = True
         results["第3步-朋友圈图片"] = True
 
