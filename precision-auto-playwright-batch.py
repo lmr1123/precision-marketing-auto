@@ -3650,43 +3650,44 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         except Exception:
                                             pass
 
+                                    # 固定动作链：先点“上传文件”再写入 file input，避免误写到非商品编码模块。
+                                    click_upload_btn = await frame.evaluate("""() => {
+                                        const isVisible = (el) => {
+                                            if (!el) return false;
+                                            const s = window.getComputedStyle(el);
+                                            const r = el.getBoundingClientRect();
+                                            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                        };
+                                        const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                        const modal = document.querySelector('[data-step2-product-modal=\"1\"]');
+                                        if (!modal) return false;
+                                        const btn = Array.from(modal.querySelectorAll('button.ant-btn, button'))
+                                            .filter(isVisible)
+                                            .find(b => {
+                                                const t = norm(b.textContent || '');
+                                                return t === '上传文件' || t.includes('上传文件');
+                                            });
+                                        if (!btn) return false;
+                                        ['pointerdown','mousedown','mouseup','click'].forEach(t => {
+                                            btn.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+                                        });
+                                        if (typeof btn.click === 'function') btn.click();
+                                        return true;
+                                    }""")
+                                    if click_upload_btn:
+                                        print("      🧪 商品编码上传动作: 已点击“上传文件”按钮")
+                                    else:
+                                        print("      ⚠️ 商品编码上传动作: 未找到“上传文件”按钮")
+
                                     uploaded_product = False
                                     try:
+                                        await asyncio.sleep(0.35)
                                         file_input = frame.locator('[data-step2-product-modal=\"1\"] input[type=\"file\"]').last
                                         if await file_input.count() > 0:
                                             await file_input.set_input_files(str(product_path))
                                             uploaded_product = True
                                     except Exception:
                                         uploaded_product = False
-
-                                    if not uploaded_product:
-                                        # 二次兜底：点击“上传文件”按钮后，再次尝试读取当前弹窗内 file input 直接写入
-                                        try:
-                                            await frame.evaluate("""() => {
-                                                const isVisible = (el) => {
-                                                    if (!el) return false;
-                                                    const s = window.getComputedStyle(el);
-                                                    const r = el.getBoundingClientRect();
-                                                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-                                                };
-                                                const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                                const modal = document.querySelector('[data-step2-product-modal=\"1\"]');
-                                                const scope = modal || document;
-                                                const btn = Array.from(scope.querySelectorAll('button.ant-btn'))
-                                                    .filter(isVisible)
-                                                    .find(b => {
-                                                        const t = norm(b.textContent || '');
-                                                        return t === '上传文件' || t.includes('上传文件');
-                                                    });
-                                                if (btn) btn.click();
-                                            }""")
-                                            await asyncio.sleep(0.4)
-                                            file_input2 = frame.locator('[data-step2-product-modal=\"1\"] input[type=\"file\"]').last
-                                            if await file_input2.count() > 0:
-                                                await file_input2.set_input_files(str(product_path))
-                                                uploaded_product = True
-                                        except Exception:
-                                            uploaded_product = False
 
                                     if not uploaded_product:
                                         print(f"      ⚠️ 商品编码上传失败: {product_path.name}")
