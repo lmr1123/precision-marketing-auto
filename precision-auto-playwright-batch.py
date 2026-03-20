@@ -3691,40 +3691,57 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                                 const norm = (s) => (s || '').replace(/\\s+/g, '');
                                                 const modal = document.querySelector('[data-step2-product-modal="1"]');
                                                 const scope = modal || document;
-                                                const btn = Array.from(scope.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
+                                                let btn = Array.from(scope.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
                                                     .filter(isVisible)
                                                     .find(b => {
                                                         const t = norm(b.textContent || '');
                                                         return t === '确认' || t.includes('确认') || t === '确定' || t.includes('确定');
                                                     });
-                                                if (!btn) return false;
-                                                btn.click();
-                                                return true;
+                                                // 兜底：优先点击弹窗 footer 里的主按钮（通常就是“确认/确定”）
+                                                if (!btn) {
+                                                    const footerPrimary = Array.from(scope.querySelectorAll('.ant-modal-footer button.ant-btn.ant-btn-primary'))
+                                                        .filter(isVisible);
+                                                    if (footerPrimary.length) btn = footerPrimary[footerPrimary.length - 1];
+                                                }
+                                                if (!btn) return { ok: false, text: '' };
+                                                const txt = (btn.textContent || '').trim();
+                                                ['pointerdown','mousedown','mouseup','click'].forEach(t => {
+                                                    btn.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+                                                });
+                                                if (typeof btn.click === 'function') btn.click();
+                                                return { ok: true, text: txt };
                                             }""")
-                                            if confirm_product:
-                                                await asyncio.sleep(0.8)
+                                            if confirm_product and confirm_product.get("ok"):
+                                                print(f"      🧪 商品编码确认动作: 已点击按钮 [{(confirm_product.get('text') or '').strip()}]")
+                                                await asyncio.sleep(0.6)
                                                 # 只读“商品编码”行本身的“已选”，避免串读其它区域
-                                                product_row_selected = await frame.evaluate("""() => {
-                                                    const isVisible = (el) => {
-                                                        if (!el) return false;
-                                                        const s = window.getComputedStyle(el);
-                                                        const r = el.getBoundingClientRect();
-                                                        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-                                                    };
-                                                    const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                                    const rows = Array.from(document.querySelectorAll('.event-row, .condition')).filter(isVisible);
-                                                    for (const row of rows) {
-                                                        const hasTitle = !!row.querySelector('.ant-select-selection-item[title="商品编码"], [title="商品编码"]');
-                                                        const txt = norm(row.textContent || '');
-                                                        if (!hasTitle && !txt.includes('商品编码')) continue;
-                                                        const direct = row.querySelector('.ml-2');
-                                                        const val = (direct && (direct.textContent || '').trim()) || '';
-                                                        if (/已选[:：]\\s*\\d+/.test(val)) return val;
-                                                    }
-                                                    return '';
-                                                }""")
-                                                m = re.search(r'(\\d+)', product_row_selected or "")
-                                                n = int(m.group(1)) if m else 0
+                                                product_row_selected = ""
+                                                n = 0
+                                                for _ in range(12):
+                                                    product_row_selected = await frame.evaluate("""() => {
+                                                        const isVisible = (el) => {
+                                                            if (!el) return false;
+                                                            const s = window.getComputedStyle(el);
+                                                            const r = el.getBoundingClientRect();
+                                                            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                                        };
+                                                        const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                                        const rows = Array.from(document.querySelectorAll('.event-row, .condition')).filter(isVisible);
+                                                        for (const row of rows) {
+                                                            const hasTitle = !!row.querySelector('.ant-select-selection-item[title="商品编码"], [title="商品编码"]');
+                                                            const txt = norm(row.textContent || '');
+                                                            if (!hasTitle && !txt.includes('商品编码')) continue;
+                                                            const direct = row.querySelector('.ml-2');
+                                                            const val = (direct && (direct.textContent || '').trim()) || '';
+                                                            if (/已选[:：]\\s*\\d+/.test(val)) return val;
+                                                        }
+                                                        return '';
+                                                    }""")
+                                                    m = re.search(r'(\\d+)', product_row_selected or "")
+                                                    n = int(m.group(1)) if m else 0
+                                                    if n > 0:
+                                                        break
+                                                    await asyncio.sleep(0.3)
                                                 if product_row_selected:
                                                     print(f"      🧪 商品编码行回读: {product_row_selected}")
                                                 if n > 0:
