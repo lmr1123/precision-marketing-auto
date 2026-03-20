@@ -39,11 +39,13 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "send_time": "发送时间",
     "global_limit": "全局触达限制",
     "set_target": "是否设置目标",
+    "create_url": "创建链接",
     "group_name": "分群名称",
     "update_type": "更新方式",
     "main_operating_area": "主消费营运区",
     "main_store_file_path": "主消费门店文件路径",
     "step2_store_file_path": "第2步门店信息文件路径",
+    "step2_product_file_path": "第2步商品编码文件路径",
     "coupon_ids": "券规则ID",
     "sms_content": "短信内容",
     "step3_end_time": "第3步结束时间",
@@ -55,10 +57,10 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "upload_stores": "是否上传门店",
     "store_file_path": "门店文件路径",
     "msg_add_mini_program": "会员通消息是否添加小程序",
-    "msg_mini_program_name": "小程序名称",
-    "msg_mini_program_title": "小程序标题",
+    "msg_mini_program_name": "1对1-小程序名称",
+    "msg_mini_program_title": "1对1-小程序标题",
     "msg_mini_program_cover_path": "小程序封面路径",
-    "msg_mini_program_page_path": "小程序链接",
+    "msg_mini_program_page_path": "1对1-小程序链接",
 }
 HEADER_CN_TO_EN: Dict[str, str] = {v: k for k, v in HEADER_EN_TO_CN.items()}
 TEMPLATE_HIDE_FIELDS = {
@@ -70,11 +72,9 @@ TEMPLATE_HIDE_FIELDS = {
     "store_file_path",
     "main_store_file_path",
     "step2_store_file_path",
+    "step2_product_file_path",
     "msg_add_mini_program",
-    "msg_mini_program_name",
-    "msg_mini_program_title",
     "msg_mini_program_cover_path",
-    "msg_mini_program_page_path",
 }
 
 
@@ -101,11 +101,13 @@ def _default_headers() -> List[str]:
         "send_time",
         "global_limit",
         "set_target",
+        "create_url",
         "group_name",
         "update_type",
         "main_operating_area",
         "main_store_file_path",
         "step2_store_file_path",
+        "step2_product_file_path",
         "coupon_ids",
         "sms_content",
         "step3_end_time",
@@ -371,10 +373,10 @@ def inject_message_mini_program_to_csv(
         if "会员通-发客户消息" not in channel_scope:
             continue
         row["msg_add_mini_program"] = "是"
-        row["msg_mini_program_name"] = program_name or "大参林健康"
-        row["msg_mini_program_title"] = title or ""
+        row["msg_mini_program_name"] = program_name or row.get("msg_mini_program_name", "") or "大参林健康"
+        row["msg_mini_program_title"] = title or row.get("msg_mini_program_title", "") or ""
         row["msg_mini_program_cover_path"] = cover_path or ""
-        row["msg_mini_program_page_path"] = page_path or ""
+        row["msg_mini_program_page_path"] = page_path or row.get("msg_mini_program_page_path", "") or ""
 
     with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=headers)
@@ -446,6 +448,30 @@ def inject_step2_main_store_file_to_csv(
             writer.writerow({k: row.get(k, "") for k in headers})
 
 
+def inject_step2_product_file_to_csv(
+    dst_csv: Path,
+    product_file_path: str,
+) -> None:
+    """将第2步商品编码上传文件路径注入任务CSV。"""
+    if not product_file_path:
+        return
+    with dst_csv.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not headers:
+        return
+    if "step2_product_file_path" not in headers:
+        headers.append("step2_product_file_path")
+    for row in rows:
+        row["step2_product_file_path"] = product_file_path
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in headers})
+
+
 @dataclass
 class TaskOptions:
     connect_cdp: bool = True
@@ -481,6 +507,8 @@ class Task:
     error: str = ""
     logs: List[str] = field(default_factory=list)
     generated_links: List[str] = field(default_factory=list)
+    plan_name_display: str = ""
+    channel_display: str = ""
 
     def _latest_link_for_ui(self) -> str:
         # 优先给业务展示真正可复核的 viewPlan 链接，其次 editPlan。
@@ -512,6 +540,8 @@ class Task:
             "logs_count": len(self.logs),
             "generated_links": self.generated_links,
             "latest_link": self._latest_link_for_ui(),
+            "plan_name": self.plan_name_display,
+            "send_channels": self.channel_display,
             "options": {
                 "connect_cdp": self.options.connect_cdp,
                 "cdp_endpoint": self.options.cdp_endpoint,
@@ -526,6 +556,35 @@ class Task:
                 "executor_include_franchise": self.options.executor_include_franchise,
             },
         }
+
+
+def summarize_csv_meta(csv_path: Path) -> tuple[str, str]:
+    names: List[str] = []
+    channels: List[str] = []
+    try:
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for i, row in enumerate(reader):
+                n = (row.get("name", "") or "").strip()
+                c = (row.get("channels", "") or "").strip()
+                if n and n not in names:
+                    names.append(n)
+                if c:
+                    for p in re.split(r"[|,，、/]+", c):
+                        p = (p or "").strip()
+                        if p and p not in channels:
+                            channels.append(p)
+                if i >= 30:
+                    break
+    except Exception:
+        return "", ""
+    if not names:
+        plan_name = ""
+    elif len(names) == 1:
+        plan_name = names[0]
+    else:
+        plan_name = f"{names[0]} +{len(names)-1}"
+    return plan_name, "、".join(channels)
 
 
 class TaskRunner:
@@ -783,6 +842,7 @@ async def upload_tasks(
     mini_program_cover: Optional[UploadFile] = File(default=None),
     store_file: Optional[UploadFile] = File(default=None),
     step2_main_store_file: Optional[UploadFile] = File(default=None),
+    step2_product_file: Optional[UploadFile] = File(default=None),
     connect_cdp: bool = Form(True),
     cdp_endpoint: str = Form("http://127.0.0.1:18800"),
     strict_step2: bool = Form(True),
@@ -829,10 +889,6 @@ async def upload_tasks(
 
     mini_cover_blob: Optional[tuple[str, bytes]] = None
     if msg_add_mini_program:
-        if not msg_mini_program_title.strip():
-            raise HTTPException(status_code=400, detail="已勾选添加小程序，但未填写小程序标题")
-        if not msg_mini_program_page_path.strip():
-            raise HTTPException(status_code=400, detail="已勾选添加小程序，但未填写小程序功能页面")
         if mini_program_cover is None:
             raise HTTPException(status_code=400, detail="已勾选添加小程序，但未上传小程序封面")
         b = await mini_program_cover.read()
@@ -854,6 +910,11 @@ async def upload_tasks(
         b = await step2_main_store_file.read()
         if b:
             step2_main_store_blob = (step2_main_store_file.filename or "step2_main_store.xlsx", b)
+    step2_product_blob: Optional[tuple[str, bytes]] = None
+    if step2_product_file is not None:
+        b = await step2_product_file.read()
+        if b:
+            step2_product_blob = (step2_product_file.filename or "step2_product.xlsx", b)
 
     for f in files:
         lower = f.filename.lower()
@@ -893,8 +954,20 @@ async def upload_tasks(
         if step2_main_store_blob:
             step2_store_path = save_uploaded_main_store_file(tid, step2_main_store_blob)
             inject_step2_main_store_file_to_csv(dst, step2_store_path)
+        if step2_product_blob:
+            step2_product_path = save_uploaded_main_store_file(tid, step2_product_blob)
+            inject_step2_product_file_to_csv(dst, step2_product_path)
+        plan_name_display, channel_display = summarize_csv_meta(dst)
         op = operator.strip() or os.getenv("USER") or getpass.getuser() or "unknown"
-        task = Task(id=tid, filename=f.filename, file_path=str(dst), options=options, operator=op)
+        task = Task(
+            id=tid,
+            filename=f.filename,
+            file_path=str(dst),
+            options=options,
+            operator=op,
+            plan_name_display=plan_name_display,
+            channel_display=channel_display,
+        )
         await runner.add_task(task)
         created.append(task.to_dict())
     return JSONResponse({"created": created})
@@ -935,7 +1008,7 @@ UI_HTML = """
     }
     body{font-family:"PingFang SC","Microsoft YaHei",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:var(--bg);color:var(--text);font-size:var(--font)}
     .wrap{max-width:1480px;margin:18px auto;padding:0 16px}
-    .layout{display:grid;grid-template-columns:1.5fr .5fr;gap:12px;align-items:start}
+    .layout{display:grid;grid-template-columns:1fr;gap:12px;align-items:start}
     .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
     .section-title{font-size:14px;font-weight:700;color:#0f172a;margin:0 0 10px 0;display:flex;align-items:center;gap:8px}
@@ -962,10 +1035,11 @@ UI_HTML = """
     .adv-panel.open{display:block}
     .tiny{font-size:12px;color:var(--hint)}
     .channel-grid{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:10px}
-    .channel-item{display:flex;align-items:flex-start;gap:8px;border:1px solid #d1d5db;border-radius:10px;padding:10px;background:#fff}
+    .channel-item{display:flex;align-items:center;gap:8px;border:1px solid #d1d5db;border-radius:10px;padding:8px 10px;background:#fff}
     .channel-item input{margin-top:2px}
+    .channel-icon{font-size:16px}
     .channel-main{font-size:13px;color:#111827;font-weight:600}
-    .channel-desc{font-size:12px;color:#6b7280;margin-top:2px;line-height:1.45}
+    .channel-strong{font-weight:700;color:#0f766e}
     .material-panel{border:1px solid #d9e2ec;background:#fcfdff;border-radius:10px;padding:10px}
     .material-title{font-size:13px;font-weight:600;color:#0f172a;margin-bottom:8px}
     .hidden{display:none !important}
@@ -982,13 +1056,16 @@ UI_HTML = """
     .status-running{color:#2563eb}
     .status-success{color:#059669}
     .status-failed{color:#dc2626}
-    #logs{background:#0b1020;color:#dbeafe;height:calc(100vh - 180px);overflow:auto;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px}
-    .right-sticky{position:sticky;top:12px}
+    #logs{background:#0b1020;color:#dbeafe;height:58vh;overflow:auto;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+    .file-hero{background:#ecfeff;border:1px solid #99f6e4;border-radius:10px;padding:10px 12px}
+    .primary-actions button{height:42px;padding:0 18px;font-size:14px;font-weight:700}
+    .log-modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;align-items:center;justify-content:center;z-index:9999}
+    .log-modal.open{display:flex}
+    .log-panel{width:min(1200px,92vw);max-height:88vh;background:#fff;border-radius:12px;border:1px solid #d1d5db;padding:12px}
+    .log-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
     .link-pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#ecfeff;color:#0f766e;border:1px solid #a5f3fc;font-size:12px;text-decoration:none}
     @media (max-width: 1100px){
-      .layout{grid-template-columns:1fr}
       #logs{height:360px}
-      .right-sticky{position:static}
       .form-grid{grid-template-columns:1fr}
       .label{min-width:84px}
       .channel-grid{grid-template-columns:1fr}
@@ -1004,7 +1081,7 @@ UI_HTML = """
         <div class="step-box">
           <div class="section-title"><span class="step-no">1</span>第1步：导入与基础配置</div>
           <div class="form-grid">
-            <div class="field full between">
+            <div class="field full between file-hero">
               <div class="row">
                 <span class="label">任务文件</span>
                 <input id="files" type="file" multiple accept=".csv,.xlsx"/>
@@ -1012,15 +1089,17 @@ UI_HTML = """
               <button id="advToggleBtn" type="button" class="adv-toggle" onclick="toggleAdvancedConfig()">高级配置（展开）</button>
             </div>
             <div class="field full">
-              <span class="label">创建链接</span>
-              <input id="create_url" type="text" style="width:min(860px,100%)" placeholder="可选：手动填写创建链接；不填则按渠道自动匹配"/>
-            </div>
-            <div class="field full">
-              <span class="label">第2步主消费门店文件</span>
+              <span class="label">目标门店</span>
               <input id="step2_main_store_file" type="file" accept=".xlsx,.xls"/>
+              <span class="tiny">应用人群条件入会/主消费/至尊升级等指定门店上传</span>
             </div>
             <div class="field full">
-              <span class="hint" id="create_url_hint">自动匹配：短信=599702746907561984；会员通-发客户消息=594094287227023360；会员通-发客户朋友圈=599702926159527936；短信+会员通-发客户消息=600035736992907264</span>
+              <span class="label">目标商品</span>
+              <input id="step2_product_file" type="file" accept=".xlsx,.xls"/>
+              <span class="tiny">应用人群条件购买商品*数量标签</span>
+            </div>
+            <div class="field full">
+              <label class="inline-check"><input id="executor_store_upload" type="checkbox" checked/> 执行员工-指定门店（默认开启）</label>
             </div>
           </div>
           <div id="advancedConfig" class="adv-panel">
@@ -1056,28 +1135,22 @@ UI_HTML = """
             <div class="channel-grid">
               <label class="channel-item">
                 <input class="step3_channel" type="checkbox" value="短信"/>
-                <span>
-                  <div class="channel-main">短信</div>
-                  <div class="channel-desc">填写短信内容。</div>
-                </span>
+                <span class="channel-icon">💬</span>
+                <span><div class="channel-main">短信</div></span>
               </label>
               <label class="channel-item">
                 <input class="step3_channel" type="checkbox" value="会员通-发客户消息"/>
-                <span>
-                  <div class="channel-main">会员通-发客户消息</div>
-                  <div class="channel-desc">填写结束时间、执行员工、发送内容，可选小程序、上传门店。</div>
-                </span>
+                <span class="channel-icon">👥</span>
+                <span><div class="channel-main">会员通-发客户消息</div></span>
               </label>
               <label class="channel-item">
                 <input class="step3_channel" type="checkbox" value="会员通-发客户朋友圈"/>
-                <span>
-                  <div class="channel-main">会员通-发客户朋友圈</div>
-                  <div class="channel-desc">填写结束时间、执行员工、发送内容，可选上传图片、上传门店。</div>
-                </span>
+                <span class="channel-icon">🖼️</span>
+                <span><div class="channel-main">会员通-发客户朋友圈</div></span>
               </label>
             </div>
             <div style="margin-top:10px">
-              <label class="inline-check"><input id="executor_include_franchise" type="checkbox"/> 执行员工包含加盟区域（自动同步勾选“xx加盟”节点）</label>
+              <label class="inline-check channel-strong"><input id="executor_include_franchise" type="checkbox" checked/> 执行员工包含加盟区域（自动同步勾选“xx加盟”节点）</label>
               <div class="tiny" style="margin-top:4px">示例：执行员工=广佛省区，勾选后会自动追加广佛省区加盟；执行员工=大郑州营运区，勾选后自动追加大郑州营运区加盟。</div>
             </div>
           </div>
@@ -1096,15 +1169,8 @@ UI_HTML = """
             <div id="materialMiniProgram" class="field vertical hidden material-panel">
               <div class="material-title">会员通消息-添加小程序</div>
               <label class="inline-check"><input id="msg_add_mini_program" type="checkbox"/> 启用小程序配置</label>
-              <div class="row">
-                <label><span class="label" style="min-width:42px">名称</span><input id="msg_mini_program_name" value="大参林健康" style="width:140px"/></label>
-                <label><span class="label" style="min-width:42px">标题</span><input id="msg_mini_program_title" placeholder="请输入标题" style="width:190px"/></label>
-              </div>
-              <div class="row">
-                <label><span class="label" style="min-width:42px">链接</span><input id="msg_mini_program_page_path" placeholder="请输入链接" style="width:190px"/></label>
-                <label><span class="label" style="min-width:42px">封面</span><input id="mini_program_cover" type="file" accept=".jpg,.jpeg,.png"/></label>
-              </div>
-              <span class="tiny">仅当选择“会员通-发客户消息”时展示。启用后请完整填写标题、链接并上传封面。</span>
+              <label><span class="label" style="min-width:42px">封面</span><input id="mini_program_cover" type="file" accept=".jpg,.jpeg,.png"/></label>
+              <span class="tiny">仅保留封面上传；名称/标题/链接请在任务文件中通过字段“1对1-小程序名称/标题/链接”维护。</span>
             </div>
             <div id="materialStoreFile" class="field vertical hidden material-panel">
               <div class="material-title">上传门店（可选）</div>
@@ -1117,32 +1183,34 @@ UI_HTML = """
         </div>
 
         <div class="section-title">执行动作</div>
-        <div class="actions">
+        <div class="actions primary-actions">
           <button onclick="upload()">上传并开始执行</button>
           <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
           <a class="link-pill" href="/api/template/xlsx">下载Excel模板</a>
           <a class="link-pill" href="/api/template/csv">下载CSV模板(防乱码)</a>
         </div>
-        <div class="tip" style="margin-top:8px">说明: 支持上传 CSV / XLSX。下载模板为中文表头，便于业务填写；上传时系统会自动识别中文表头并转换为脚本字段。营销主题支持多选，多个值请用“、/，/,/|”分隔（示例：其他、26年3月积分换券）。Windows Excel 如遇 CSV 乱码，请优先下载“Excel模板”或“CSV模板(UTF-8 BOM)”。如需第2步配置“主消费门店”，可在上方上传门店文件（xlsx/xls），系统会自动注入并在第2步弹窗执行“选择数据->上传文件”。如勾选“朋友圈上传图片”，请在本页面选择图片文件（最多9张，jpg/png且<10MB），系统会自动写入任务CSV并按顺序上传。如勾选“会员通消息-添加小程序”，请填写标题、链接并上传封面，系统会自动注入到对应渠道行。如勾选“上传门店”，请选择本地 xlsx/xls 文件，系统会注入到会员通相关渠道行。</div>
+        <div class="tip" style="margin-top:8px">重点：上传文件支持 CSV/XLSX（中文表头可自动识别）；若 Excel 打开 CSV 乱码，请优先下载 Excel 模板。第2步“目标门店/目标商品”支持 xlsx/xls 上传；朋友圈图片最多9张（jpg/png，<10MB）。</div>
       </div>
 
       <div class="card">
         <h3 style="margin:0 0 8px 0">任务列表</h3>
         <table>
           <thead><tr>
-            <th>文件</th><th>状态</th><th>进度</th><th>成功/失败</th><th>开始</th><th>完成</th><th>预计完成</th><th>耗时(s)</th><th>复核链接</th><th>操作</th>
+            <th>文件</th><th>计划名称</th><th>发送渠道</th><th>状态</th><th>进度</th><th>成功/失败</th><th>开始</th><th>完成</th><th>耗时(s)</th><th>操作</th>
           </tr></thead>
           <tbody id="taskRows"></tbody>
         </table>
       </div>
     </div>
-    <div class="right-sticky">
-      <div class="card">
-        <h3 style="margin:0 0 8px 0">执行日志（实时）</h3>
-        <div id="logTitle" style="margin-bottom:8px;color:#6b7280">未选中任务</div>
-        <div id="logs"></div>
-      </div>
+  </div>
+</div>
+<div id="logModal" class="log-modal" onclick="closeLogModal(event)">
+  <div class="log-panel" onclick="event.stopPropagation()">
+    <div class="log-head">
+      <div id="logTitle" style="color:#6b7280">未选中任务</div>
+      <button class="secondary" onclick="closeLogModal()">关闭</button>
     </div>
+    <div id="logs"></div>
   </div>
 </div>
 <script>
@@ -1182,32 +1250,6 @@ function selectedChannels(){
   return Array.from(document.querySelectorAll('.step3_channel:checked')).map(el => el.value);
 }
 
-function updateCreateUrlHint(){
-  const channels = selectedChannels();
-  const hintEl = document.getElementById('create_url_hint');
-  if(!hintEl) return;
-  const hasSms = channels.includes('短信');
-  const hasMsg = channels.includes('会员通-发客户消息');
-  const hasMoments = channels.includes('会员通-发客户朋友圈');
-  if(hasSms && hasMsg){
-    hintEl.textContent = '当前自动匹配链接：短信 + 会员通-发客户消息 -> useId=600035736992907264（如需可手动覆盖）';
-    return;
-  }
-  if(hasSms && !hasMsg && !hasMoments){
-    hintEl.textContent = '当前自动匹配链接：短信 -> useId=599702746907561984（如需可手动覆盖）';
-    return;
-  }
-  if(hasMsg && !hasSms && !hasMoments){
-    hintEl.textContent = '当前自动匹配链接：会员通-发客户消息 -> useId=594094287227023360（如需可手动覆盖）';
-    return;
-  }
-  if(hasMoments && !hasSms && !hasMsg){
-    hintEl.textContent = '当前自动匹配链接：会员通-发客户朋友圈 -> useId=599702926159527936（如需可手动覆盖）';
-    return;
-  }
-  hintEl.textContent = '自动匹配：短信=599702746907561984；会员通-发客户消息=594094287227023360；会员通-发客户朋友圈=599702926159527936；短信+会员通-发客户消息=600035736992907264';
-}
-
 function syncChannelMaterials(){
   const channels = selectedChannels();
   const showMoments = channels.includes('会员通-发客户朋友圈');
@@ -1228,12 +1270,8 @@ function syncChannelMaterials(){
   }
   if(!showMsg){
     const chk = document.getElementById('msg_add_mini_program');
-    const title = document.getElementById('msg_mini_program_title');
-    const page = document.getElementById('msg_mini_program_page_path');
     const cover = document.getElementById('mini_program_cover');
     if(chk) chk.checked = false;
-    if(title) title.value = '';
-    if(page) page.value = '';
     if(cover) cover.value = '';
   }
   if(!showStore){
@@ -1243,7 +1281,12 @@ function syncChannelMaterials(){
     if(file) file.value = '';
   }
   if(emptyTip) emptyTip.style.display = (showMoments || showMsg || showStore) ? 'none' : 'block';
-  updateCreateUrlHint();
+  // “执行员工-指定门店”控制第3步上传门店开关（默认开启）
+  const executorStore = document.getElementById('executor_store_upload');
+  const uploadStores = document.getElementById('upload_stores');
+  if(executorStore && uploadStores){
+    uploadStores.checked = !!executorStore.checked;
+  }
   saveUiPrefs();
 }
 
@@ -1270,9 +1313,10 @@ async function upload(){
   fd.append('start', '');
   fd.append('end', '');
   fd.append('hold_seconds', document.getElementById('hold_seconds').value || '2');
-  fd.append('create_url', document.getElementById('create_url').value || '');
   const step2MainStoreFile = document.getElementById('step2_main_store_file').files[0];
   if(step2MainStoreFile){ fd.append('step2_main_store_file', step2MainStoreFile); }
+  const step2ProductFile = document.getElementById('step2_product_file').files[0];
+  if(step2ProductFile){ fd.append('step2_product_file', step2ProductFile); }
   const channels = selectedChannels();
   if(!channels.length){ alert('请至少选择一个发送渠道'); return; }
   fd.append('step3_channels', channels.join(','));
@@ -1280,13 +1324,11 @@ async function upload(){
   fd.append('moments_add_images', document.getElementById('moments_add_images').checked ? 'true' : 'false');
   const momentImgs = document.getElementById('moments_images').files;
   for(const img of momentImgs){ fd.append('moments_images', img); }
-  fd.append('upload_stores', document.getElementById('upload_stores').checked ? 'true' : 'false');
+  const uploadStoreEnabled = !!document.getElementById('executor_store_upload')?.checked;
+  fd.append('upload_stores', uploadStoreEnabled ? 'true' : 'false');
   const storeFile = document.getElementById('store_file').files[0];
   if(storeFile){ fd.append('store_file', storeFile); }
   fd.append('msg_add_mini_program', document.getElementById('msg_add_mini_program').checked ? 'true' : 'false');
-  fd.append('msg_mini_program_name', document.getElementById('msg_mini_program_name').value || '大参林健康');
-  fd.append('msg_mini_program_title', document.getElementById('msg_mini_program_title').value || '');
-  fd.append('msg_mini_program_page_path', document.getElementById('msg_mini_program_page_path').value || '');
   const miniCover = document.getElementById('mini_program_cover').files[0];
   if(miniCover){ fd.append('mini_program_cover', miniCover); }
   saveUiPrefs();
@@ -1307,15 +1349,6 @@ async function retryFailed(){
 
 function fmtStatus(s){return '<span class="status-'+s+'">'+s+'</span>';}
 
-function renderReviewLink(task){
-  if(task.latest_link){
-    const label = (task.latest_link.includes('#/marketingPlan/viewPlan?') || task.latest_link.includes('#/marketingPlan/editPlan?'))
-      ? '打开复核页' : '打开生成页';
-    return `<a class="link-pill" href="${task.latest_link}" target="_blank">${label}</a>`;
-  }
-  return '<span class="hint">待生成</span>';
-}
-
 function renderFileLink(task){
   return `<a class="link-pill" href="/api/tasks/${task.id}/file">下载CSV</a>`;
 }
@@ -1324,17 +1357,17 @@ function renderTasks(rows){
   const tbody = document.getElementById('taskRows');
   tbody.innerHTML = rows.map(t => `
     <tr>
-      <td>${esc(t.filename)}<div style="margin-top:4px">${renderFileLink(t)}</div></td>
+      <td><div class="file-hero">${esc(t.filename)}</div><div style="margin-top:4px">${renderFileLink(t)}</div></td>
+      <td>${esc(t.plan_name || '-')}</td>
+      <td>${esc(t.send_channels || '-')}</td>
       <td>${fmtStatus(t.status)}</td>
       <td>${t.completed_plans}/${t.total_plans || '-'}</td>
       <td>${t.success_count}/${t.fail_count}</td>
       <td>${esc(t.started_at || '-')}</td>
       <td>${esc(t.ended_at || '-')}</td>
-      <td>${esc(t.eta || '-')}</td>
       <td>${t.duration_sec ? t.duration_sec.toFixed(1) : '-'}</td>
-      <td>${renderReviewLink(t)}</td>
       <td>
-        <button onclick="selectTask('${t.id}')">日志</button>
+        <button onclick="openLogModal('${t.id}')">日志</button>
         ${t.status === 'failed' ? `<button class="secondary" onclick="retryTask('${t.id}')">重试</button>` : ''}
       </td>
     </tr>
@@ -1372,6 +1405,18 @@ async function refreshTasks(){
     }
   }
   renderTasks(rows);
+}
+
+function openLogModal(id){
+  const m = document.getElementById('logModal');
+  if(m) m.classList.add('open');
+  return selectTask(id);
+}
+
+function closeLogModal(evt){
+  if(evt && evt.target && evt.target.id !== 'logModal') return;
+  const m = document.getElementById('logModal');
+  if(m) m.classList.remove('open');
 }
 
 async function selectTask(id){
@@ -1422,15 +1467,11 @@ function saveUiPrefs(){
     strict_step2: !!document.getElementById('strict_step2')?.checked,
     concurrent: document.getElementById('concurrent')?.value || '1',
     hold_seconds: document.getElementById('hold_seconds')?.value || '2',
-    create_url: document.getElementById('create_url')?.value || '',
     channels: selectedChannels(),
     executor_include_franchise: !!document.getElementById('executor_include_franchise')?.checked,
+    executor_store_upload: !!document.getElementById('executor_store_upload')?.checked,
     moments_add_images: !!document.getElementById('moments_add_images')?.checked,
-    upload_stores: !!document.getElementById('upload_stores')?.checked,
     msg_add_mini_program: !!document.getElementById('msg_add_mini_program')?.checked,
-    msg_mini_program_name: document.getElementById('msg_mini_program_name')?.value || '大参林健康',
-    msg_mini_program_title: document.getElementById('msg_mini_program_title')?.value || '',
-    msg_mini_program_page_path: document.getElementById('msg_mini_program_page_path')?.value || '',
     advanced_open: document.getElementById('advancedConfig')?.classList.contains('open') || false
   };
   saveLocal(LS_KEYS.prefs, prefs);
@@ -1444,16 +1485,12 @@ function restoreUiFromCache(){
     if(document.getElementById('strict_step2')) document.getElementById('strict_step2').checked = !!prefs.strict_step2;
     if(document.getElementById('concurrent')) document.getElementById('concurrent').value = prefs.concurrent || '1';
     if(document.getElementById('hold_seconds')) document.getElementById('hold_seconds').value = prefs.hold_seconds || '2';
-    if(document.getElementById('create_url')) document.getElementById('create_url').value = prefs.create_url || '';
     const channels = new Set(prefs.channels || []);
     document.querySelectorAll('.step3_channel').forEach(el => { el.checked = channels.has(el.value); });
     if(document.getElementById('executor_include_franchise')) document.getElementById('executor_include_franchise').checked = !!prefs.executor_include_franchise;
+    if(document.getElementById('executor_store_upload')) document.getElementById('executor_store_upload').checked = (prefs.executor_store_upload !== false);
     if(document.getElementById('moments_add_images')) document.getElementById('moments_add_images').checked = !!prefs.moments_add_images;
-    if(document.getElementById('upload_stores')) document.getElementById('upload_stores').checked = !!prefs.upload_stores;
     if(document.getElementById('msg_add_mini_program')) document.getElementById('msg_add_mini_program').checked = !!prefs.msg_add_mini_program;
-    if(document.getElementById('msg_mini_program_name')) document.getElementById('msg_mini_program_name').value = prefs.msg_mini_program_name || '大参林健康';
-    if(document.getElementById('msg_mini_program_title')) document.getElementById('msg_mini_program_title').value = prefs.msg_mini_program_title || '';
-    if(document.getElementById('msg_mini_program_page_path')) document.getElementById('msg_mini_program_page_path').value = prefs.msg_mini_program_page_path || '';
     if(prefs.advanced_open){
       const panel = document.getElementById('advancedConfig');
       const btn = document.getElementById('advToggleBtn');
@@ -1477,7 +1514,7 @@ function restoreUiFromCache(){
 
 setInterval(async ()=>{ await refreshTasks(); await pollLogs(); }, 2000);
 document.querySelectorAll('.step3_channel').forEach(el => el.addEventListener('change', syncChannelMaterials));
-['connect_cdp','cdp_endpoint','strict_step2','concurrent','hold_seconds','create_url','executor_include_franchise','moments_add_images','upload_stores','msg_add_mini_program','msg_mini_program_name','msg_mini_program_title','msg_mini_program_page_path']
+['connect_cdp','cdp_endpoint','strict_step2','concurrent','hold_seconds','executor_include_franchise','executor_store_upload','moments_add_images','msg_add_mini_program']
   .forEach(id => {
     const el = document.getElementById(id);
     if(el){ el.addEventListener('change', saveUiPrefs); el.addEventListener('input', saveUiPrefs); }
