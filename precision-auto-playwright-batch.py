@@ -3630,11 +3630,24 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                                     || (t.includes('商品编码') && t.includes('商品名'))
                                                 );
                                         };
+                                        const isSelectDataUploadModal = (m) => {
+                                            if (!m) return false;
+                                            const t = norm(m.textContent || '');
+                                            return t.includes('选择数据') && t.includes('上传文件');
+                                        };
                                         // 清理旧标记，避免串到其它“选择数据”弹窗
                                         Array.from(document.querySelectorAll('[data-step2-product-modal=\"1\"]')).forEach(n => n.removeAttribute('data-step2-product-modal'));
                                         const visibleModals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
                                         let openedModal = visibleModals.find(isProductPicker);
                                         let source = 'strict_product_picker';
+                                        // 兜底：严格匹配不到时，使用当前“最新可见”的选择数据上传弹窗（避免直接跳过）
+                                        if (!openedModal) {
+                                            const candidates = visibleModals.filter(isSelectDataUploadModal);
+                                            if (candidates.length > 0) {
+                                                openedModal = candidates[candidates.length - 1];
+                                                source = 'latest_select_data_modal';
+                                            }
+                                        }
                                         if (openedModal) openedModal.setAttribute('data-step2-product-modal', '1');
                                         return { ok: !!openedModal, source };
                                     }""")
