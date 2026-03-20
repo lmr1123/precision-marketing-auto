@@ -3568,26 +3568,44 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         if (typeof el.click === 'function') el.click();
                                         return true;
                                     };
+                                    const pickBtnFromRow = (row) => {
+                                        if (!row || !isVisible(row)) return null;
+                                        const btns = Array.from(row.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
+                                            .filter(isVisible)
+                                            .filter(b => norm(b.textContent || '').includes('选择数据'));
+                                        return btns.length ? btns[0] : null;
+                                    };
                                     // 清理历史标记
                                     Array.from(document.querySelectorAll('[data-step2-product-modal="1"]')).forEach(n => n.removeAttribute('data-step2-product-modal'));
-                                    // 优先：按 title 精准命中“商品编码”行
-                                    const preciseRows = Array.from(document.querySelectorAll('.event-row, .condition, .ant-form-item, .ant-row, div')).filter(isVisible);
-                                    for (const row of preciseRows) {
-                                        if (row.querySelector('.ant-select-selection-item[title="商品编码"], [title="商品编码"]')) {
-                                            const btn = Array.from(row.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
-                                                .find(b => norm(b.textContent || '').includes('选择数据'));
-                                            if (btn) return { opened: fireClick(btn), source: 'product_row_title' };
-                                        }
+                                    // 优先1：从 title="商品编码" 节点反向找最近行，避免误点到“主消费门店”行
+                                    const titleNodes = Array.from(document.querySelectorAll('.ant-select-selection-item[title="商品编码"], [title="商品编码"]'))
+                                        .filter(isVisible);
+                                    const exactRows = [];
+                                    for (const node of titleNodes) {
+                                        const row = node.closest('.event-row, .condition, .ant-form-item, .ant-row');
+                                        if (row && isVisible(row) && !exactRows.includes(row)) exactRows.push(row);
                                     }
-                                    // 兜底：文本命中“商品编码”的行
-                                    for (const row of preciseRows) {
+                                    // 先点“已选：0”的商品编码行，避免重复点到已选392的门店行
+                                    for (const row of exactRows) {
+                                        const txt = (row.textContent || '').trim();
+                                        if (!/已选[:：]\s*0/.test(txt)) continue;
+                                        const btn = pickBtnFromRow(row);
+                                        if (btn) return { opened: fireClick(btn), source: 'product_row_title_selected0' };
+                                    }
+                                    // 再点任意商品编码行
+                                    for (const row of exactRows) {
+                                        const btn = pickBtnFromRow(row);
+                                        if (btn) return { opened: fireClick(btn), source: 'product_row_title' };
+                                    }
+                                    // 优先2：文本命中“商品编码”的行（仍限定行级别）
+                                    const rows = Array.from(document.querySelectorAll('.event-row, .condition, .ant-form-item, .ant-row')).filter(isVisible);
+                                    for (const row of rows) {
                                         const txt = norm(row.textContent || '');
                                         if (!txt.includes('商品编码')) continue;
-                                        const btn = Array.from(row.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
-                                            .find(b => norm(b.textContent || '').includes('选择数据'));
-                                        if (btn) return { opened: fireClick(btn), source: 'product_row_button' };
+                                        const btn = pickBtnFromRow(row);
+                                        if (btn) return { opened: fireClick(btn), source: 'product_row_text' };
                                     }
-                                    return { opened: false, source: 'not_found' };
+                                    return { opened: false, source: 'product_row_not_found' };
                                 }""")
                                 if not open_product_picker_info or (not open_product_picker_info.get("opened")):
                                     print("      ⚠️ 未找到商品编码“选择数据”按钮")
