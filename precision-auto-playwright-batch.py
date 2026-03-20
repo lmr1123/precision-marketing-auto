@@ -3593,7 +3593,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     print("      ⚠️ 未找到商品编码“选择数据”按钮")
                                 else:
                                     print(f"      🧪 商品编码选择器来源: {open_product_picker_info.get('source','unknown')}")
-                                    # 等待“选择数据”弹窗出现（不点击上传按钮，避免系统文件夹）
+                                    # 等待“商品编码”弹窗出现（按表头识别，不点击上传按钮，避免系统文件夹）
                                     modal_pick_info = {"ok": False, "source": "wait_visible_modal"}
                                     for _ in range(20):
                                         modal_pick_info = await frame.evaluate("""() => {
@@ -3605,14 +3605,23 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             };
                                             const norm = (s) => (s || '').replace(/\\s+/g, '');
                                             const visibleModals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
+                                            const hasHeader = (modal, key) => {
+                                                if (!modal || !key) return false;
+                                                const nodes = Array.from(modal.querySelectorAll('th, td, label, span, div'));
+                                                return nodes.some(n => norm(n.textContent || '').includes(key));
+                                            };
                                             const candidates = visibleModals.filter(m => {
                                                 const t = norm(m.textContent || '');
-                                                return t.includes('选择数据') && t.includes('上传文件');
+                                                if (!(t.includes('选择数据') && t.includes('上传文件'))) return false;
+                                                // 商品编码弹窗：必须出现“商品编码”表头/字段；并排除“门店编码”弹窗
+                                                const isProduct = hasHeader(m, '商品编码');
+                                                const isStore = hasHeader(m, '门店编码');
+                                                return isProduct && !isStore;
                                             });
                                             if (!candidates.length) return { ok: false, source: 'wait_visible_modal' };
                                             const modal = candidates[candidates.length - 1];
                                             modal.setAttribute('data-step2-product-modal', '1');
-                                            return { ok: true, source: 'latest_select_data_modal' };
+                                            return { ok: true, source: 'product_header_modal' };
                                         }""")
                                         if modal_pick_info.get("ok"):
                                             break
@@ -3620,7 +3629,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
 
                                     product_modal_count = await frame.locator('[data-step2-product-modal="1"]').count()
                                     if product_modal_count <= 0:
-                                        print("      ⚠️ 未识别到商品编码上传弹窗")
+                                        print("      ⚠️ 未识别到商品编码上传弹窗（表头未命中“商品编码”）")
                                     else:
                                         print(f"      🧪 商品编码弹窗识别: {modal_pick_info.get('source','unknown')}")
                                         uploaded_product = False
