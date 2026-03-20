@@ -79,6 +79,7 @@ DEFAULT_PLAN = {
     "main_operating_area": "广佛省区",
     "main_store_file_path": "",
     "step2_store_file_path": "",
+    "step2_product_file_path": "",
     "coupon_ids": "1-20000005475",
     "sms_content": "短信内容测试",
     "step3_end_time": "2026-03-27 08:00",
@@ -133,6 +134,7 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "main_operating_area": row.get("main_operating_area", "").strip(),
                 "main_store_file_path": row.get("main_store_file_path", "").strip(),
                 "step2_store_file_path": row.get("step2_store_file_path", "").strip(),
+                "step2_product_file_path": row.get("step2_product_file_path", "").strip(),
                 "coupon_ids": row.get("coupon_ids", "").strip(),
                 "sms_content": row.get("sms_content", "").strip(),
                 "step3_end_time": row.get("step3_end_time", "").strip(),
@@ -1208,12 +1210,11 @@ async def fill_step3_message_mini_program(
             return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
         };
         const norm = (s) => (s || '').replace(/\\s+/g, '');
-        const fireClick = (el) => {
-            if (!el) return false;
-            ['pointerdown','mousedown','mouseup','click'].forEach(t => {
-                el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
-            });
-            if (typeof el.click === 'function') el.click();
+        const markOnly = (btn) => {
+            if (!btn) return false;
+            btn.setAttribute('data-step3-store-trigger', '1');
+            const root = btn.closest('.item, .el-form-item, .ant-form-item, .channel, .module, .card') || btn.parentElement || btn;
+            if (root) root.setAttribute('data-step3-store-root', '1');
             return true;
         };
 
@@ -1507,12 +1508,11 @@ async def upload_step3_store_file(page, raw_path: str):
             return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
         };
         const norm = (s) => (s || '').replace(/\\s+/g, '');
-        const fireClick = (el) => {
+        const markOnly = (el) => {
             if (!el) return false;
-            ['pointerdown','mousedown','mouseup','click'].forEach(t => {
-                el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
-            });
-            if (typeof el.click === 'function') el.click();
+            el.setAttribute('data-step3-store-trigger', '1');
+            const root = el.closest('.item, .el-form-item, .ant-form-item, .channel, .module, .card') || el.parentElement || el;
+            if (root) root.setAttribute('data-step3-store-root', '1');
             return true;
         };
         // 优先：定位“执行员工”字段附近的“上传门店”按钮，避免误点到其它上传入口。
@@ -1526,10 +1526,7 @@ async def upload_step3_store_file(page, raw_path: str):
             const candidates = Array.from(container.querySelectorAll('button.el-button, button, .el-button')).filter(isVisible);
             const btn = candidates.find(x => norm(x.textContent || '') === '上传门店' || norm(x.textContent || '').includes('上传门店'));
             if (!btn) continue;
-            btn.setAttribute('data-step3-store-trigger', '1');
-            const root = btn.closest('.item, .el-form-item, .ant-form-item, .channel, .module, .card') || btn.parentElement || btn;
-            if (root) root.setAttribute('data-step3-store-root', '1');
-            fireClick(btn);
+            markOnly(btn);
             return { ok: true, mode: 'near_executor' };
         }
 
@@ -1540,44 +1537,87 @@ async def upload_step3_store_file(page, raw_path: str):
             return t === '上传门店' || t.includes('上传门店');
         });
         if (!hit) return { ok: false, mode: 'not_found' };
-        hit.setAttribute('data-step3-store-trigger', '1');
-        const root = hit.closest('.item, .el-form-item, .ant-form-item, .channel, .module, .card') || hit.parentElement || hit;
-        if (root) root.setAttribute('data-step3-store-root', '1');
-        fireClick(hit);
+        markOnly(hit);
         return { ok: true, mode: 'global_button' };
     }""")
     if not locate_info or not locate_info.get("ok"):
         return False, "未找到“上传门店”入口"
 
-    trigger = page.locator('[data-step3-store-trigger="1"]').first
     uploaded = False
     try:
-        async with page.expect_file_chooser(timeout=3500) as fc_info:
-            try:
-                await trigger.click(force=True)
-            except Exception:
-                await page.evaluate("""() => {
-                    const t = document.querySelector('[data-step3-store-trigger="1"]');
-                    if (t) t.click();
-                }""")
-        chooser = await fc_info.value
-        await chooser.set_files(str(path))
-        uploaded = True
+        scoped_input = page.locator('[data-step3-store-root="1"] input[type="file"]').last
+        if await scoped_input.count() > 0:
+            await scoped_input.set_input_files(str(path))
+            uploaded = True
     except Exception:
         uploaded = False
 
     if not uploaded:
         try:
-            scoped_input = page.locator('[data-step3-store-root="1"] input[type="file"]').last
-            if await scoped_input.count() > 0:
-                await scoped_input.set_input_files(str(path))
+            # 兜底：直接全局查找 file input（不触发按钮点击，避免弹系统文件夹）
+            scoped_input2 = page.locator('input[type="file"]').last
+            if await scoped_input2.count() > 0:
+                await scoped_input2.set_input_files(str(path))
                 uploaded = True
         except Exception:
             uploaded = False
 
     if not uploaded:
         return False, f"上传门店失败: {path.name}"
-    await asyncio.sleep(0.4)
+
+    # 第3步上传门店与第2步弹窗交互不同：通常无“已选中/确认按钮”闭环。
+    # 成功判定改为：上传动作成功 + 页面未出现明显失败提示；若有成功提示或执行员工回读变化则增强判定。
+    before_exec = await page.evaluate("""() => {
+        const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
+        for (const label of labels) {
+            const txt = (label.textContent || '').replace(/\\s+/g, '');
+            if (!txt.includes('执行员工')) continue;
+            const item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
+            if (!item) continue;
+            const tags = Array.from(item.querySelectorAll('.el-tag .el-tag__content, .el-cascader__tags span'))
+                .map(n => (n.textContent || '').trim()).filter(Boolean);
+            return tags.join(' ');
+        }
+        return '';
+    }""")
+    await asyncio.sleep(1.2)
+    status_info = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        };
+        const nodes = Array.from(document.querySelectorAll('.el-message, .el-message__content, .ant-message, .ant-message-notice-content, .ant-notification-notice, [role=\"alert\"], .toast, .message'))
+            .filter(isVisible);
+        const msg = nodes.map(n => (n.textContent || '').trim()).join(' | ');
+        const norm = msg.replace(/\\s+/g, '');
+        const hasFail = /(失败|错误|异常|无效|不支持|格式|超限|不能为空|未找到|校验|请重试)/.test(norm);
+        const hasSuccess = /(成功|已上传|导入成功|上传成功)/.test(norm);
+        return { msg, hasFail, hasSuccess };
+    }""")
+    after_exec = await page.evaluate("""() => {
+        const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
+        for (const label of labels) {
+            const txt = (label.textContent || '').replace(/\\s+/g, '');
+            if (!txt.includes('执行员工')) continue;
+            const item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
+            if (!item) continue;
+            const tags = Array.from(item.querySelectorAll('.el-tag .el-tag__content, .el-cascader__tags span'))
+                .map(n => (n.textContent || '').trim()).filter(Boolean);
+            return tags.join(' ');
+        }
+        return '';
+    }""")
+    changed = (before_exec or "").strip() != (after_exec or "").strip()
+    if changed:
+        print("      🧪 上传门店回读: 执行员工标签已变化")
+    elif (status_info or {}).get("hasSuccess"):
+        print("      🧪 上传门店回读: 检测到成功提示")
+    elif (status_info or {}).get("msg"):
+        print(f"      🧪 上传门店消息: {(status_info or {}).get('msg','')}")
+    if (status_info or {}).get("hasFail"):
+        return False, f"上传门店失败提示: {(status_info or {}).get('msg','')}"
     return True, f"门店文件已上传: {path.name}"
 
 def extract_api_code_message(text: str):
@@ -2606,6 +2646,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
         "第2步-更新方式": False,
         "第2步-主消费营运区": False,
         "第2步-主消费门店": False,
+        "第2步-商品编码": False,
         "第2步-门店信息已选": False,
         "第2步-券规则ID": False,
         "第2步-预跑按钮": False,
@@ -3367,7 +3408,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 else:
                                     print(f"      🧪 门店信息选择器来源: {open_store_picker_info.get('source','unknown')}")
                                     await asyncio.sleep(1.0)
-                                    await frame.evaluate("""() => {
+                                    modal_pick_info = await frame.evaluate("""() => {
                                         const isVisible = (el) => {
                                             if (!el) return false;
                                             const s = window.getComputedStyle(el);
@@ -3394,28 +3435,30 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
 
                                     if not uploaded_store:
                                         try:
-                                            async with page.expect_file_chooser(timeout=3000) as fc_info:
-                                                await frame.evaluate("""() => {
-                                                    const isVisible = (el) => {
-                                                        if (!el) return false;
-                                                        const s = window.getComputedStyle(el);
-                                                        const r = el.getBoundingClientRect();
-                                                        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-                                                    };
-                                                    const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                                    const modal = document.querySelector('[data-step2-store-modal=\"1\"]');
-                                                    const scope = modal || document;
-                                                    const btn = Array.from(scope.querySelectorAll('button.ant-btn'))
-                                                        .filter(isVisible)
-                                                        .find(b => {
-                                                            const t = norm(b.textContent || '');
-                                                            return t === '上传文件' || t.includes('上传文件');
-                                                        });
-                                                    if (btn) btn.click();
-                                                }""")
-                                            chooser = await fc_info.value
-                                            await chooser.set_files(str(store_path))
-                                            uploaded_store = True
+                                            # 兜底：点击“上传文件”后重取 input[type=file]，仅走 set_input_files，不触发系统文件夹
+                                            await frame.evaluate("""() => {
+                                                const isVisible = (el) => {
+                                                    if (!el) return false;
+                                                    const s = window.getComputedStyle(el);
+                                                    const r = el.getBoundingClientRect();
+                                                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                                };
+                                                const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                                const modal = document.querySelector('[data-step2-store-modal=\"1\"]');
+                                                const scope = modal || document;
+                                                const btn = Array.from(scope.querySelectorAll('button.ant-btn'))
+                                                    .filter(isVisible)
+                                                    .find(b => {
+                                                        const t = norm(b.textContent || '');
+                                                        return t === '上传文件' || t.includes('上传文件');
+                                                    });
+                                                if (btn) btn.click();
+                                            }""")
+                                            await asyncio.sleep(0.4)
+                                            file_input2 = frame.locator('[data-step2-store-modal=\"1\"] input[type=\"file\"]').last
+                                            if await file_input2.count() > 0:
+                                                await file_input2.set_input_files(str(store_path))
+                                                uploaded_store = True
                                         except Exception:
                                             uploaded_store = False
 
@@ -3495,6 +3538,264 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                             print(f"      ⚠️ 第2步门店信息操作失败: {e}")
                     else:
                         results["第2步-主消费门店"] = True
+
+                    # 第2步：商品编码上传（选择数据 -> 上传文件，非必填）
+                    step2_product_file_path = (data.get("step2_product_file_path", "") or "").strip()
+                    if step2_product_file_path:
+                        print(f"   🧾 第2步商品编码文件: {step2_product_file_path}")
+                        try:
+                            product_path = Path(os.path.expanduser(step2_product_file_path))
+                            if not product_path.is_absolute():
+                                product_path = Path.cwd() / product_path
+                            if (not product_path.exists()) or product_path.suffix.lower() not in {".xlsx", ".xls"}:
+                                print(f"      ⚠️ 第2步商品编码文件无效: {product_path}")
+                            else:
+                                open_product_picker_info = await frame.evaluate("""() => {
+                                    const isVisible = (el) => {
+                                        if (!el) return false;
+                                        const s = window.getComputedStyle(el);
+                                        const r = el.getBoundingClientRect();
+                                        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                    };
+                                    const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                    const isProductPicker = (m) => {
+                                        if (!m) return false;
+                                        const t = norm(m.textContent || '');
+                                        // 商品编码弹窗典型字段：商品编码/大类/中类/小类/商品名
+                                        return t.includes('选择数据')
+                                            && t.includes('上传文件')
+                                            && (
+                                                (t.includes('商品编码') && t.includes('大类') && t.includes('小类'))
+                                                || (t.includes('商品编码') && t.includes('商品名'))
+                                            );
+                                    };
+                                    const fireClick = (el) => {
+                                        if (!el) return false;
+                                        ['pointerdown','mousedown','mouseup','click'].forEach(t => {
+                                            el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+                                        });
+                                        if (typeof el.click === 'function') el.click();
+                                        return true;
+                                    };
+                                    const visibleModals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
+                                    const openedModal = visibleModals.find(isProductPicker);
+                                    if (openedModal) {
+                                        openedModal.setAttribute('data-step2-product-modal', '1');
+                                        return { opened: true, source: 'already_open' };
+                                    }
+                                    // 优先：按 title 精准命中“商品编码”行
+                                    const preciseRows = Array.from(document.querySelectorAll('.event-row, .condition, .ant-form-item, .ant-row, div')).filter(isVisible);
+                                    for (const row of preciseRows) {
+                                        if (row.querySelector('.ant-select-selection-item[title="商品编码"], [title="商品编码"]')) {
+                                            const btn = Array.from(row.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
+                                                .find(b => norm(b.textContent || '').includes('选择数据'));
+                                            if (btn) return { opened: fireClick(btn), source: 'product_row_title' };
+                                        }
+                                    }
+                                    const rows = Array.from(document.querySelectorAll('.condition, .event-row, .ant-form-item, .ant-row, div')).filter(isVisible);
+                                    for (const row of rows) {
+                                        const txt = norm(row.textContent || '');
+                                        if (!txt.includes('商品编码')) continue;
+                                        const btn = Array.from(row.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
+                                            .find(b => norm(b.textContent || '').includes('选择数据'));
+                                        if (btn) return { opened: fireClick(btn), source: 'product_row_button' };
+                                    }
+                                    // 兜底：如果只有一个“上传文件”数据弹窗入口，也尝试点第一个“选择数据”
+                                    const firstBtn = Array.from(document.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
+                                        .filter(isVisible)
+                                        .find(b => norm(b.textContent || '').includes('选择数据'));
+                                    if (firstBtn) return { opened: fireClick(firstBtn), source: 'first_select_data' };
+                                    return { opened: false, source: 'not_found' };
+                                }""")
+                                if not open_product_picker_info or (not open_product_picker_info.get("opened")):
+                                    print("      ⚠️ 未找到商品编码“选择数据”按钮")
+                                else:
+                                    print(f"      🧪 商品编码选择器来源: {open_product_picker_info.get('source','unknown')}")
+                                    await asyncio.sleep(1.0)
+                                    modal_pick_info = await frame.evaluate("""() => {
+                                        const isVisible = (el) => {
+                                            if (!el) return false;
+                                            const s = window.getComputedStyle(el);
+                                            const r = el.getBoundingClientRect();
+                                            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                        };
+                                        const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                        const isProductPicker = (m) => {
+                                            if (!m) return false;
+                                            const t = norm(m.textContent || '');
+                                            return t.includes('选择数据')
+                                                && t.includes('上传文件')
+                                                && (
+                                                    (t.includes('商品编码') && t.includes('大类') && t.includes('小类'))
+                                                    || (t.includes('商品编码') && t.includes('商品名'))
+                                                );
+                                        };
+                                        // 清理旧标记，避免串到其它“选择数据”弹窗
+                                        Array.from(document.querySelectorAll('[data-step2-product-modal=\"1\"]')).forEach(n => n.removeAttribute('data-step2-product-modal'));
+                                        const visibleModals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
+                                        let openedModal = visibleModals.find(isProductPicker);
+                                        let source = 'strict_product_picker';
+                                        if (openedModal) openedModal.setAttribute('data-step2-product-modal', '1');
+                                        return { ok: !!openedModal, source };
+                                    }""")
+
+                                    product_modal_count = await frame.locator('[data-step2-product-modal=\"1\"]').count()
+                                    if product_modal_count <= 0:
+                                        print("      ⚠️ 未识别到商品编码专属弹窗（避免串读其他弹窗，已跳过本次商品编码上传）")
+                                        results["第2步-商品编码"] = False
+                                        raise RuntimeError("__step2_product_modal_not_found__")
+                                    else:
+                                        try:
+                                            print(f"      🧪 商品编码弹窗识别: {modal_pick_info.get('source','unknown')}")
+                                        except Exception:
+                                            pass
+
+                                    uploaded_product = False
+                                    try:
+                                        file_input = frame.locator('[data-step2-product-modal=\"1\"] input[type=\"file\"]').last
+                                        if await file_input.count() > 0:
+                                            await file_input.set_input_files(str(product_path))
+                                            uploaded_product = True
+                                    except Exception:
+                                        uploaded_product = False
+
+                                    if not uploaded_product:
+                                        # 二次兜底：点击“上传文件”按钮后，再次尝试读取当前弹窗内 file input 直接写入
+                                        try:
+                                            await frame.evaluate("""() => {
+                                                const isVisible = (el) => {
+                                                    if (!el) return false;
+                                                    const s = window.getComputedStyle(el);
+                                                    const r = el.getBoundingClientRect();
+                                                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                                };
+                                                const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                                const modal = document.querySelector('[data-step2-product-modal=\"1\"]');
+                                                const scope = modal || document;
+                                                const btn = Array.from(scope.querySelectorAll('button.ant-btn'))
+                                                    .filter(isVisible)
+                                                    .find(b => {
+                                                        const t = norm(b.textContent || '');
+                                                        return t === '上传文件' || t.includes('上传文件');
+                                                    });
+                                                if (btn) btn.click();
+                                            }""")
+                                            await asyncio.sleep(0.4)
+                                            file_input2 = frame.locator('[data-step2-product-modal=\"1\"] input[type=\"file\"]').last
+                                            if await file_input2.count() > 0:
+                                                await file_input2.set_input_files(str(product_path))
+                                                uploaded_product = True
+                                        except Exception:
+                                            uploaded_product = False
+
+                                    if not uploaded_product:
+                                        print(f"      ⚠️ 商品编码上传失败: {product_path.name}")
+                                    else:
+                                        selected_ready = False
+                                        selected_text = ""
+                                        file_ready = False
+                                        for _ in range(40):
+                                            ready_info = await frame.evaluate("""(fileName) => {
+                                                const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                                const modal = document.querySelector('[data-step2-product-modal=\"1\"]');
+                                                const scope = modal || document;
+                                                const txt = (scope.textContent || '').trim();
+                                                const txtNorm = norm(txt);
+                                                let selectedText = '';
+                                                const m1 = txt.match(/已选中\\s*[（(]\\s*\\d+\\s*[)）]/);
+                                                if (m1) selectedText = m1[0];
+                                                if (!selectedText) {
+                                                    const m2 = txt.match(/已选中\\s*\\d+/);
+                                                    if (m2) selectedText = m2[0];
+                                                }
+                                                const fileNorm = norm(fileName || '');
+                                                const fileHit = !!(fileNorm && txtNorm.includes(fileNorm));
+                                                return { selectedText, fileHit };
+                                            }""", product_path.name)
+                                            selected_text = (ready_info or {}).get("selectedText", "")
+                                            file_ready = bool((ready_info or {}).get("fileHit"))
+                                            m = re.search(r'(\\d+)', selected_text or "")
+                                            n = int(m.group(1)) if m else 0
+                                            if n > 0 or file_ready:
+                                                selected_ready = True
+                                                break
+                                            await asyncio.sleep(0.5)
+                                        if selected_text:
+                                            print(f"      🧪 商品编码上传后回读: {selected_text}")
+                                        if file_ready:
+                                            print("      🧪 商品编码上传后回读: 已检测到上传文件名")
+                                        if not selected_ready:
+                                            print("      ⚠️ 商品编码已选中数量仍为0，继续尝试点击确认（可能后台仍在处理）")
+
+                                        confirm_product = await frame.evaluate("""() => {
+                                            const isVisible = (el) => {
+                                                if (!el) return false;
+                                                const s = window.getComputedStyle(el);
+                                                const r = el.getBoundingClientRect();
+                                                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                            };
+                                            const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                            const modal = document.querySelector('[data-step2-product-modal=\"1\"]');
+                                            const scope = modal || document;
+                                            const primaryBtns = Array.from(scope.querySelectorAll('button.ant-btn.ant-btn-primary')).filter(isVisible);
+                                            const btn = primaryBtns.find(b => {
+                                                const t = norm(b.textContent || '');
+                                                return t === '确认' || t.includes('确认') || t === '确定' || t.includes('确定');
+                                            });
+                                            if (!btn) return false;
+                                            btn.click();
+                                            return true;
+                                        }""")
+                                        if confirm_product:
+                                            # 关键校验：回到分群弹窗后，商品编码所在行“已选”必须 > 0 才算成功。
+                                            await asyncio.sleep(0.8)
+                                            product_row_selected = await frame.evaluate("""() => {
+                                                const isVisible = (el) => {
+                                                    if (!el) return false;
+                                                    const s = window.getComputedStyle(el);
+                                                    const r = el.getBoundingClientRect();
+                                                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                                };
+                                                const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                                const inPickerModal = (el) => !!(el && el.closest('.ant-modal, .ant-modal-wrap, .ant-modal-root'));
+                                                const rows = Array.from(document.querySelectorAll('.event-row, .condition, .ant-form-item, .ant-row, div'))
+                                                    .filter(el => isVisible(el) && !inPickerModal(el));
+                                                let hitText = '';
+                                                for (const row of rows) {
+                                                    const hasTitle = !!row.querySelector('.ant-select-selection-item[title="商品编码"], [title="商品编码"]');
+                                                    const txt = norm(row.textContent || '');
+                                                    if (!hasTitle && !txt.includes('商品编码')) continue;
+                                                    const nodes = Array.from(row.querySelectorAll('.ml-2, span, div, b, strong'))
+                                                        .filter(n => isVisible(n) && !inPickerModal(n));
+                                                    const hit = nodes.find(n => {
+                                                        const t = (n.textContent || '').trim();
+                                                        return /已选[:：]\\s*\\d+/.test(t) || /已选中\\s*[（(]\\s*\\d+\\s*[)）]/.test(t);
+                                                    });
+                                                    if (hit) {
+                                                        hitText = (hit.textContent || '').trim();
+                                                        break;
+                                                    }
+                                                }
+                                                return hitText;
+                                            }""")
+                                            m = re.search(r'(\\d+)', product_row_selected or "")
+                                            n = int(m.group(1)) if m else 0
+                                            if product_row_selected:
+                                                print(f"      🧪 商品编码行回读: {product_row_selected}")
+                                            if n > 0:
+                                                print(f"      ✅ 第2步商品编码已上传: {product_path.name}")
+                                                results["第2步-商品编码"] = True
+                                            else:
+                                                print("      ⚠️ 商品编码行回读为0，判定未生效")
+                                        else:
+                                            print("      ⚠️ 商品编码上传后未找到确认/确定按钮")
+                        except Exception as e:
+                            if "__step2_product_modal_not_found__" in str(e):
+                                pass
+                            else:
+                                print(f"      ⚠️ 第2步商品编码操作失败: {e}")
+                    else:
+                        results["第2步-商品编码"] = True
 
                     # 在 iframe 内填充券规则ID（按标签就近定位 + 回读）
                     if data.get("coupon_ids"):
@@ -3700,13 +4001,15 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
             (data.get("step2_store_file_path", "") or "").strip()
             or (data.get("main_store_file_path", "") or "").strip()
         )
-        has_store_cfg = has_main_area_cfg or has_main_store_cfg
+        has_product_cfg = bool((data.get("step2_product_file_path", "") or "").strip())
+        has_store_cfg = has_main_area_cfg or has_main_store_cfg or has_product_cfg
         # 通用放行规则：门店信息相关配置时，只要“主消费营运区/主消费门店/门店信息回读”任一成功即放行。
         # 适配“入会门店/主要消费门店/主要消费片区/主要消费营运区/主要消费大区/主要消费省区”等类型。
         if has_store_cfg:
             store_ok = any([
                 results.get("第2步-主消费营运区", False),
                 results.get("第2步-主消费门店", False),
+                results.get("第2步-商品编码", False),
                 results.get("第2步-门店信息已选", False),
             ])
             if not store_ok:
