@@ -3640,9 +3640,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         if (openedModal) openedModal.setAttribute('data-step2-product-modal', '1');
                                         return { ok: !!openedModal, source };
                                     }""")
-                                    if modal_pick_info and modal_pick_info.get("ok"):
-                                        break
-                                    await asyncio.sleep(0.35)
+                                    # 单次检测：无循环场景，禁止使用 break
 
                                     product_modal_count = await frame.locator('[data-step2-product-modal=\"1\"]').count()
                                     if product_modal_count <= 0:
