@@ -3541,7 +3541,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                     else:
                         results["第2步-主消费门店"] = True
 
-                    # 第2步：商品编码上传（选择数据 -> 上传文件，非必填）
+                    # 第2步：商品编码上传（与门店信息同链路：选择数据 -> 直接写 file input -> 确认）
                     step2_product_file_path = (data.get("step2_product_file_path", "") or "").strip()
                     if step2_product_file_path:
                         print(f"   🧾 第2步商品编码文件: {step2_product_file_path}")
@@ -3560,17 +3560,6 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
                                     };
                                     const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                    const isProductPicker = (m) => {
-                                        if (!m) return false;
-                                        const t = norm(m.textContent || '');
-                                        // 商品编码弹窗典型字段：商品编码/大类/中类/小类/商品名
-                                        return t.includes('选择数据')
-                                            && t.includes('上传文件')
-                                            && (
-                                                (t.includes('商品编码') && t.includes('大类') && t.includes('小类'))
-                                                || (t.includes('商品编码') && t.includes('商品名'))
-                                            );
-                                    };
                                     const fireClick = (el) => {
                                         if (!el) return false;
                                         ['pointerdown','mousedown','mouseup','click'].forEach(t => {
@@ -3579,12 +3568,8 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         if (typeof el.click === 'function') el.click();
                                         return true;
                                     };
-                                    const visibleModals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
-                                    const openedModal = visibleModals.find(isProductPicker);
-                                    if (openedModal) {
-                                        openedModal.setAttribute('data-step2-product-modal', '1');
-                                        return { opened: true, source: 'already_open' };
-                                    }
+                                    // 清理历史标记
+                                    Array.from(document.querySelectorAll('[data-step2-product-modal="1"]')).forEach(n => n.removeAttribute('data-step2-product-modal'));
                                     // 优先：按 title 精准命中“商品编码”行
                                     const preciseRows = Array.from(document.querySelectorAll('.event-row, .condition, .ant-form-item, .ant-row, div')).filter(isVisible);
                                     for (const row of preciseRows) {
@@ -3594,116 +3579,24 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             if (btn) return { opened: fireClick(btn), source: 'product_row_title' };
                                         }
                                     }
-                                    const rows = Array.from(document.querySelectorAll('.condition, .event-row, .ant-form-item, .ant-row, div')).filter(isVisible);
-                                    for (const row of rows) {
+                                    // 兜底：文本命中“商品编码”的行
+                                    for (const row of preciseRows) {
                                         const txt = norm(row.textContent || '');
                                         if (!txt.includes('商品编码')) continue;
                                         const btn = Array.from(row.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
                                             .find(b => norm(b.textContent || '').includes('选择数据'));
                                         if (btn) return { opened: fireClick(btn), source: 'product_row_button' };
                                     }
-                                    // 兜底：如果只有一个“上传文件”数据弹窗入口，也尝试点第一个“选择数据”
-                                    const firstBtn = Array.from(document.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
-                                        .filter(isVisible)
-                                        .find(b => norm(b.textContent || '').includes('选择数据'));
-                                    if (firstBtn) return { opened: fireClick(firstBtn), source: 'first_select_data' };
                                     return { opened: false, source: 'not_found' };
                                 }""")
                                 if not open_product_picker_info or (not open_product_picker_info.get("opened")):
                                     print("      ⚠️ 未找到商品编码“选择数据”按钮")
                                 else:
                                     print(f"      🧪 商品编码选择器来源: {open_product_picker_info.get('source','unknown')}")
-                                    await asyncio.sleep(1.0)
-                                    modal_pick_info = await frame.evaluate("""() => {
-                                        const isVisible = (el) => {
-                                            if (!el) return false;
-                                            const s = window.getComputedStyle(el);
-                                            const r = el.getBoundingClientRect();
-                                            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-                                        };
-                                        const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                        const isProductPicker = (m) => {
-                                            if (!m) return false;
-                                            const t = norm(m.textContent || '');
-                                            return t.includes('选择数据')
-                                                && t.includes('上传文件')
-                                                && (
-                                                    (t.includes('商品编码') && t.includes('大类') && t.includes('小类'))
-                                                    || (t.includes('商品编码') && t.includes('商品名'))
-                                                );
-                                        };
-                                        // 清理旧标记，避免串到其它“选择数据”弹窗
-                                        Array.from(document.querySelectorAll('[data-step2-product-modal=\"1\"]')).forEach(n => n.removeAttribute('data-step2-product-modal'));
-                                        const visibleModals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
-                                        let openedModal = visibleModals.find(isProductPicker);
-                                        let source = 'strict_product_picker';
-                                        if (openedModal) openedModal.setAttribute('data-step2-product-modal', '1');
-                                        return { ok: !!openedModal, source };
-                                    }""")
-                                    # 单次检测：无循环场景，禁止使用 break
-
-                                    product_modal_count = await frame.locator('[data-step2-product-modal=\"1\"]').count()
-                                    if product_modal_count <= 0:
-                                        print("      ⚠️ 未识别到商品编码专属弹窗（避免串读其他弹窗，已跳过本次商品编码上传）")
-                                        results["第2步-商品编码"] = False
-                                        raise RuntimeError("__step2_product_modal_not_found__")
-                                    else:
-                                        try:
-                                            print(f"      🧪 商品编码弹窗识别: {modal_pick_info.get('source','unknown')}")
-                                        except Exception:
-                                            pass
-
-                                    # 禁止触发系统文件选择器：不点击“上传文件”按钮，直接写入 file input。
-                                    uploaded_product = False
-                                    try:
-                                        await asyncio.sleep(0.2)
-                                        file_input = frame.locator('[data-step2-product-modal=\"1\"] input[type=\"file\"]').last
-                                        if await file_input.count() > 0:
-                                            await file_input.set_input_files(str(product_path))
-                                            uploaded_product = True
-                                    except Exception:
-                                        uploaded_product = False
-
-                                    if not uploaded_product:
-                                        print(f"      ⚠️ 商品编码上传失败: {product_path.name}")
-                                    else:
-                                        selected_ready = False
-                                        selected_text = ""
-                                        file_ready = False
-                                        for _ in range(40):
-                                            ready_info = await frame.evaluate("""(fileName) => {
-                                                const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                                const modal = document.querySelector('[data-step2-product-modal=\"1\"]');
-                                                const scope = modal || document;
-                                                const txt = (scope.textContent || '').trim();
-                                                const txtNorm = norm(txt);
-                                                let selectedText = '';
-                                                const m1 = txt.match(/已选中\\s*[（(]\\s*\\d+\\s*[)）]/);
-                                                if (m1) selectedText = m1[0];
-                                                if (!selectedText) {
-                                                    const m2 = txt.match(/已选中\\s*\\d+/);
-                                                    if (m2) selectedText = m2[0];
-                                                }
-                                                const fileNorm = norm(fileName || '');
-                                                const fileHit = !!(fileNorm && txtNorm.includes(fileNorm));
-                                                return { selectedText, fileHit };
-                                            }""", product_path.name)
-                                            selected_text = (ready_info or {}).get("selectedText", "")
-                                            file_ready = bool((ready_info or {}).get("fileHit"))
-                                            m = re.search(r'(\\d+)', selected_text or "")
-                                            n = int(m.group(1)) if m else 0
-                                            if n > 0 or file_ready:
-                                                selected_ready = True
-                                                break
-                                            await asyncio.sleep(0.5)
-                                        if selected_text:
-                                            print(f"      🧪 商品编码上传后回读: {selected_text}")
-                                        if file_ready:
-                                            print("      🧪 商品编码上传后回读: 已检测到上传文件名")
-                                        if not selected_ready:
-                                            print("      ⚠️ 商品编码已选中数量仍为0，继续尝试点击确认（可能后台仍在处理）")
-
-                                        confirm_product = await frame.evaluate("""() => {
+                                    # 等待“选择数据”弹窗出现（不点击上传按钮，避免系统文件夹）
+                                    modal_pick_info = {"ok": False, "source": "wait_visible_modal"}
+                                    for _ in range(20):
+                                        modal_pick_info = await frame.evaluate("""() => {
                                             const isVisible = (el) => {
                                                 if (!el) return false;
                                                 const s = window.getComputedStyle(el);
@@ -3711,21 +3604,57 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                                 return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
                                             };
                                             const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                            const modal = document.querySelector('[data-step2-product-modal=\"1\"]');
-                                            const scope = modal || document;
-                                            const primaryBtns = Array.from(scope.querySelectorAll('button.ant-btn.ant-btn-primary')).filter(isVisible);
-                                            const btn = primaryBtns.find(b => {
-                                                const t = norm(b.textContent || '');
-                                                return t === '确认' || t.includes('确认') || t === '确定' || t.includes('确定');
+                                            const visibleModals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
+                                            const candidates = visibleModals.filter(m => {
+                                                const t = norm(m.textContent || '');
+                                                return t.includes('选择数据') && t.includes('上传文件');
                                             });
-                                            if (!btn) return false;
-                                            btn.click();
-                                            return true;
+                                            if (!candidates.length) return { ok: false, source: 'wait_visible_modal' };
+                                            const modal = candidates[candidates.length - 1];
+                                            modal.setAttribute('data-step2-product-modal', '1');
+                                            return { ok: true, source: 'latest_select_data_modal' };
                                         }""")
-                                        if confirm_product:
-                                            # 关键校验：回到分群弹窗后，商品编码所在行“已选”必须 > 0 才算成功。
-                                            await asyncio.sleep(0.8)
-                                            product_row_selected = await frame.evaluate("""() => {
+                                        if modal_pick_info.get("ok"):
+                                            break
+                                        await asyncio.sleep(0.25)
+
+                                    product_modal_count = await frame.locator('[data-step2-product-modal="1"]').count()
+                                    if product_modal_count <= 0:
+                                        print("      ⚠️ 未识别到商品编码上传弹窗")
+                                    else:
+                                        print(f"      🧪 商品编码弹窗识别: {modal_pick_info.get('source','unknown')}")
+                                        uploaded_product = False
+                                        try:
+                                            file_input = frame.locator('[data-step2-product-modal="1"] input[type="file"]').last
+                                            if await file_input.count() > 0:
+                                                await file_input.set_input_files(str(product_path))
+                                                uploaded_product = True
+                                        except Exception:
+                                            uploaded_product = False
+
+                                        if not uploaded_product:
+                                            print(f"      ⚠️ 商品编码上传失败: {product_path.name}")
+                                        else:
+                                            # 等待弹窗内“已选中(N)”生效
+                                            selected_text = ""
+                                            for _ in range(40):
+                                                selected_text = await frame.evaluate("""() => {
+                                                    const modal = document.querySelector('[data-step2-product-modal="1"]');
+                                                    const txt = (modal ? modal.textContent : document.textContent) || '';
+                                                    const m1 = txt.match(/已选中\\s*[（(]\\s*\\d+\\s*[)）]/);
+                                                    if (m1) return m1[0];
+                                                    const m2 = txt.match(/已选中\\s*\\d+/);
+                                                    return m2 ? m2[0] : '';
+                                                }""")
+                                                m = re.search(r'(\\d+)', selected_text or "")
+                                                n = int(m.group(1)) if m else 0
+                                                if n > 0:
+                                                    break
+                                                await asyncio.sleep(0.5)
+                                            if selected_text:
+                                                print(f"      🧪 商品编码上传后回读: {selected_text}")
+
+                                            confirm_product = await frame.evaluate("""() => {
                                                 const isVisible = (el) => {
                                                     if (!el) return false;
                                                     const s = window.getComputedStyle(el);
@@ -3733,50 +3662,53 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                                     return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
                                                 };
                                                 const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                                const inPickerModal = (el) => !!(el && el.closest('.ant-modal, .ant-modal-wrap, .ant-modal-root'));
-                                                const rows = Array.from(document.querySelectorAll('.event-row, .condition'))
-                                                    .filter(el => isVisible(el) && !inPickerModal(el));
-                                                let hitText = '';
-                                                for (const row of rows) {
-                                                    const hasTitle = !!row.querySelector('.ant-select-selection-item[title="商品编码"], [title="商品编码"]');
-                                                    const txt = norm(row.textContent || '');
-                                                    if (!hasTitle && !txt.includes('商品编码')) continue;
-                                                    const direct = Array.from(row.querySelectorAll('.ml-2'))
-                                                        .filter(n => isVisible(n) && !inPickerModal(n))
-                                                        .find(n => /已选[:：]\s*\d+/.test((n.textContent || '').trim()));
-                                                    if (direct) {
-                                                        hitText = (direct.textContent || '').trim();
-                                                        break;
-                                                    }
-                                                    const fallback = Array.from(row.querySelectorAll('span, b, strong'))
-                                                        .filter(n => isVisible(n) && !inPickerModal(n))
-                                                        .find(n => {
-                                                        const t = (n.textContent || '').trim();
-                                                        return /已选[:：]\\s*\\d+/.test(t) || /已选中\\s*[（(]\\s*\\d+\\s*[)）]/.test(t);
+                                                const modal = document.querySelector('[data-step2-product-modal="1"]');
+                                                const scope = modal || document;
+                                                const btn = Array.from(scope.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
+                                                    .filter(isVisible)
+                                                    .find(b => {
+                                                        const t = norm(b.textContent || '');
+                                                        return t === '确认' || t.includes('确认') || t === '确定' || t.includes('确定');
                                                     });
-                                                    if (fallback) {
-                                                        hitText = (fallback.textContent || '').trim();
-                                                        break;
-                                                    }
-                                                }
-                                                return hitText;
+                                                if (!btn) return false;
+                                                btn.click();
+                                                return true;
                                             }""")
-                                            m = re.search(r'(\\d+)', product_row_selected or "")
-                                            n = int(m.group(1)) if m else 0
-                                            if product_row_selected:
-                                                print(f"      🧪 商品编码行回读: {product_row_selected}")
-                                            if n > 0:
-                                                print(f"      ✅ 第2步商品编码已上传: {product_path.name}")
-                                                results["第2步-商品编码"] = True
+                                            if confirm_product:
+                                                await asyncio.sleep(0.8)
+                                                # 只读“商品编码”行本身的“已选”，避免串读其它区域
+                                                product_row_selected = await frame.evaluate("""() => {
+                                                    const isVisible = (el) => {
+                                                        if (!el) return false;
+                                                        const s = window.getComputedStyle(el);
+                                                        const r = el.getBoundingClientRect();
+                                                        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                                    };
+                                                    const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                                    const rows = Array.from(document.querySelectorAll('.event-row, .condition')).filter(isVisible);
+                                                    for (const row of rows) {
+                                                        const hasTitle = !!row.querySelector('.ant-select-selection-item[title="商品编码"], [title="商品编码"]');
+                                                        const txt = norm(row.textContent || '');
+                                                        if (!hasTitle && !txt.includes('商品编码')) continue;
+                                                        const direct = row.querySelector('.ml-2');
+                                                        const val = (direct && (direct.textContent || '').trim()) || '';
+                                                        if (/已选[:：]\\s*\\d+/.test(val)) return val;
+                                                    }
+                                                    return '';
+                                                }""")
+                                                m = re.search(r'(\\d+)', product_row_selected or "")
+                                                n = int(m.group(1)) if m else 0
+                                                if product_row_selected:
+                                                    print(f"      🧪 商品编码行回读: {product_row_selected}")
+                                                if n > 0:
+                                                    print(f"      ✅ 第2步商品编码已上传: {product_path.name}")
+                                                    results["第2步-商品编码"] = True
+                                                else:
+                                                    print("      ⚠️ 商品编码行回读为0，判定未生效")
                                             else:
-                                                print("      ⚠️ 商品编码行回读为0，判定未生效")
-                                        else:
-                                            print("      ⚠️ 商品编码上传后未找到确认/确定按钮")
+                                                print("      ⚠️ 商品编码上传后未找到确认/确定按钮")
                         except Exception as e:
-                            if "__step2_product_modal_not_found__" in str(e):
-                                pass
-                            else:
-                                print(f"      ⚠️ 第2步商品编码操作失败: {e}")
+                            print(f"      ⚠️ 第2步商品编码操作失败: {e}")
                     else:
                         results["第2步-商品编码"] = True
 
