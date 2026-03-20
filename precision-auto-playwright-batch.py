@@ -3588,7 +3588,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     // 先点“已选：0”的商品编码行，避免重复点到已选392的门店行
                                     for (const row of exactRows) {
                                         const txt = (row.textContent || '').trim();
-                                        if (!/已选[:：]\s*0/.test(txt)) continue;
+                                        if (!/已选[:：]\\s*0/.test(txt)) continue;
                                         const btn = pickBtnFromRow(row);
                                         if (btn) return { opened: fireClick(btn), source: 'product_row_title_selected0' };
                                     }
@@ -4566,8 +4566,31 @@ async def process_single_plan(
                 
                 print(f"\n   ✅ 计划 {plan_index} 完成！")
                 print("   📌 字段结果清单:")
+                has_store_cfg_for_summary = bool(
+                    (plan.get("main_operating_area", "") or "").strip()
+                    or (plan.get("step2_store_file_path", "") or "").strip()
+                    or (plan.get("main_store_file_path", "") or "").strip()
+                    or (plan.get("step2_product_file_path", "") or "").strip()
+                )
+                store_ok_for_summary = any([
+                    field_results.get("第2步-主消费营运区", False),
+                    field_results.get("第2步-主消费门店", False),
+                    field_results.get("第2步-商品编码", False),
+                    field_results.get("第2步-门店信息已选", False),
+                ])
+                step2_optional_when_store_ok = {
+                    "第2步-主消费营运区",
+                    "第2步-主消费门店",
+                    "第2步-商品编码",
+                    "第2步-门店信息已选",
+                }
                 for k in sorted(field_results.keys()):
-                    mark = "✅" if field_results[k] else "❌"
+                    if field_results[k]:
+                        mark = "✅"
+                    elif has_store_cfg_for_summary and store_ok_for_summary and k in step2_optional_when_store_ok:
+                        mark = "⚪"
+                    else:
+                        mark = "❌"
                     print(f"      {mark} {k}")
                 await page.close()
                 if owns_context:
