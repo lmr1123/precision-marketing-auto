@@ -3407,8 +3407,10 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                     print("      ⚠️ 未找到门店信息“选择数据”按钮")
                                 else:
                                     print(f"      🧪 门店信息选择器来源: {open_store_picker_info.get('source','unknown')}")
-                                    await asyncio.sleep(1.0)
-                                    modal_pick_info = await frame.evaluate("""() => {
+                                    await asyncio.sleep(0.6)
+                                    modal_pick_info = {"ok": False, "source": "strict_product_picker"}
+                                    for _ in range(12):
+                                        modal_pick_info = await frame.evaluate("""() => {
                                         const isVisible = (el) => {
                                             if (!el) return false;
                                             const s = window.getComputedStyle(el);
@@ -3630,27 +3632,17 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                                     || (t.includes('商品编码') && t.includes('商品名'))
                                                 );
                                         };
-                                        const isSelectDataUploadModal = (m) => {
-                                            if (!m) return false;
-                                            const t = norm(m.textContent || '');
-                                            return t.includes('选择数据') && t.includes('上传文件');
-                                        };
                                         // 清理旧标记，避免串到其它“选择数据”弹窗
                                         Array.from(document.querySelectorAll('[data-step2-product-modal=\"1\"]')).forEach(n => n.removeAttribute('data-step2-product-modal'));
                                         const visibleModals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
                                         let openedModal = visibleModals.find(isProductPicker);
                                         let source = 'strict_product_picker';
-                                        // 兜底：严格匹配不到时，使用当前“最新可见”的选择数据上传弹窗（避免直接跳过）
-                                        if (!openedModal) {
-                                            const candidates = visibleModals.filter(isSelectDataUploadModal);
-                                            if (candidates.length > 0) {
-                                                openedModal = candidates[candidates.length - 1];
-                                                source = 'latest_select_data_modal';
-                                            }
-                                        }
                                         if (openedModal) openedModal.setAttribute('data-step2-product-modal', '1');
                                         return { ok: !!openedModal, source };
                                     }""")
+                                    if modal_pick_info and modal_pick_info.get("ok"):
+                                        break
+                                    await asyncio.sleep(0.35)
 
                                     product_modal_count = await frame.locator('[data-step2-product-modal=\"1\"]').count()
                                     if product_modal_count <= 0:
@@ -3663,38 +3655,10 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         except Exception:
                                             pass
 
-                                    # 固定动作链：先点“上传文件”再写入 file input，避免误写到非商品编码模块。
-                                    click_upload_btn = await frame.evaluate("""() => {
-                                        const isVisible = (el) => {
-                                            if (!el) return false;
-                                            const s = window.getComputedStyle(el);
-                                            const r = el.getBoundingClientRect();
-                                            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-                                        };
-                                        const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                        const modal = document.querySelector('[data-step2-product-modal=\"1\"]');
-                                        if (!modal) return false;
-                                        const btn = Array.from(modal.querySelectorAll('button.ant-btn, button'))
-                                            .filter(isVisible)
-                                            .find(b => {
-                                                const t = norm(b.textContent || '');
-                                                return t === '上传文件' || t.includes('上传文件');
-                                            });
-                                        if (!btn) return false;
-                                        ['pointerdown','mousedown','mouseup','click'].forEach(t => {
-                                            btn.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
-                                        });
-                                        if (typeof btn.click === 'function') btn.click();
-                                        return true;
-                                    }""")
-                                    if click_upload_btn:
-                                        print("      🧪 商品编码上传动作: 已点击“上传文件”按钮")
-                                    else:
-                                        print("      ⚠️ 商品编码上传动作: 未找到“上传文件”按钮")
-
+                                    # 禁止触发系统文件选择器：不点击“上传文件”按钮，直接写入 file input。
                                     uploaded_product = False
                                     try:
-                                        await asyncio.sleep(0.35)
+                                        await asyncio.sleep(0.2)
                                         file_input = frame.locator('[data-step2-product-modal=\"1\"] input[type=\"file\"]').last
                                         if await file_input.count() > 0:
                                             await file_input.set_input_files(str(product_path))
@@ -3772,21 +3736,28 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                                 };
                                                 const norm = (s) => (s || '').replace(/\\s+/g, '');
                                                 const inPickerModal = (el) => !!(el && el.closest('.ant-modal, .ant-modal-wrap, .ant-modal-root'));
-                                                const rows = Array.from(document.querySelectorAll('.event-row, .condition, .ant-form-item, .ant-row, div'))
+                                                const rows = Array.from(document.querySelectorAll('.event-row, .condition'))
                                                     .filter(el => isVisible(el) && !inPickerModal(el));
                                                 let hitText = '';
                                                 for (const row of rows) {
                                                     const hasTitle = !!row.querySelector('.ant-select-selection-item[title="商品编码"], [title="商品编码"]');
                                                     const txt = norm(row.textContent || '');
                                                     if (!hasTitle && !txt.includes('商品编码')) continue;
-                                                    const nodes = Array.from(row.querySelectorAll('.ml-2, span, div, b, strong'))
-                                                        .filter(n => isVisible(n) && !inPickerModal(n));
-                                                    const hit = nodes.find(n => {
+                                                    const direct = Array.from(row.querySelectorAll('.ml-2'))
+                                                        .filter(n => isVisible(n) && !inPickerModal(n))
+                                                        .find(n => /已选[:：]\s*\d+/.test((n.textContent || '').trim()));
+                                                    if (direct) {
+                                                        hitText = (direct.textContent || '').trim();
+                                                        break;
+                                                    }
+                                                    const fallback = Array.from(row.querySelectorAll('span, b, strong'))
+                                                        .filter(n => isVisible(n) && !inPickerModal(n))
+                                                        .find(n => {
                                                         const t = (n.textContent || '').trim();
                                                         return /已选[:：]\\s*\\d+/.test(t) || /已选中\\s*[（(]\\s*\\d+\\s*[)）]/.test(t);
                                                     });
-                                                    if (hit) {
-                                                        hitText = (hit.textContent || '').trim();
+                                                    if (fallback) {
+                                                        hitText = (fallback.textContent || '').trim();
                                                         break;
                                                     }
                                                 }
