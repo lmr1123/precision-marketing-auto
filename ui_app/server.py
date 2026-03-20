@@ -994,112 +994,239 @@ UI_HTML = """
   <title>精准营销自动化任务中心</title>
   <style>
     :root{
-      --bg:#f5f7fb;
+      --bg:#f3f2fb;
       --card:#ffffff;
-      --line:#e5e7eb;
-      --text:#111827;
-      --sub:#4b5563;
-      --hint:#6b7280;
-      --brand:#0f766e;
-      --brand-dark:#0b5d57;
-      --radius:10px;
-      --control-h:36px;
+      --line:#e8e6f3;
+      --text:#1d1d1f;
+      --sub:#515154;
+      --hint:#6e6e73;
+      --brand:#2f2a7e;
+      --brand-dark:#221f5c;
+      --brand-soft:#f1efff;
+      --nav:#ffffff;
+      --nav-active:#f4f2ff;
+      --radius:16px;
+      --control-h:40px;
       --font:14px;
+      --space-1:8px;
+      --space-2:12px;
+      --space-3:16px;
+      --space-4:20px;
     }
-    body{font-family:"PingFang SC","Microsoft YaHei",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:var(--bg);color:var(--text);font-size:var(--font)}
-    .wrap{max-width:1480px;margin:18px auto;padding:0 16px}
-    .layout{display:grid;grid-template-columns:1fr;gap:12px;align-items:start}
-    .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
-    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-    .section-title{font-size:14px;font-weight:700;color:#0f172a;margin:0 0 10px 0;display:flex;align-items:center;gap:8px}
+    *{box-sizing:border-box}
+    body{font-family:"SF Pro Text","SF Pro Display","PingFang SC","Helvetica Neue",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:radial-gradient(1200px 700px at 20% -10%,#ede9ff 0%,transparent 60%),radial-gradient(1200px 700px at 100% 0%,#efe8ff 0%,transparent 58%),var(--bg);color:var(--text);font-size:var(--font);-webkit-font-smoothing:antialiased}
+    .app-shell{max-width:1480px;margin:0 auto;min-height:100vh;padding:18px var(--space-3) 24px var(--space-3)}
+    .main{padding:0}
+    .page-title{margin:0 0 var(--space-2) 0;font-size:22px;line-height:1.2;font-weight:700;letter-spacing:-.01em;color:var(--text)}
+    .card-title{margin:0 0 var(--space-2) 0;font-size:18px;line-height:1.25;font-weight:700;letter-spacing:-.01em;color:var(--text)}
+    .card{background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:16px;padding:var(--space-3);margin-bottom:var(--space-2);box-shadow:0 10px 30px rgba(42,34,94,.08)}
+    .row{display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center}
+    .section-title{font-size:15px;font-weight:700;color:#1d1d1f;margin:0 0 var(--space-2) 0;display:flex;align-items:center;gap:8px;line-height:1.3}
     .step-no{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:999px;background:var(--brand);color:#fff;font-size:12px;font-weight:700}
-    .step-box{border:1px solid #dbe5f3;box-shadow:0 1px 2px rgba(15,118,110,.06);border-radius:12px;padding:12px;background:#fff;margin-bottom:10px}
-    .step-caption{font-size:12px;color:var(--hint);margin-top:6px;line-height:1.5}
+    .step-box{border:1px solid #eceaf6;border-radius:14px;padding:var(--space-2);background:#fff;margin-bottom:10px;transition:all .2s ease}
+    .step-box:hover{box-shadow:0 8px 24px rgba(47,42,126,.08);border-color:#ddd8f4}
+    /* 按步骤区分渐变背景（参考卡片轻渐变风格） */
+    .card .step-box:nth-of-type(1){
+      background:linear-gradient(135deg,#f6f2ff 0%,#fff 55%,#f2f7ff 100%);
+      border-color:#e3dcff;
+    }
+    .card .step-box:nth-of-type(2){
+      background:linear-gradient(135deg,#fff7f3 0%,#fff 52%,#f3f9ff 100%);
+      border-color:#f1ddcf;
+    }
+    .card .step-box:nth-of-type(3){
+      background:linear-gradient(135deg,#f2fff8 0%,#fff 55%,#f4f5ff 100%);
+      border-color:#d7eee2;
+    }
+    .step-box.compact{
+      padding:10px;
+    }
+    .step-box.compact .form-grid{
+      gap:8px 10px;
+    }
+    .step-box.compact .field{
+      min-height:38px;
+      gap:6px;
+    }
+    .step-box.compact .step-caption{
+      margin-top:4px;
+    }
+    .step-caption{font-size:12px;color:var(--hint);margin-top:6px;line-height:1.6}
     .form-grid{display:grid;grid-template-columns:repeat(3,minmax(260px,1fr));gap:10px 12px}
     .form-grid .full{grid-column:1 / -1}
-    .field{display:flex;align-items:center;gap:8px;min-height:40px}
+    .field{display:flex;align-items:center;gap:8px;min-height:44px}
     .field.between{justify-content:space-between}
     .field.vertical{flex-direction:column;align-items:flex-start}
-    .label{min-width:96px;color:var(--sub);font-size:13px}
+    .label{min-width:112px;color:var(--sub);font-size:13px;font-weight:500}
     .inline-check{display:inline-flex;align-items:center;gap:6px;color:var(--sub);font-size:13px}
     .field input[type="text"], .field input[type="number"], .field input:not([type]), .field select{
       height:var(--control-h);box-sizing:border-box;
     }
-    .field input[type="file"]{padding:7px 8px;max-width:260px}
+    .field input[type="file"]{
+      width:100%;
+      max-width:560px;
+      height:44px;
+      padding:6px 10px;
+      background:#fff;
+      border:1px solid #d7d4e8;
+      border-radius:12px;
+      color:#66647a;
+      line-height:30px;
+    }
+    .field input[type="file"]::file-selector-button{
+      height:30px;
+      padding:0 14px;
+      margin-right:12px;
+      border:1px solid #d0c9f2;
+      border-radius:9px;
+      background:linear-gradient(180deg,#f6f3ff,#ece7ff);
+      color:#312b84;
+      font-size:13px;
+      font-weight:600;
+      cursor:pointer;
+    }
+    .field input[type="file"]:hover{
+      border-color:#c9c2ef;
+      box-shadow:0 0 0 3px rgba(87,74,194,.08);
+    }
+    .field input[type="file"]::file-selector-button:hover{
+      background:linear-gradient(180deg,#efeaff,#e4ddff);
+    }
     .field.vertical .row{width:100%}
     .field.vertical .row label{display:flex;align-items:center;gap:6px;color:var(--sub);font-size:13px}
-    .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding-top:2px}
-    .subcard{border:1px solid var(--line);background:#fbfcff;border-radius:10px;padding:10px 12px;margin-top:8px}
-    .adv-toggle{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:8px;background:#eef2ff;color:#3730a3;border:1px solid #c7d2fe;cursor:pointer}
-    .adv-panel{display:none;border:1px dashed #c7d2fe;background:#f8faff;border-radius:10px;padding:10px;margin-top:8px}
+    .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding-top:6px}
+    .subcard{border:1px solid var(--line);background:linear-gradient(180deg,#fefeff,#faf9ff);border-radius:12px;padding:12px;margin-top:8px}
+    .adv-toggle{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 14px;border-radius:999px;background:var(--brand-soft);color:#312b84;border:1px solid #dbd4ff;cursor:pointer;font-weight:600}
+    .adv-panel{display:none;border:1px dashed #ddd6ff;background:#faf8ff;border-radius:12px;padding:12px;margin-top:8px}
     .adv-panel.open{display:block}
-    .tiny{font-size:12px;color:var(--hint)}
-    .channel-grid{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:10px}
-    .channel-item{display:flex;align-items:center;gap:8px;border:1px solid #d1d5db;border-radius:10px;padding:8px 10px;background:#fff}
+    .tiny{font-size:12px;color:var(--hint);line-height:1.55}
+    .field.full .tiny{
+      margin-left:8px;
+      white-space:normal;
+      overflow:visible;
+      text-overflow:clip;
+      max-width:none;
+      line-height:1.5;
+    }
+    .upload-line{
+      display:grid !important;
+      grid-template-columns:112px minmax(560px,1fr) minmax(180px,auto);
+      align-items:center;
+      gap:12px;
+      width:100%;
+    }
+    .upload-line .label{
+      margin:0;
+      min-width:112px;
+      flex:none;
+    }
+    .upload-line .tiny{
+      margin:0;
+      max-width:none;
+      white-space:normal;
+      word-break:break-word;
+    }
+    .file-uniform{
+      width:560px !important;
+      max-width:560px !important;
+      min-width:560px !important;
+    }
+    .channel-grid{display:grid;grid-template-columns:1fr;gap:10px}
+    .channel-block{border:1px solid #e8e6f3;border-radius:12px;background:#fff;padding:10px;transition:all .16s ease}
+    .channel-block:hover{border-color:#cfc8f6;background:#faf8ff}
+    .channel-item{display:flex;align-items:center;gap:8px;padding:2px 0}
     .channel-item input{margin-top:2px}
     .channel-icon{font-size:16px}
-    .channel-main{font-size:13px;color:#111827;font-weight:600}
-    .channel-strong{font-weight:700;color:#0f766e}
-    .material-panel{border:1px solid #d9e2ec;background:#fcfdff;border-radius:10px;padding:10px}
-    .material-title{font-size:13px;font-weight:600;color:#0f172a;margin-bottom:8px}
+    .channel-main{font-size:13px;color:#111827;font-weight:600;line-height:1.35}
+    .channel-strong{font-weight:800;color:#312b84}
+    .material-panel{border:1px solid #e8e6f3;background:#fcfcfe;border-radius:12px;padding:12px}
+    .material-title{font-size:14px;font-weight:600;color:#0f172a;margin-bottom:8px}
+    .channel-inline-config{margin-top:10px}
     .hidden{display:none !important}
-    input,button,select{padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;font-size:13px}
-    button{background:var(--brand);color:#fff;border:none;cursor:pointer;height:36px;padding:0 14px}
-    button:hover{background:var(--brand-dark)}
-    button.secondary{background:#374151}
+    input,button,select{padding:8px 12px;border:1px solid #d7d4e8;border-radius:10px;font-size:13px;outline:none}
+    input:focus,select:focus{border-color:#bdb5ed;box-shadow:0 0 0 3px rgba(87,74,194,.12)}
+    button{background:linear-gradient(180deg,#3a328f,#2f2a7e);color:#fff;border:none;cursor:pointer;height:40px;padding:0 16px;font-weight:600;letter-spacing:.01em;box-shadow:0 6px 14px rgba(47,42,126,.24)}
+    button:hover{background:linear-gradient(180deg,#302a82,#252066)}
+    button.secondary{background:#fff;color:#2f2a7e;border:1px solid #cdc7ef;box-shadow:none}
+    button.secondary:hover{background:#f7f5ff}
     .tip{font-size:12px;color:var(--hint);line-height:1.55}
     .hint{font-size:12px;color:var(--hint);display:block}
-    table{width:100%;border-collapse:collapse}
-    th,td{border-bottom:1px solid var(--line);padding:8px;text-align:left;font-size:13px;vertical-align:top}
-    th{background:#f9fafb;font-weight:600}
+    table{width:100%;border-collapse:separate;border-spacing:0}
+    th,td{border-bottom:1px solid var(--line);padding:10px 8px;text-align:left;font-size:13px;vertical-align:top}
+    th{background:#f7f6fc;font-weight:600;color:#3e3a56;position:sticky;top:0;z-index:1}
     .status-pending{color:#6b7280}
     .status-running{color:#2563eb}
     .status-success{color:#059669}
     .status-failed{color:#dc2626}
     #logs{background:#0b1020;color:#dbeafe;height:58vh;overflow:auto;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px}
-    .file-hero{background:#ecfeff;border:1px solid #99f6e4;border-radius:10px;padding:10px 12px}
-    .primary-actions button{height:42px;padding:0 18px;font-size:14px;font-weight:700}
+    .file-hero{
+      background:transparent;
+      border:none;
+      border-radius:0;
+      padding:0;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+    }
+    .file-hero .row{
+      flex:1;
+      min-width:0;
+      align-items:center;
+    }
+    .file-hero .row .label{
+      flex:0 0 112px;
+    }
+    .file-hero .row input[type="file"]{
+      flex:1;
+      max-width:none;
+      min-width:260px;
+    }
+    .primary-actions button{height:44px;padding:0 20px;font-size:14px;font-weight:700}
     .log-modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;align-items:center;justify-content:center;z-index:9999}
     .log-modal.open{display:flex}
-    .log-panel{width:min(1200px,92vw);max-height:88vh;background:#fff;border-radius:12px;border:1px solid #d1d5db;padding:12px}
+    .log-panel{width:min(1200px,92vw);max-height:88vh;background:#fff;border-radius:14px;border:1px solid #d1d5db;padding:14px}
     .log-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
-    .link-pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#ecfeff;color:#0f766e;border:1px solid #a5f3fc;font-size:12px;text-decoration:none}
+    .link-pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#f5f1ff;color:#312b84;border:1px solid #d9d0ff;font-size:12px;text-decoration:none}
     @media (max-width: 1100px){
-      #logs{height:360px}
       .form-grid{grid-template-columns:1fr}
-      .label{min-width:84px}
+      .label{min-width:90px}
       .channel-grid{grid-template-columns:1fr}
+      .upload-line{grid-template-columns:1fr}
+      .file-uniform{width:100% !important;min-width:0 !important;max-width:none !important}
     }
   </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="layout">
+<div class="app-shell">
+  <main class="main">
     <div>
       <div class="card">
-        <h3 style="margin:0 0 10px 0">批量导入并执行（业务版）</h3>
-        <div class="step-box">
+        <h3 class="card-title">批量导入并执行（业务版）</h3>
+        <div class="step-box compact">
           <div class="section-title"><span class="step-no">1</span>第1步：导入与基础配置</div>
           <div class="form-grid">
-            <div class="field full between file-hero">
-              <div class="row">
-                <span class="label">任务文件</span>
-                <input id="files" type="file" multiple accept=".csv,.xlsx"/>
-              </div>
+            <div class="field full upload-line file-hero">
+              <span class="label">任务文件</span>
+              <input id="files" class="file-uniform" type="file" multiple accept=".csv,.xlsx"/>
               <button id="advToggleBtn" type="button" class="adv-toggle" onclick="toggleAdvancedConfig()">高级配置（展开）</button>
             </div>
-            <div class="field full">
+            <div class="field full upload-line">
               <span class="label">目标门店</span>
-              <input id="step2_main_store_file" type="file" accept=".xlsx,.xls"/>
+              <input id="step2_main_store_file" class="file-uniform" type="file" accept=".xlsx,.xls"/>
               <span class="tiny">应用人群条件入会/主消费/至尊升级等指定门店上传</span>
             </div>
-            <div class="field full">
+            <div class="field full upload-line">
               <span class="label">目标商品</span>
-              <input id="step2_product_file" type="file" accept=".xlsx,.xls"/>
+              <input id="step2_product_file" class="file-uniform" type="file" accept=".xlsx,.xls"/>
               <span class="tiny">应用人群条件购买商品*数量标签</span>
             </div>
             <div class="field full">
               <label class="inline-check"><input id="executor_store_upload" type="checkbox" checked/> 执行员工-指定门店（默认开启）</label>
+            </div>
+            <div class="field full">
+              <label class="inline-check channel-strong"><input id="executor_include_franchise" type="checkbox" checked/> 执行员工包含加盟区域（自动同步勾选“xx加盟”节点）</label>
+              <span class="tiny">示例：执行员工=广佛省区，自动追加广佛省区加盟；执行员工=大郑州营运区，自动追加大郑州营运区加盟。</span>
             </div>
           </div>
           <div id="advancedConfig" class="adv-panel">
@@ -1133,53 +1260,40 @@ UI_HTML = """
           <div class="section-title"><span class="step-no">2</span>第2步：选中发送渠道（可多选）</div>
           <div class="subcard">
             <div class="channel-grid">
-              <label class="channel-item">
-                <input class="step3_channel" type="checkbox" value="短信"/>
-                <span class="channel-icon">💬</span>
-                <span><div class="channel-main">短信</div></span>
-              </label>
-              <label class="channel-item">
-                <input class="step3_channel" type="checkbox" value="会员通-发客户消息"/>
-                <span class="channel-icon">👥</span>
-                <span><div class="channel-main">会员通-发客户消息</div></span>
-              </label>
-              <label class="channel-item">
-                <input class="step3_channel" type="checkbox" value="会员通-发客户朋友圈"/>
-                <span class="channel-icon">🖼️</span>
-                <span><div class="channel-main">会员通-发客户朋友圈</div></span>
-              </label>
+              <div class="channel-block">
+                <label class="channel-item">
+                  <input class="step3_channel" type="checkbox" value="短信"/>
+                  <span class="channel-icon">💬</span>
+                  <span><div class="channel-main">短信</div></span>
+                </label>
+              </div>
+              <div class="channel-block">
+                <label class="channel-item">
+                  <input class="step3_channel" type="checkbox" value="会员通-发客户消息"/>
+                  <span class="channel-icon">👥</span>
+                  <span><div class="channel-main">会员通-发客户消息</div></span>
+                </label>
+                <div id="materialMiniProgram" class="field vertical hidden material-panel channel-inline-config">
+                  <label class="inline-check"><input id="msg_add_mini_program" type="checkbox"/> 添加小程序卡片</label>
+                  <label><input id="mini_program_cover" type="file" accept=".jpg,.jpeg,.png"/></label>
+                  <span class="tiny">仅保留封面上传；名称/标题/链接请在任务文件中通过字段“1对1-小程序名称/标题/链接”维护。</span>
+                </div>
+              </div>
+              <div class="channel-block">
+                <label class="channel-item">
+                  <input class="step3_channel" type="checkbox" value="会员通-发客户朋友圈"/>
+                  <span class="channel-icon">🖼️</span>
+                  <span><div class="channel-main">会员通-发客户朋友圈</div></span>
+                </label>
+                <div id="materialMoments" class="field vertical hidden material-panel channel-inline-config">
+                  <label class="inline-check"><input id="moments_add_images" type="checkbox"/> 启用图片上传（最多9张）</label>
+                  <input id="moments_images" type="file" multiple accept=".jpg,.jpeg,.png"/>
+                  <span class="tiny">仅当选择“会员通-发客户朋友圈”时展示。支持 jpg/png，单张小于10MB，按上传顺序提交。</span>
+                </div>
+              </div>
             </div>
-            <div style="margin-top:10px">
-              <label class="inline-check channel-strong"><input id="executor_include_franchise" type="checkbox" checked/> 执行员工包含加盟区域（自动同步勾选“xx加盟”节点）</label>
-              <div class="tiny" style="margin-top:4px">示例：执行员工=广佛省区，勾选后会自动追加广佛省区加盟；执行员工=大郑州营运区，勾选后自动追加大郑州营运区加盟。</div>
-            </div>
+            <div id="materialEmptyTip" class="step-caption">当前仅需选择渠道，无需额外素材配置。</div>
           </div>
-          <div class="step-caption">可单选或多选。系统将只填选中渠道对应字段。</div>
-        </div>
-
-        <div class="step-box">
-          <div class="section-title"><span class="step-no">3</span>第3步：上传素材（按渠道生效）</div>
-          <div class="form-grid">
-            <div id="materialMoments" class="field vertical hidden material-panel">
-              <div class="material-title">朋友圈上传图片</div>
-              <label class="inline-check"><input id="moments_add_images" type="checkbox"/> 启用图片上传（最多9张）</label>
-              <input id="moments_images" type="file" multiple accept=".jpg,.jpeg,.png"/>
-              <span class="tiny">仅当选择“会员通-发客户朋友圈”时展示。支持 jpg/png，单张小于 10MB，按上传顺序提交。</span>
-            </div>
-            <div id="materialMiniProgram" class="field vertical hidden material-panel">
-              <div class="material-title">会员通消息-添加小程序</div>
-              <label class="inline-check"><input id="msg_add_mini_program" type="checkbox"/> 启用小程序配置</label>
-              <label><span class="label" style="min-width:42px">封面</span><input id="mini_program_cover" type="file" accept=".jpg,.jpeg,.png"/></label>
-              <span class="tiny">仅保留封面上传；名称/标题/链接请在任务文件中通过字段“1对1-小程序名称/标题/链接”维护。</span>
-            </div>
-            <div id="materialStoreFile" class="field vertical hidden material-panel">
-              <div class="material-title">上传门店（可选）</div>
-              <label class="inline-check"><input id="upload_stores" type="checkbox"/> 启用上传门店</label>
-              <input id="store_file" type="file" accept=".xlsx,.xls"/>
-              <span class="tiny">当渠道包含“会员通-发客户消息”或“会员通-发客户朋友圈”时可用。非必填，支持 xlsx/xls。</span>
-            </div>
-          </div>
-          <div id="materialEmptyTip" class="step-caption">当前渠道无需附加素材，直接执行即可。</div>
         </div>
 
         <div class="section-title">执行动作</div>
@@ -1193,7 +1307,7 @@ UI_HTML = """
       </div>
 
       <div class="card">
-        <h3 style="margin:0 0 8px 0">任务列表</h3>
+        <h3 class="card-title">任务列表</h3>
         <table>
           <thead><tr>
             <th>文件</th><th>计划名称</th><th>发送渠道</th><th>状态</th><th>进度</th><th>成功/失败</th><th>开始</th><th>完成</th><th>耗时(s)</th><th>操作</th>
@@ -1202,7 +1316,7 @@ UI_HTML = """
         </table>
       </div>
     </div>
-  </div>
+  </main>
 </div>
 <div id="logModal" class="log-modal" onclick="closeLogModal(event)">
   <div class="log-panel" onclick="event.stopPropagation()">
@@ -1254,14 +1368,11 @@ function syncChannelMaterials(){
   const channels = selectedChannels();
   const showMoments = channels.includes('会员通-发客户朋友圈');
   const showMsg = channels.includes('会员通-发客户消息');
-  const showStore = showMsg || showMoments;
   const momentsBox = document.getElementById('materialMoments');
   const msgBox = document.getElementById('materialMiniProgram');
-  const storeBox = document.getElementById('materialStoreFile');
   const emptyTip = document.getElementById('materialEmptyTip');
   if(momentsBox) momentsBox.classList.toggle('hidden', !showMoments);
   if(msgBox) msgBox.classList.toggle('hidden', !showMsg);
-  if(storeBox) storeBox.classList.toggle('hidden', !showStore);
   if(!showMoments){
     const chk = document.getElementById('moments_add_images');
     const file = document.getElementById('moments_images');
@@ -1274,13 +1385,7 @@ function syncChannelMaterials(){
     if(chk) chk.checked = false;
     if(cover) cover.value = '';
   }
-  if(!showStore){
-    const chk = document.getElementById('upload_stores');
-    const file = document.getElementById('store_file');
-    if(chk) chk.checked = false;
-    if(file) file.value = '';
-  }
-  if(emptyTip) emptyTip.style.display = (showMoments || showMsg || showStore) ? 'none' : 'block';
+  if(emptyTip) emptyTip.style.display = (showMoments || showMsg) ? 'none' : 'block';
   // “执行员工-指定门店”控制第3步上传门店开关（默认开启）
   const executorStore = document.getElementById('executor_store_upload');
   const uploadStores = document.getElementById('upload_stores');
@@ -1326,8 +1431,8 @@ async function upload(){
   for(const img of momentImgs){ fd.append('moments_images', img); }
   const uploadStoreEnabled = !!document.getElementById('executor_store_upload')?.checked;
   fd.append('upload_stores', uploadStoreEnabled ? 'true' : 'false');
-  const storeFile = document.getElementById('store_file').files[0];
-  if(storeFile){ fd.append('store_file', storeFile); }
+  // 上传门店已整合：复用第1步“目标门店”文件
+  if(uploadStoreEnabled && step2MainStoreFile){ fd.append('store_file', step2MainStoreFile); }
   fd.append('msg_add_mini_program', document.getElementById('msg_add_mini_program').checked ? 'true' : 'false');
   const miniCover = document.getElementById('mini_program_cover').files[0];
   if(miniCover){ fd.append('mini_program_cover', miniCover); }
