@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import getpass
+import io
 import os
 import re
 import shutil
@@ -9,7 +10,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -32,6 +33,8 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "name": "计划名称",
     "region": "计划区域",
     "theme": "营销主题",
+    "scene_type": "场景类型",
+    "plan_type": "计划类型",
     "use_recommend": "推荐算法",
     "start_time": "计划开始时间",
     "end_time": "计划结束时间",
@@ -49,8 +52,10 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "coupon_ids": "券规则ID",
     "sms_content": "短信内容",
     "step3_end_time": "第3步结束时间",
+    "distribution_mode": "分配方式",
     "executor_employees": "执行员工",
     "send_content": "发送内容",
+    "group_send_name": "下发群名",
     "channels": "第3步渠道(可多选)",
     "moments_add_images": "朋友圈是否上传图片",
     "moments_image_paths": "朋友圈图片路径(用|分隔)",
@@ -94,6 +99,8 @@ def _default_headers() -> List[str]:
         "name",
         "region",
         "theme",
+        "scene_type",
+        "plan_type",
         "use_recommend",
         "start_time",
         "end_time",
@@ -111,7 +118,9 @@ def _default_headers() -> List[str]:
         "coupon_ids",
         "sms_content",
         "step3_end_time",
+        "distribution_mode",
         "executor_employees",
+        "group_send_name",
         "send_content",
         "channels",
         "moments_add_images",
@@ -182,9 +191,46 @@ def write_template_xlsx(path: Path) -> None:
     cn_headers = [HEADER_EN_TO_CN.get(h, h) for h in headers]
     wb = Workbook()
     ws = wb.active
-    ws.title = "plans"
+    ws.title = "任务文件"
     ws.append(cn_headers)
     ws.append(sample)
+    ws_store = wb.create_sheet("目标门店")
+    ws_store.append(["门店编码", "大区", "省区", "营运区", "片区", "门店"])
+    ws_store.append(["1001010022", "华南大区", "广佛省区", "广州一", "张惠敏", "00022店广州泰沙"])
+    ws_product = wb.create_sheet("目标商品")
+    ws_product.append(["商品编码", "大类", "中类", "小类", "商品名"])
+    ws_product.append(["1010002", "RX", "心脑血管用药", "高血压用药", "硝苯地平片"])
+    wb.save(path)
+    wb.close()
+
+
+def write_community_template_xlsx(path: Path) -> None:
+    """社群专用模板：单Excel多sheet（任务文件/目标门店），仅保留社群最小必填字段。"""
+    if Workbook is None:
+        raise RuntimeError("openpyxl is not installed")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "任务文件"
+    headers = [
+        "计划名称", "计划区域", "营销主题", "场景类型", "计划类型",
+        "计划开始时间", "计划结束时间", "发送时间", "第3步结束时间",
+        "分配方式", "执行员工", "下发群名", "发送内容", "第3步渠道(可多选)", "创建链接",
+        "1对1-小程序名称", "1对1-小程序标题", "1对1-小程序链接",
+    ]
+    ws.append(headers)
+    ws.append([
+        "专属社群测试模板（自动化）", "营运区", "其他、会员生日礼", "会员营销", "会员权益",
+        "2026-03-20 00:00:00", "2026-03-31 23:59:59", "2026-03-22 08:00:00",
+        "2026-03-31 23:59:59", "按条件筛选客户群", "黑龙江省区、武汉营运区", "福利", "社群自动化测试内容",
+        "会员通-发送社群", "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add",
+        "大参林健康", "社群小程序示例", "pages/index/index",
+    ])
+    ws_store = wb.create_sheet("目标门店")
+    ws_store.append(["门店编码"])
+    ws_store.append(["2000081179"])
+    ws_product = wb.create_sheet("目标商品")
+    ws_product.append(["商品编码"])
+    ws_product.append(["1012058"])
     wb.save(path)
     wb.close()
 
@@ -220,6 +266,87 @@ def convert_uploaded_xlsx_to_csv(upload: UploadFile, dst_csv: Path) -> None:
         for row in ws.iter_rows(values_only=True):
             writer.writerow(["" if v is None else str(v) for v in row])
     wb.close()
+
+
+def _pick_sheet_name(sheet_names: List[str], candidates: List[str], fallback_keywords: List[str]) -> Optional[str]:
+    """按候选名/关键字匹配sheet名称（忽略空格和大小写）。"""
+    norm = {re.sub(r"\s+", "", n).lower(): n for n in sheet_names}
+    for c in candidates:
+        key = re.sub(r"\s+", "", c).lower()
+        if key in norm:
+            return norm[key]
+    for name in sheet_names:
+        n = re.sub(r"\s+", "", name).lower()
+        if any(k in n for k in fallback_keywords):
+            return name
+    return None
+
+
+def _write_sheet_to_csv(ws, dst_csv: Path) -> None:
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as out:
+        writer = csv.writer(out)
+        for row in ws.iter_rows(values_only=True):
+            writer.writerow(["" if v is None else str(v) for v in row])
+
+
+def _sheet_to_xlsx_blob(ws_title: str, ws) -> Tuple[str, bytes]:
+    if Workbook is None:
+        raise HTTPException(status_code=500, detail="Server missing openpyxl. Please install requirements-ui.txt")
+    out_wb = Workbook()
+    out_ws = out_wb.active
+    out_ws.title = ws_title[:31] if ws_title else "Sheet1"
+    for row in ws.iter_rows(values_only=True):
+        out_ws.append(list(row))
+    bio = io.BytesIO()
+    out_wb.save(bio)
+    out_wb.close()
+    return f"{ws_title or 'sheet'}.xlsx", bio.getvalue()
+
+
+def convert_uploaded_xlsx_multi_sheet(
+    upload: UploadFile, dst_csv: Path
+) -> Tuple[Optional[Tuple[str, bytes]], Optional[Tuple[str, bytes]]]:
+    """
+    一个Excel多sheet模式：
+    - 任务文件sheet -> 转CSV
+    - 目标门店sheet -> 返回xlsx blob
+    - 目标商品sheet -> 返回xlsx blob
+    """
+    if load_workbook is None:
+        raise HTTPException(status_code=500, detail="Server missing openpyxl. Please install requirements-ui.txt")
+    upload.file.seek(0)
+    wb = load_workbook(upload.file, read_only=True, data_only=True)
+    names = list(wb.sheetnames)
+
+    task_sheet = _pick_sheet_name(
+        names,
+        candidates=["任务文件", "任务", "plans", "plan", "计划"],
+        fallback_keywords=["任务", "plan", "plans", "计划"],
+    ) or (names[0] if names else None)
+    if not task_sheet:
+        wb.close()
+        raise HTTPException(status_code=400, detail=f"Excel未找到可用sheet: {upload.filename}")
+    _write_sheet_to_csv(wb[task_sheet], dst_csv)
+
+    store_sheet = _pick_sheet_name(
+        names,
+        candidates=["目标门店", "门店", "主消费门店", "step2_main_store"],
+        fallback_keywords=["目标门店", "门店"],
+    )
+    product_sheet = _pick_sheet_name(
+        names,
+        candidates=["目标商品", "商品编码", "商品", "step2_product"],
+        fallback_keywords=["目标商品", "商品编码", "商品"],
+    )
+
+    store_blob: Optional[Tuple[str, bytes]] = None
+    product_blob: Optional[Tuple[str, bytes]] = None
+    if store_sheet:
+        store_blob = _sheet_to_xlsx_blob(store_sheet, wb[store_sheet])
+    if product_sheet:
+        product_blob = _sheet_to_xlsx_blob(product_sheet, wb[product_sheet])
+    wb.close()
+    return store_blob, product_blob
 
 def _is_valid_jpeg_png_bytes(data: bytes) -> bool:
     """校验图片真实格式（避免仅后缀正确但内容非法/加密）。"""
@@ -324,7 +451,7 @@ def inject_moments_images_to_csv(dst_csv: Path, image_paths: List[str], step3_ch
     for row in rows:
         row_channels = str(row.get("channels", "") or "").strip()
         channel_scope = row_channels or ui_channels
-        if "会员通-发客户朋友圈" not in channel_scope:
+        if ("会员通-发客户朋友圈" not in channel_scope) and ("会员通-发送社群" not in channel_scope):
             continue
         row["moments_add_images"] = "是"
         row["moments_image_paths"] = "|".join(image_paths)
@@ -345,7 +472,7 @@ def inject_message_mini_program_to_csv(
     cover_path: str,
     page_path: str,
 ) -> None:
-    """将会员通-发客户消息的小程序配置回写到任务CSV。"""
+    """将会员通消息类渠道（发客户消息/发送社群）的小程序配置回写到任务CSV。"""
     if not enabled:
         return
     with dst_csv.open("r", encoding="utf-8-sig", newline="") as f:
@@ -370,7 +497,7 @@ def inject_message_mini_program_to_csv(
     for row in rows:
         row_channels = str(row.get("channels", "") or "").strip()
         channel_scope = row_channels or ui_channels
-        if "会员通-发客户消息" not in channel_scope:
+        if ("会员通-发客户消息" not in channel_scope) and ("会员通-发送社群" not in channel_scope):
             continue
         row["msg_add_mini_program"] = "是"
         row["msg_mini_program_name"] = program_name or row.get("msg_mini_program_name", "") or "大参林健康"
@@ -409,7 +536,7 @@ def inject_store_file_to_csv(
     for row in rows:
         row_channels = str(row.get("channels", "") or "").strip()
         channel_scope = row_channels or ui_channels
-        if ("会员通-发客户消息" not in channel_scope) and ("会员通-发客户朋友圈" not in channel_scope):
+        if ("会员通-发客户消息" not in channel_scope) and ("会员通-发送社群" not in channel_scope) and ("会员通-发客户朋友圈" not in channel_scope):
             continue
         row["upload_stores"] = "是"
         row["store_file_path"] = store_file_path or ""
@@ -465,6 +592,55 @@ def inject_step2_product_file_to_csv(
         headers.append("step2_product_file_path")
     for row in rows:
         row["step2_product_file_path"] = product_file_path
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in headers})
+
+
+def normalize_community_create_url_in_csv(dst_csv: Path, step3_channels: str) -> None:
+    """
+    社群任务创建链接标准化：
+    - 若命中社群渠道且 create_url 为空 -> 填充 checkType=add 默认链接
+    - 若命中社群渠道且 create_url 为旧 edit 链接 -> 转为 checkType=add
+    """
+    with dst_csv.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not headers:
+        return
+    if "create_url" not in headers:
+        headers.append("create_url")
+    if "channels" not in headers:
+        headers.append("channels")
+
+    default_add_url = "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add"
+    changed = False
+    ui_channels = step3_channels or ""
+    for row in rows:
+        row_channels = str(row.get("channels", "") or "").strip()
+        channel_scope = row_channels or ui_channels
+        if "会员通-发送社群" not in channel_scope:
+            continue
+        old_url = str(row.get("create_url", "") or "").strip()
+        new_url = old_url
+        if not old_url:
+            new_url = default_add_url
+        elif "addcommunityPlan" in old_url and "checkType=edit" in old_url:
+            new_url = re.sub(r"checkType=edit", "checkType=add", old_url)
+        elif "addcommunityPlan" in old_url and "checkType=add" not in old_url:
+            if "?" in old_url:
+                new_url = f"{old_url}&checkType=add"
+            else:
+                new_url = f"{old_url}?checkType=add"
+        if new_url != old_url:
+            row["create_url"] = new_url
+            changed = True
+
+    if not changed:
+        return
     with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
@@ -585,6 +761,15 @@ def summarize_csv_meta(csv_path: Path) -> tuple[str, str]:
     else:
         plan_name = f"{names[0]} +{len(names)-1}"
     return plan_name, "、".join(channels)
+
+
+def _parse_channel_list(raw: str) -> List[str]:
+    return [p.strip() for p in re.split(r"[|,，、/]+", str(raw or "")) if p.strip()]
+
+
+def _is_community_only_channels(raw: str) -> bool:
+    ch = _parse_channel_list(raw)
+    return bool(ch) and all(c == "会员通-发送社群" for c in ch)
 
 
 class TaskRunner:
@@ -716,8 +901,18 @@ class TaskRunner:
         task.logs = []
         await self.append_log(task, f"[worker-{worker_id}] task started: {task.filename}")
 
+        # 双保险：worker侧再做一次社群自动策略兜底，避免上传侧策略未命中
+        worker_community_only = _is_community_only_channels(task.options.step3_channels or task.channel_display)
+        if worker_community_only:
+            task.options.strict_step2 = False
+            task.options.skip_step2 = True
+
+        if task.options.skip_step2 and (not task.options.strict_step2):
+            await self.append_log(task, "[worker-auto] 社群自动策略生效：已自动关闭严格第2步，并启用跳过第2步")
+
         cmd = [
             sys.executable,
+            "-u",
             str(SCRIPT_PATH),
             "--csv",
             task.file_path,
@@ -745,9 +940,16 @@ class TaskRunner:
 
         await self.append_log(task, f"$ {' '.join(cmd)}")
         started = datetime.now()
+        child_env = os.environ.copy()
+        # 避免在 nohup/后台启动场景中继承到无效标准流，导致 Python 子进程启动即崩溃
+        child_env.setdefault("PYTHONUTF8", "1")
+        child_env.setdefault("PYTHONIOENCODING", "utf-8")
+        child_env.setdefault("PYTHONUNBUFFERED", "1")
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(ROOT),
+            env=child_env,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -835,6 +1037,20 @@ async def download_template_xlsx():
     )
 
 
+@app.get("/api/template/community-xlsx")
+async def download_community_template_xlsx():
+    p = UPLOAD_DIR / "precision_community_template.xlsx"
+    try:
+        write_community_template_xlsx(p)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return FileResponse(
+        path=str(p),
+        filename="精准营销-社群专用模板.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @app.post("/api/tasks/upload")
 async def upload_tasks(
     files: List[UploadFile] = File(...),
@@ -899,11 +1115,13 @@ async def upload_tasks(
     store_file_blob: Optional[tuple[str, bytes]] = None
     if upload_stores:
         if store_file is None:
-            raise HTTPException(status_code=400, detail="已勾选上传门店，但未选择门店文件")
-        b = await store_file.read()
-        if not b:
-            raise HTTPException(status_code=400, detail="门店文件为空")
-        store_file_blob = (store_file.filename or "stores.xlsx", b)
+            # 允许走“单Excel多sheet”自动提取门店文件，无需前端单独上传
+            store_file_blob = None
+        else:
+            b = await store_file.read()
+            if not b:
+                raise HTTPException(status_code=400, detail="门店文件为空")
+            store_file_blob = (store_file.filename or "stores.xlsx", b)
 
     step2_main_store_blob: Optional[tuple[str, bytes]] = None
     if step2_main_store_file is not None:
@@ -923,12 +1141,18 @@ async def upload_tasks(
         tid = str(uuid.uuid4())
         stem = Path(f.filename).stem
         dst = UPLOAD_DIR / f"{tid}_{stem}.csv"
+        file_step2_store_blob: Optional[Tuple[str, bytes]] = None
+        file_step2_product_blob: Optional[Tuple[str, bytes]] = None
         if lower.endswith(".xlsx"):
-            convert_uploaded_xlsx_to_csv(f, dst)
+            # 优先按“单Excel多sheet”读取；若无对应sheet则仅任务sheet生效
+            ms_store_blob, ms_product_blob = convert_uploaded_xlsx_multi_sheet(f, dst)
+            file_step2_store_blob = ms_store_blob
+            file_step2_product_blob = ms_product_blob
         else:
             with dst.open("wb") as out:
                 shutil.copyfileobj(f.file, out)
         normalize_uploaded_csv_headers(dst)
+        normalize_community_create_url_in_csv(dst, options.step3_channels)
         if moments_add_images and image_blobs:
             image_paths = save_uploaded_moments_images(tid, image_blobs)
             inject_moments_images_to_csv(dst, image_paths, options.step3_channels)
@@ -943,27 +1167,47 @@ async def upload_tasks(
                 mini_cover_path,
                 msg_mini_program_page_path.strip(),
             )
-        if upload_stores and store_file_blob:
-            store_path = save_uploaded_store_file(tid, store_file_blob)
+        # 上传门店：优先显式上传文件；否则复用“第2步门店sheet/文件”
+        resolved_store_blob = store_file_blob or step2_main_store_blob or file_step2_store_blob
+        if upload_stores and resolved_store_blob:
+            store_path = save_uploaded_store_file(tid, resolved_store_blob)
             inject_store_file_to_csv(
                 dst,
                 options.step3_channels,
                 True,
                 store_path,
             )
-        if step2_main_store_blob:
-            step2_store_path = save_uploaded_main_store_file(tid, step2_main_store_blob)
+        resolved_step2_store_blob = step2_main_store_blob or file_step2_store_blob
+        if resolved_step2_store_blob:
+            step2_store_path = save_uploaded_main_store_file(tid, resolved_step2_store_blob)
             inject_step2_main_store_file_to_csv(dst, step2_store_path)
-        if step2_product_blob:
-            step2_product_path = save_uploaded_main_store_file(tid, step2_product_blob)
+        resolved_step2_product_blob = step2_product_blob or file_step2_product_blob
+        if resolved_step2_product_blob:
+            step2_product_path = save_uploaded_main_store_file(tid, resolved_step2_product_blob)
             inject_step2_product_file_to_csv(dst, step2_product_path)
         plan_name_display, channel_display = summarize_csv_meta(dst)
+        # 自动策略：仅社群渠道时，默认关闭严格第2步并启用跳过第2步（免人工配置）。
+        # 优先使用任务文件中的渠道；若文件为空则回退到页面勾选渠道。
+        community_only = _is_community_only_channels(channel_display or options.step3_channels)
+        file_options = TaskOptions(
+            connect_cdp=options.connect_cdp,
+            cdp_endpoint=options.cdp_endpoint,
+            strict_step2=(False if community_only else options.strict_step2),
+            skip_step2=(True if community_only else options.skip_step2),
+            concurrent=options.concurrent,
+            start=options.start,
+            end=options.end,
+            hold_seconds=options.hold_seconds,
+            step3_channels=options.step3_channels,
+            create_url=options.create_url,
+            executor_include_franchise=options.executor_include_franchise,
+        )
         op = operator.strip() or os.getenv("USER") or getpass.getuser() or "unknown"
         task = Task(
             id=tid,
             filename=f.filename,
             file_path=str(dst),
-            options=options,
+            options=file_options,
             operator=op,
             plan_name_display=plan_name_display,
             channel_display=channel_display,
@@ -1211,22 +1455,13 @@ UI_HTML = """
               <input id="files" class="file-uniform" type="file" multiple accept=".csv,.xlsx"/>
               <button id="advToggleBtn" type="button" class="adv-toggle" onclick="toggleAdvancedConfig()">高级配置（展开）</button>
             </div>
-            <div class="field full upload-line">
-              <span class="label">目标门店</span>
-              <input id="step2_main_store_file" class="file-uniform" type="file" accept=".xlsx,.xls"/>
-              <span class="tiny">应用人群条件入会/主消费/至尊升级等指定门店上传</span>
-            </div>
-            <div class="field full upload-line">
-              <span class="label">目标商品</span>
-              <input id="step2_product_file" class="file-uniform" type="file" accept=".xlsx,.xls"/>
-              <span class="tiny">应用人群条件购买商品*数量标签</span>
-            </div>
             <div class="field full">
-              <label class="inline-check"><input id="executor_store_upload" type="checkbox" checked/> 执行员工-指定门店（默认开启）</label>
-            </div>
-            <div class="field full">
-              <label class="inline-check channel-strong"><input id="executor_include_franchise" type="checkbox" checked/> 执行员工包含加盟区域（自动同步勾选“xx加盟”节点）</label>
-              <span class="tiny">示例：执行员工=广佛省区，自动追加广佛省区加盟；执行员工=大郑州营运区，自动追加大郑州营运区加盟。</span>
+              <span class="label">模板下载</span>
+              <div class="row">
+                <a class="link-pill" href="/api/template/xlsx">下载Excel模板</a>
+                <a class="link-pill" href="/api/template/csv">下载CSV模板(防乱码)</a>
+                <a class="link-pill" href="/api/template/community-xlsx">下载社群专用模板</a>
+              </div>
             </div>
           </div>
           <div id="advancedConfig" class="adv-panel">
@@ -1250,6 +1485,14 @@ UI_HTML = """
               <div class="field vertical">
                 <label><span class="label">保留浏览器(秒)</span><input id="hold_seconds" type="number" min="0" value="2" style="width:88px"/></label>
                 <span class="tiny">作用：任务结束后页面停留时间，便于人工复核。</span>
+              </div>
+              <div class="field vertical">
+                <label class="inline-check"><input id="executor_store_upload" type="checkbox" checked/> 执行员工-指定门店（默认开启）</label>
+                <span class="tiny">作用：执行员工支持通过“目标门店”sheet自动上传门店并勾选节点。</span>
+              </div>
+              <div class="field vertical">
+                <label class="inline-check channel-strong"><input id="executor_include_franchise" type="checkbox" checked/> 执行员工包含加盟区域（自动同步勾选“xx加盟”节点）</label>
+                <span class="tiny">示例：执行员工=广佛省区，自动追加广佛省区加盟；执行员工=大郑州营运区，自动追加大郑州营运区加盟。</span>
               </div>
             </div>
           </div>
@@ -1281,6 +1524,23 @@ UI_HTML = """
               </div>
               <div class="channel-block">
                 <label class="channel-item">
+                  <input class="step3_channel" type="checkbox" value="会员通-发送社群"/>
+                  <span class="channel-icon">👥</span>
+                  <span><div class="channel-main">会员通-发送社群</div></span>
+                </label>
+                <div id="materialMiniProgramCommunity" class="field vertical hidden material-panel channel-inline-config">
+                  <label class="inline-check"><input id="msg_add_mini_program_community" type="checkbox"/> 添加小程序卡片</label>
+                  <label><input id="mini_program_cover_community" type="file" accept=".jpg,.jpeg,.png"/></label>
+                  <span class="tiny">社群渠道可选：添加小程序卡片。</span>
+                </div>
+                <div id="materialMomentsCommunity" class="field vertical hidden material-panel channel-inline-config">
+                  <label class="inline-check"><input id="moments_add_images_community" type="checkbox"/> 启用图片上传（最多9张）</label>
+                  <input id="moments_images_community" type="file" multiple accept=".jpg,.jpeg,.png"/>
+                  <span class="tiny">社群渠道可选：添加图片（按上传顺序）。</span>
+                </div>
+              </div>
+              <div class="channel-block">
+                <label class="channel-item">
                   <input class="step3_channel" type="checkbox" value="会员通-发客户朋友圈"/>
                   <span class="channel-icon">🖼️</span>
                   <span><div class="channel-main">会员通-发客户朋友圈</div></span>
@@ -1300,10 +1560,8 @@ UI_HTML = """
         <div class="actions primary-actions">
           <button onclick="upload()">上传并开始执行</button>
           <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
-          <a class="link-pill" href="/api/template/xlsx">下载Excel模板</a>
-          <a class="link-pill" href="/api/template/csv">下载CSV模板(防乱码)</a>
         </div>
-        <div class="tip" style="margin-top:8px">重点：上传文件支持 CSV/XLSX（中文表头可自动识别）；若 Excel 打开 CSV 乱码，请优先下载 Excel 模板。第2步“目标门店/目标商品”支持 xlsx/xls 上传；朋友圈图片最多9张（jpg/png，<10MB）。</div>
+        <div class="tip" style="margin-top:8px">重点：上传单个 Excel（或 CSV）即可。若为 Excel，请在不同 sheet 中维护“任务文件 / 目标门店 / 目标商品”；系统会自动读取。社群场景建议优先使用“社群专用模板”。</div>
       </div>
 
       <div class="card">
@@ -1364,26 +1622,54 @@ function selectedChannels(){
   return Array.from(document.querySelectorAll('.step3_channel:checked')).map(el => el.value);
 }
 
+function mirrorCommunityMaterialInputs(){
+  const mapChecks = [
+    ['msg_add_mini_program', 'msg_add_mini_program_community'],
+    ['moments_add_images', 'moments_add_images_community'],
+  ];
+  for(const [mainId, communityId] of mapChecks){
+    const main = document.getElementById(mainId);
+    const community = document.getElementById(communityId);
+    if(!main || !community) continue;
+    if(community.checked !== main.checked) community.checked = main.checked;
+  }
+}
+
 function syncChannelMaterials(){
   const channels = selectedChannels();
-  const showMoments = channels.includes('会员通-发客户朋友圈');
-  const showMsg = channels.includes('会员通-发客户消息');
+  const isCommunity = channels.includes('会员通-发送社群');
+  const showMoments = channels.includes('会员通-发客户朋友圈') || isCommunity;
+  const showMsg = channels.includes('会员通-发客户消息') || isCommunity;
   const momentsBox = document.getElementById('materialMoments');
   const msgBox = document.getElementById('materialMiniProgram');
+  const momentsCommunityBox = document.getElementById('materialMomentsCommunity');
+  const msgCommunityBox = document.getElementById('materialMiniProgramCommunity');
   const emptyTip = document.getElementById('materialEmptyTip');
-  if(momentsBox) momentsBox.classList.toggle('hidden', !showMoments);
-  if(msgBox) msgBox.classList.toggle('hidden', !showMsg);
+  if(momentsBox) momentsBox.classList.toggle('hidden', !showMoments || isCommunity);
+  if(msgBox) msgBox.classList.toggle('hidden', !showMsg || isCommunity);
+  if(momentsCommunityBox) momentsCommunityBox.classList.toggle('hidden', !isCommunity);
+  if(msgCommunityBox) msgCommunityBox.classList.toggle('hidden', !isCommunity);
+
+  mirrorCommunityMaterialInputs();
   if(!showMoments){
     const chk = document.getElementById('moments_add_images');
     const file = document.getElementById('moments_images');
+    const chkCommunity = document.getElementById('moments_add_images_community');
+    const fileCommunity = document.getElementById('moments_images_community');
     if(chk) chk.checked = false;
     if(file) file.value = '';
+    if(chkCommunity) chkCommunity.checked = false;
+    if(fileCommunity) fileCommunity.value = '';
   }
   if(!showMsg){
     const chk = document.getElementById('msg_add_mini_program');
     const cover = document.getElementById('mini_program_cover');
+    const chkCommunity = document.getElementById('msg_add_mini_program_community');
+    const coverCommunity = document.getElementById('mini_program_cover_community');
     if(chk) chk.checked = false;
     if(cover) cover.value = '';
+    if(chkCommunity) chkCommunity.checked = false;
+    if(coverCommunity) coverCommunity.value = '';
   }
   if(emptyTip) emptyTip.style.display = (showMoments || showMsg) ? 'none' : 'block';
   // “执行员工-指定门店”控制第3步上传门店开关（默认开启）
@@ -1418,23 +1704,25 @@ async function upload(){
   fd.append('start', '');
   fd.append('end', '');
   fd.append('hold_seconds', document.getElementById('hold_seconds').value || '2');
-  const step2MainStoreFile = document.getElementById('step2_main_store_file').files[0];
-  if(step2MainStoreFile){ fd.append('step2_main_store_file', step2MainStoreFile); }
-  const step2ProductFile = document.getElementById('step2_product_file').files[0];
-  if(step2ProductFile){ fd.append('step2_product_file', step2ProductFile); }
   const channels = selectedChannels();
   if(!channels.length){ alert('请至少选择一个发送渠道'); return; }
   fd.append('step3_channels', channels.join(','));
   fd.append('executor_include_franchise', document.getElementById('executor_include_franchise').checked ? 'true' : 'false');
-  fd.append('moments_add_images', document.getElementById('moments_add_images').checked ? 'true' : 'false');
-  const momentImgs = document.getElementById('moments_images').files;
+  const momentsChecked = !!(document.getElementById('moments_add_images')?.checked || document.getElementById('moments_add_images_community')?.checked);
+  fd.append('moments_add_images', momentsChecked ? 'true' : 'false');
+  let momentImgs = document.getElementById('moments_images')?.files;
+  if(!momentImgs || !momentImgs.length){
+    momentImgs = document.getElementById('moments_images_community')?.files;
+  }
   for(const img of momentImgs){ fd.append('moments_images', img); }
   const uploadStoreEnabled = !!document.getElementById('executor_store_upload')?.checked;
   fd.append('upload_stores', uploadStoreEnabled ? 'true' : 'false');
-  // 上传门店已整合：复用第1步“目标门店”文件
-  if(uploadStoreEnabled && step2MainStoreFile){ fd.append('store_file', step2MainStoreFile); }
-  fd.append('msg_add_mini_program', document.getElementById('msg_add_mini_program').checked ? 'true' : 'false');
-  const miniCover = document.getElementById('mini_program_cover').files[0];
+  const miniProgramChecked = !!(document.getElementById('msg_add_mini_program')?.checked || document.getElementById('msg_add_mini_program_community')?.checked);
+  fd.append('msg_add_mini_program', miniProgramChecked ? 'true' : 'false');
+  let miniCover = document.getElementById('mini_program_cover')?.files?.[0];
+  if(!miniCover){
+    miniCover = document.getElementById('mini_program_cover_community')?.files?.[0];
+  }
   if(miniCover){ fd.append('mini_program_cover', miniCover); }
   saveUiPrefs();
   const r = await fetch('/api/tasks/upload', {method:'POST', body:fd});
@@ -1566,6 +1854,8 @@ async function pollLogs(reset=false){
 }
 
 function saveUiPrefs(){
+  const momentsChecked = !!document.getElementById('moments_add_images')?.checked || !!document.getElementById('moments_add_images_community')?.checked;
+  const miniProgramChecked = !!document.getElementById('msg_add_mini_program')?.checked || !!document.getElementById('msg_add_mini_program_community')?.checked;
   const prefs = {
     connect_cdp: !!document.getElementById('connect_cdp')?.checked,
     cdp_endpoint: document.getElementById('cdp_endpoint')?.value || '',
@@ -1575,8 +1865,8 @@ function saveUiPrefs(){
     channels: selectedChannels(),
     executor_include_franchise: !!document.getElementById('executor_include_franchise')?.checked,
     executor_store_upload: !!document.getElementById('executor_store_upload')?.checked,
-    moments_add_images: !!document.getElementById('moments_add_images')?.checked,
-    msg_add_mini_program: !!document.getElementById('msg_add_mini_program')?.checked,
+    moments_add_images: momentsChecked,
+    msg_add_mini_program: miniProgramChecked,
     advanced_open: document.getElementById('advancedConfig')?.classList.contains('open') || false
   };
   saveLocal(LS_KEYS.prefs, prefs);
@@ -1624,6 +1914,18 @@ document.querySelectorAll('.step3_channel').forEach(el => el.addEventListener('c
     const el = document.getElementById(id);
     if(el){ el.addEventListener('change', saveUiPrefs); el.addEventListener('input', saveUiPrefs); }
   });
+[['moments_add_images_community','moments_add_images'], ['msg_add_mini_program_community','msg_add_mini_program']].forEach(([fromId, toId]) => {
+  const from = document.getElementById(fromId);
+  const to = document.getElementById(toId);
+  if(from && to){
+    from.addEventListener('change', () => { to.checked = !!from.checked; saveUiPrefs(); });
+    to.addEventListener('change', () => { from.checked = !!to.checked; saveUiPrefs(); });
+  }
+});
+['moments_images_community','mini_program_cover_community'].forEach(id => {
+  const el = document.getElementById(id);
+  if(el){ el.addEventListener('change', saveUiPrefs); }
+});
 restoreUiFromCache();
 syncChannelMaterials();
 refreshTasks();

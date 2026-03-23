@@ -54,6 +54,7 @@ _enable_utf8_stdio()
 BASE_URL = "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=594094287227023360"
 CHANNEL_CREATE_URLS = {
     "会员通-发客户消息": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=594094287227023360",
+    "会员通-发送社群": "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add",
     "会员通-发客户朋友圈": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702926159527936",
     "短信": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702746907561984",
     "会员通-发短信": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702746907561984",
@@ -67,6 +68,8 @@ DEFAULT_PLAN = {
     "name": "测试-广佛省区-3月会员活动",
     "region": "省区",
     "theme": "其他",
+    "scene_type": "",
+    "plan_type": "",
     "use_recommend": "否",
     "start_time": "2026-03-16 08:00",
     "end_time": "2026-03-27 08:00",
@@ -84,6 +87,8 @@ DEFAULT_PLAN = {
     "sms_content": "短信内容测试",
     "step3_end_time": "2026-03-27 08:00",
     "executor_employees": "西北大区、湖北省区",
+    "distribution_mode": "指定门店分配",
+    "group_send_name": "福利",
     "executor_include_franchise": "否",
     "send_content": "企微1对1内容测试",
     "channels": "",
@@ -105,6 +110,7 @@ MAX_RETRIES = 2
 MAX_CONCURRENT = 3
 FEISHU_USER_ID = "ou_ed20f9990c63fa5448a0f2cd613ecf30"
 DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:9222"
+DEBUG_DROPDOWN_OPTIONS = os.getenv("PM_DEBUG_DROPDOWN_OPTIONS", "0").strip() in ("1", "true", "yes", "on")
 
 # ============ 工具函数 ============
 
@@ -122,6 +128,8 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "name": row.get("name", "").strip(),
                 "region": row.get("region", "").strip(),
                 "theme": row.get("theme", "").strip(),
+                "scene_type": row.get("scene_type", "").strip(),
+                "plan_type": row.get("plan_type", "").strip(),
                 "use_recommend": row.get("use_recommend", "").strip(),
                 "start_time": row.get("start_time", "").strip(),
                 "end_time": row.get("end_time", "").strip(),
@@ -139,6 +147,8 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "sms_content": row.get("sms_content", "").strip(),
                 "step3_end_time": row.get("step3_end_time", "").strip(),
                 "executor_employees": row.get("executor_employees", "").strip(),
+                "distribution_mode": row.get("distribution_mode", "").strip(),
+                "group_send_name": (row.get("group_send_name", "") or row.get("delivery_group_name", "") or row.get("下发群名", "")).strip(),
                 "executor_include_franchise": row.get("executor_include_franchise", "").strip(),
                 "send_content": row.get("send_content", "").strip(),
                 "channels": row.get("channels", "").strip(),
@@ -235,11 +245,145 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
         targets = [x.strip() for x in re.split(r"[、，,|;\\n]+", str(value or "")) if x.strip()]
         if not targets:
             targets = [str(value or "").strip()]
-    strict_label = (label.strip() == "营销主题")
+    label_name = label.strip()
+    strict_label = (label_name == "营销主题")
+    strict_exact = strict_label or (label_name in {"场景类型", "计划类型", "计划区域"})
+
+    async def clear_multi_selected_tags(item_locator):
+        """清空多选标签（仅用于营销主题），避免历史默认值/脏值导致越选越多。"""
+        try:
+            cleared = await item_locator.evaluate("""(root) => {
+                const closes = Array.from(root.querySelectorAll('.el-tag__close, .ant-select-selection-item-remove'));
+                let n = 0;
+                closes.forEach(btn => {
+                    try {
+                        btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                        btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                        btn.click();
+                        n++;
+                    } catch (e) {}
+                });
+                return n;
+            }""")
+            return int(cleared or 0)
+        except Exception:
+            return 0
+
+    async def clear_multi_via_clear_icon(item_locator):
+        """优先点击清空图标（若组件支持 clearable，通常可一次清空全部）。"""
+        try:
+            clicked = await item_locator.evaluate("""(root) => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                };
+                // 某些页面需 hover 后才显示 clear 图标
+                try {
+                    root.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                } catch (e) {}
+                const cands = Array.from(root.querySelectorAll(
+                    '.el-icon-circle-close, .el-input__icon.el-icon-circle-close, .ant-select-clear, .ant-select-clear *'
+                )).filter(isVisible);
+                const btn = cands[0];
+                if (!btn) return false;
+                btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                return true;
+            }""")
+            return bool(clicked)
+        except Exception:
+            return False
+
+    async def clear_multi_by_dropdown_selection(item_locator) -> int:
+        """通过下拉面板逐个反选已勾选项，确保真正清空（兼容 +N 汇总标签场景）。"""
+        cleared = 0
+        for _ in range(6):
+            try:
+                await click_field(item_locator)
+            except Exception:
+                break
+            try:
+                res = await page.evaluate("""() => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const s = window.getComputedStyle(el);
+                        const r = el.getBoundingClientRect();
+                        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                    };
+                    const dd = document.querySelector('.el-select-dropdown:not([style*="display: none"]), .ant-select-dropdown:not([style*="display: none"])');
+                    if (!dd || !isVisible(dd)) return { clicked: false, remaining: 0 };
+                    const selected = Array.from(dd.querySelectorAll('.el-select-dropdown__item.selected, .ant-select-item-option-selected'))
+                        .filter(isVisible);
+                    if (!selected.length) return { clicked: false, remaining: 0 };
+                    // 逐个点第一个已选项即可（点击后会取消选择）
+                    const el = selected[0];
+                    el.scrollIntoView({ block: 'center' });
+                    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                    el.click();
+                    return { clicked: true, remaining: selected.length - 1 };
+                }""")
+                if res and res.get("clicked"):
+                    cleared += 1
+                    await asyncio.sleep(0.1)
+                    continue
+            except Exception:
+                break
+            break
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return cleared
+
+    async def read_selected_options_from_dropdown(item_locator) -> List[str]:
+        """重新展开下拉后读取“当前勾选项”，用于营销主题强校验。"""
+        try:
+            await click_field(item_locator)
+        except Exception:
+            return []
+        try:
+            vals = await page.evaluate("""() => {
+                const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+                const dd = document.querySelector('.el-select-dropdown:not([style*="display: none"]), .ant-select-dropdown:not([style*="display: none"])');
+                if (!dd) return [];
+                const out = [];
+                // Element UI 多选：item.selected
+                dd.querySelectorAll('.el-select-dropdown__item.selected').forEach(el => {
+                    const t = norm(el.textContent);
+                    if (t) out.push(t);
+                });
+                // AntD 多选：option-selected
+                dd.querySelectorAll('.ant-select-item-option-selected').forEach(el => {
+                    const t = norm(el.textContent);
+                    if (t) out.push(t);
+                });
+                return Array.from(new Set(out));
+            }""")
+            # 收起下拉，避免影响后续字段
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return vals or []
+        except Exception:
+            return []
 
     async def click_field(item_locator):
+        # 先尝试收起旧下拉，避免串到上一个字段面板
+        try:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.05)
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.05)
+        except Exception:
+            pass
+
         field = item_locator.locator(
-            '.el-input__inner, .el-select .el-input__inner, .el-select .el-input, .ant-select-selector, .ant-select-selection-item'
+            '.el-select .el-input__inner, .ant-select-selector, .ant-select-selection-item, .el-input__inner, .el-select .el-input'
         ).first
         await field.click(force=True)
         try:
@@ -253,6 +397,26 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
         ).first
         if await arrow.count() > 0:
             await arrow.click(force=True)
+        try:
+            await page.locator('.el-select-dropdown:visible, .ant-select-dropdown:visible').first.wait_for(timeout=1800)
+            return
+        except Exception:
+            pass
+
+        # 兜底：直接在容器内触发 mousedown/click，避免“点击输入框无效”
+        try:
+            await item_locator.evaluate(
+                """(root) => {
+                    const target = root.querySelector('.el-select, .ant-select, .el-input__inner, .ant-select-selector');
+                    if (!target) return false;
+                    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                    target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                    return true;
+                }"""
+            )
+        except Exception:
+            pass
         await page.locator('.el-select-dropdown:visible, .ant-select-dropdown:visible').first.wait_for(timeout=2500)
 
     async def read_selected_text(item_locator) -> str:
@@ -261,6 +425,16 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
                 """(root) => {
                     const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
                     const parts = [];
+                    const seen = new Set();
+                    const pushUnique = (v) => {
+                        const t = norm(v);
+                        if (!t) return;
+                        // 忽略纯“+N”汇总标签，避免把摘要当作真实已选值
+                        if (/^\\+\\s*\\d+$/.test(t)) return;
+                        if (seen.has(t)) return;
+                        seen.add(t);
+                        parts.push(t);
+                    };
                     const selectors = [
                         '.el-select__tags-text',
                         '.el-tag',
@@ -273,8 +447,7 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
                     ];
                     selectors.forEach(sel => {
                         root.querySelectorAll(sel).forEach(el => {
-                            const t = norm(el.value || el.textContent);
-                            if (t) parts.push(t);
+                            pushUnique(el.value || el.textContent);
                         });
                     });
                     return norm(parts.join(' '));
@@ -285,108 +458,200 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
             return ""
 
     async def pick_one(target: str, item_locator=None) -> bool:
-        if item_locator is not None:
+        async def attempt_pick_from_open_dropdown() -> bool:
+            if not strict_label:
+                option = page.locator(
+                    '.el-select-dropdown:visible .el-select-dropdown__item, '
+                    '.ant-select-dropdown:visible .ant-select-item-option, '
+                    '.ant-select-dropdown:visible .ant-select-item'
+                ).filter(has_text=target).first
+                try:
+                    if await option.count() > 0:
+                        await option.click(force=True)
+                        await asyncio.sleep(0.2)
+                        return True
+                except Exception:
+                    pass
+
+            # 兜底：在当前可见下拉中用 JS 按文本精准点击（兼容首项/滚动项）
             try:
-                await click_field(item_locator)
-            except Exception:
-                pass
-
-        option = page.locator(
-            '.el-select-dropdown:visible .el-select-dropdown__item, '
-            '.ant-select-dropdown:visible .ant-select-item-option, '
-            '.ant-select-dropdown:visible .ant-select-item'
-        ).filter(has_text=target).first
-        try:
-            if await option.count() > 0:
-                await option.click(force=True)
-                await asyncio.sleep(0.2)
-                return True
-        except Exception:
-            pass
-
-        # 兜底：在当前可见下拉中用 JS 按文本精准点击（兼容首项/滚动项）
-        try:
-            js_res = await page.evaluate(
-                """({target, strict}) => {
-                    const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
-                    const t = norm(target);
-                    const dropdown = document.querySelector('.el-select-dropdown:not([style*="display: none"]), .ant-select-dropdown:not([style*="display: none"])');
-                    if (!dropdown) return { ok: false, reason: 'dropdown_not_found', options: [] };
-                    const candidates = Array.from(dropdown.querySelectorAll('.el-select-dropdown__item, .ant-select-item-option, .ant-select-item'));
-                    const options = candidates.map(el => norm(el.textContent)).filter(Boolean);
+                js_res = await page.evaluate(
+                    """({target, strict}) => {
+                        const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+                        const t = norm(target);
+                        const dropdown = document.querySelector('.el-select-dropdown:not([style*="display: none"]), .ant-select-dropdown:not([style*="display: none"])');
+                        if (!dropdown) return { ok: false, reason: 'dropdown_not_found', options: [] };
+                        const candidates = Array.from(dropdown.querySelectorAll('.el-select-dropdown__item, .ant-select-item-option, .ant-select-item'));
+                        const options = candidates.map(el => norm(el.textContent)).filter(Boolean);
                     const hit = candidates.find(el => {
                         const txt = norm(el.textContent);
                         if (strict) return txt === t;
                         return txt === t || txt.includes(t) || t.includes(txt);
                     });
-                    if (!hit) return { ok: false, reason: 'option_not_found', options: options.slice(0, 20) };
-                    hit.scrollIntoView({ block: 'center' });
-                    hit.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                    hit.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                    hit.click();
-                    return { ok: true, reason: 'clicked', options: options.slice(0, 20) };
-                }""",
-                {"target": target, "strict": strict_label},
-            )
-            if js_res and js_res.get("ok"):
-                await asyncio.sleep(0.2)
-                return True
-            if js_res and js_res.get("options"):
-                print(f"      🧪 {label}下拉可见项: {js_res.get('options')}")
-        except Exception:
-            pass
-
-        # 兜底2：滚动下拉列表查找目标项
-        try:
-            js_scroll_res = await page.evaluate(
-                """({target, strict}) => {
-                    const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
-                    const t = norm(target);
-                    const dropdown = document.querySelector('.el-select-dropdown:not([style*="display: none"]), .ant-select-dropdown:not([style*="display: none"])');
-                    if (!dropdown) return { ok: false, reason: 'dropdown_not_found' };
-                    const wrap = dropdown.querySelector('.el-scrollbar__wrap, .rc-virtual-list-holder, .ant-select-item-option-content') || dropdown;
-
-                    const findAndClick = () => {
-                        const nodes = Array.from(dropdown.querySelectorAll('.el-select-dropdown__item, .ant-select-item-option, .ant-select-item'));
-                        const hit = nodes.find(el => {
-                            const txt = norm(el.textContent);
-                            if (strict) return txt === t;
-                            return txt === t || txt.includes(t) || t.includes(txt);
-                        });
-                        if (!hit) return false;
+                        if (!hit) return { ok: false, reason: 'option_not_found', options: options.slice(0, 20) };
                         hit.scrollIntoView({ block: 'center' });
                         hit.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
                         hit.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
                         hit.click();
-                        return true;
-                    };
+                        return { ok: true, reason: 'clicked', options: options.slice(0, 20) };
+                    }""",
+                {"target": target, "strict": strict_exact},
+            )
+                if js_res and js_res.get("ok"):
+                    await asyncio.sleep(0.2)
+                    return True
+                if DEBUG_DROPDOWN_OPTIONS and js_res and js_res.get("options"):
+                    print(f"      🧪 {label}下拉可见项: {js_res.get('options')}")
+            except Exception:
+                pass
 
-                    if (findAndClick()) return { ok: true, reason: 'found_without_scroll' };
-                    let lastTop = -1;
-                    for (let i = 0; i < 40; i++) {
-                        if (typeof wrap.scrollTop === 'number') {
-                            wrap.scrollTop = wrap.scrollTop + 120;
+            # 兜底2：滚动下拉列表查找目标项（双向：先向上再向下，避免只向下漏选）
+            try:
+                js_scroll_res = await page.evaluate(
+                    """({target, strict}) => {
+                        const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+                        const t = norm(target);
+                        const dropdown = document.querySelector('.el-select-dropdown:not([style*="display: none"]), .ant-select-dropdown:not([style*="display: none"])');
+                        if (!dropdown) return { ok: false, reason: 'dropdown_not_found' };
+                        const wrap = dropdown.querySelector('.el-scrollbar__wrap, .rc-virtual-list-holder, .ant-select-dropdown .rc-virtual-list-holder, .ant-select-dropdown .rc-virtual-list-holder-inner') || dropdown;
+
+                        const findAndClick = () => {
+                            const nodes = Array.from(dropdown.querySelectorAll('.el-select-dropdown__item, .ant-select-item-option, .ant-select-item'));
+                            const hit = nodes.find(el => {
+                                const txt = norm(el.textContent);
+                                if (strict) return txt === t;
+                                return txt === t || txt.includes(t) || t.includes(txt);
+                            });
+                            if (!hit) return false;
+                            hit.scrollIntoView({ block: 'center' });
+                            hit.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                            hit.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                            hit.click();
+                            return true;
+                        };
+
+                        if (findAndClick()) return { ok: true, reason: 'found_without_scroll' };
+
+                        const canScroll = (typeof wrap.scrollTop === 'number');
+                        if (!canScroll) return { ok: false, reason: 'option_not_found_after_scroll' };
+
+                        const maxTop = Math.max(0, (wrap.scrollHeight || 0) - (wrap.clientHeight || 0));
+                        const step = 120;
+
+                        // 1) 先回到顶部再向下搜，覆盖“当前滚动位置在中下部导致漏掉上方项”
+                        wrap.scrollTop = 0;
+                        if (findAndClick()) return { ok: true, reason: 'found_from_top' };
+                        let lastTop = -1;
+                        for (let i = 0; i < 80; i++) {
+                            const nextTop = Math.min(maxTop, (wrap.scrollTop || 0) + step);
+                            wrap.scrollTop = nextTop;
                             if (wrap.scrollTop === lastTop) break;
                             lastTop = wrap.scrollTop;
-                        } else {
-                            break;
+                            if (findAndClick()) return { ok: true, reason: 'found_after_scroll_down' };
                         }
-                        if (findAndClick()) return { ok: true, reason: 'found_after_scroll' };
-                    }
-                    return { ok: false, reason: 'option_not_found_after_scroll' };
-                }""",
-                {"target": target, "strict": strict_label},
-            )
-            if js_scroll_res and js_scroll_res.get("ok"):
-                await asyncio.sleep(0.2)
-                return True
-        except Exception:
-            pass
 
+                        // 2) 再从底部向上搜，覆盖虚拟列表渲染异常/反向懒加载
+                        wrap.scrollTop = maxTop;
+                        if (findAndClick()) return { ok: true, reason: 'found_from_bottom' };
+                        lastTop = -1;
+                        for (let i = 0; i < 80; i++) {
+                            const nextTop = Math.max(0, (wrap.scrollTop || 0) - step);
+                            wrap.scrollTop = nextTop;
+                            if (wrap.scrollTop === lastTop) break;
+                            lastTop = wrap.scrollTop;
+                            if (findAndClick()) return { ok: true, reason: 'found_after_scroll_up' };
+                        }
+                        return { ok: false, reason: 'option_not_found_after_scroll' };
+                    }""",
+                    {"target": target, "strict": strict_exact},
+                )
+                if js_scroll_res and js_scroll_res.get("ok"):
+                    await asyncio.sleep(0.2)
+                    return True
+            except Exception:
+                pass
+            return False
+
+        async def attempt_pick_by_bound_dropdown() -> bool:
+            if item_locator is None:
+                return False
+            try:
+                js_res = await item_locator.evaluate(
+                    """(root, payload) => {
+                        const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+                        const target = norm(payload.target);
+                        const strict = !!payload.strict;
+                        const input = root.querySelector('input[aria-owns], input[aria-controls], .el-input__inner, .ant-select-selection-search-input');
+                        let dropdown = null;
+                        const getById = (id) => {
+                            if (!id) return null;
+                            return document.getElementById(id) || document.querySelector(`#${CSS.escape(id)}`);
+                        };
+                        if (input) {
+                            const own = input.getAttribute('aria-owns') || input.getAttribute('aria-controls') || '';
+                            dropdown = getById(own);
+                        }
+                        if (!dropdown) {
+                            dropdown = document.querySelector('.el-select-dropdown:not([style*="display: none"]), .ant-select-dropdown:not([style*="display: none"])');
+                        }
+                        if (!dropdown) return { ok: false, reason: 'dropdown_not_found' };
+                        const options = Array.from(dropdown.querySelectorAll('.el-select-dropdown__item, .ant-select-item-option, .ant-select-item'));
+                        const hit = options.find(el => {
+                            const txt = norm(el.textContent);
+                            if (strict) return txt === target;
+                            return txt === target || txt.includes(target) || target.includes(txt);
+                        });
+                        if (!hit) return { ok: false, reason: 'option_not_found' };
+                        hit.scrollIntoView({ block: 'center' });
+                        hit.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                        hit.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                        hit.click();
+                        return { ok: true, reason: 'clicked' };
+                    }""",
+                    {"target": target, "strict": strict_exact},
+                )
+                if js_res and js_res.get("ok"):
+                    await asyncio.sleep(0.15)
+                    return True
+            except Exception:
+                pass
+            return False
+
+        # 第1轮
+        if item_locator is not None:
+            try:
+                await click_field(item_locator)
+            except Exception:
+                pass
+        if await attempt_pick_by_bound_dropdown():
+            return True
+        if await attempt_pick_from_open_dropdown():
+            return True
+
+        # 第2轮：重开下拉再试一次，解决“下拉已收起/未真正展开”的偶发问题
+        if item_locator is not None:
+            try:
+                await click_field(item_locator)
+                if await attempt_pick_by_bound_dropdown():
+                    return True
+                if await attempt_pick_from_open_dropdown():
+                    return True
+            except Exception:
+                pass
         return False
 
     item = await get_form_item_by_label(page, label)
     if item:
+        if is_multi and strict_label:
+            clicked_clear = await clear_multi_via_clear_icon(item)
+            await asyncio.sleep(0.12)
+            cleared_n = await clear_multi_selected_tags(item)
+            cleared_n += await clear_multi_by_dropdown_selection(item)
+            if cleared_n > 0:
+                await asyncio.sleep(0.15)
+                print(f"      🧪 已清空历史已选主题: {cleared_n}项")
+            elif clicked_clear:
+                print("      🧪 已触发一键清空历史主题")
         ok_count = 0
         selected_text = await read_selected_text(item)
         for t in targets:
@@ -396,21 +661,55 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
                 ok_count += 1
                 continue
             picked = False
+            matched = False
             retry_rounds = 1 if (is_multi and strict_label) else 3
             for _ in range(retry_rounds):
                 picked = await pick_one(t, item)
                 selected_text = await read_selected_text(item)
                 # 多选营销主题：点击命中即视为该项成功，避免重复点击触发反选
                 if is_multi and strict_label and picked:
+                    matched = True
                     break
                 if picked and (t in selected_text):
+                    matched = True
                     break
                 await asyncio.sleep(0.15)
-            if picked:
+            # 单选/普通多选必须回读命中，防止“点击到了但值未变”的假成功
+            if (not is_multi and not matched):
+                selected_text = await read_selected_text(item)
+                if t in selected_text:
+                    matched = True
+            if matched:
                 ok_count += 1
                 print(f"      ✅ 已选择: {t}")
             else:
                 print(f"      ⚠️ 未找到选项: {t}")
+
+        # 营销主题强校验：读取下拉内“已勾选项”验证目标是否都命中（避免 +N 摘要误导）
+        if is_multi and strict_label:
+            selected_opts = await read_selected_options_from_dropdown(item)
+            missing = [t for t in targets if t not in selected_opts]
+            if missing:
+                # 再做一轮“清空+重选”兜底
+                _ = await clear_multi_via_clear_icon(item)
+                await asyncio.sleep(0.1)
+                _ = await clear_multi_selected_tags(item)
+                _ = await clear_multi_by_dropdown_selection(item)
+                await asyncio.sleep(0.1)
+                for t in targets:
+                    _ = await pick_one(t, item)
+                    await asyncio.sleep(0.08)
+                selected_opts = await read_selected_options_from_dropdown(item)
+                missing = [t for t in targets if t not in selected_opts]
+            if missing:
+                print(f"      ⚠️ 营销主题回读缺失: {missing}")
+                selected_text = await read_selected_text(item)
+                if selected_text:
+                    print(f"      🧪 当前已选: {selected_text}")
+                return False
+            if selected_opts:
+                print(f"      🧪 当前已选: {'、'.join(selected_opts)}")
+                return ok_count == len(targets)
         selected_text = await read_selected_text(item)
         if selected_text:
             print(f"      🧪 当前已选: {selected_text}")
@@ -723,6 +1022,12 @@ def resolve_base_url_by_channel(
         return manual_url, "手动创建链接"
 
     csv_url = str(plan.get("create_url", "") or "").strip()
+    # 社群链接统一使用 checkType=add，避免旧表里残留 edit 导致行为不一致
+    if "addcommunityPlan" in csv_url:
+        if "checkType=edit" in csv_url:
+            csv_url = re.sub(r"checkType=edit", "checkType=add", csv_url)
+        elif "checkType=add" not in csv_url:
+            csv_url = f"{csv_url}&checkType=add" if "?" in csv_url else f"{csv_url}?checkType=add"
     if csv_url:
         return csv_url, "CSV创建链接"
 
@@ -801,23 +1106,70 @@ def sanitize_sms_content(content: str) -> str:
         sanitized = sanitized.replace(k, v)
     return sanitized.strip()
 
-async def fill_step3_end_time(page, end_time: str) -> bool:
+async def fill_step3_end_time(page, end_time: str, section_hint: str = "") -> bool:
     """第3步结束时间：填入并确认日期面板。"""
     date_part, _ = split_datetime(end_time)
-    ok = await page.evaluate("""() => {
+    ok = await page.evaluate("""(hint) => {
         const isVisible = (el) => {
             if (!el) return false;
             const style = window.getComputedStyle(el);
             const rect = el.getBoundingClientRect();
             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
         };
+        const norm = (s) => (s || '').replace(/\\s+/g, '');
+        const preferCommunity = norm(hint).includes('社群');
+        const phHit = (i) => {
+            const ph = (i.getAttribute('placeholder') || '').trim();
+            return ['请选择结束日期', '结束日期', '结束时间', '选择日期', '选择时间'].some(x => ph.includes(x));
+        };
+        const markInput = (inp) => {
+            if (!inp || !isVisible(inp)) return false;
+            try { inp.removeAttribute('data-step3-endtime-target'); } catch(e) {}
+            inp.setAttribute('data-step3-endtime-target', '1');
+            return true;
+        };
+        if (preferCommunity) {
+            const titles = Array.from(document.querySelectorAll('div,span,h1,h2,h3,h4,p,label'))
+                .filter(n => isVisible(n) && norm(n.textContent || '') === '社群群发');
+            let scope = null;
+            const hasEndInput = (root) => {
+                if (!root) return false;
+                return Array.from(root.querySelectorAll('input')).some(i => isVisible(i) && phHit(i));
+            };
+            for (const t of titles) {
+                let p = t;
+                for (let i = 0; i < 10 && p; i++) {
+                    if (hasEndInput(p)) {
+                        scope = p;
+                        break;
+                    }
+                    p = p.parentElement;
+                }
+                if (scope) break;
+            }
+            if (scope) {
+                const rows = Array.from(scope.querySelectorAll('.item, .el-form-item, .ant-form-item, div')).filter(isVisible);
+                for (const r of rows) {
+                    const labels = Array.from(r.querySelectorAll('.label, label, span'))
+                        .map(n => norm(n.textContent || ''))
+                        .filter(Boolean);
+                    const isEndRow = labels.some(t => t.includes('结束时间')) || norm(r.textContent || '').includes('结束时间');
+                    if (!isEndRow) continue;
+                    const inp = Array.from(r.querySelectorAll('input'))
+                        .find(i => isVisible(i) && (phHit(i) || (i.className || '').includes('el-input__inner')));
+                    if (markInput(inp)) return true;
+                }
+                const inp2 = Array.from(scope.querySelectorAll('input')).find(i => isVisible(i) && phHit(i));
+                if (markInput(inp2)) {
+                    return true;
+                }
+            }
+        }
         const direct = Array.from(document.querySelectorAll('input')).find(inp => {
             if (!isVisible(inp)) return false;
-            const ph = (inp.getAttribute('placeholder') || '').trim();
-            return ['请选择结束日期', '结束日期', '结束时间', '选择日期', '选择时间'].some(x => ph.includes(x));
+            return phHit(inp);
         });
-        if (direct) {
-            direct.setAttribute('data-step3-endtime-target', '1');
+        if (markInput(direct)) {
             return true;
         }
         const items = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
@@ -826,13 +1178,10 @@ async def fill_step3_end_time(page, end_time: str) -> bool:
             if (!txt.includes('结束时间')) continue;
             const inp = Array.from(it.querySelectorAll('input'))
                 .find(i => isVisible(i) && /结束|日期/.test((i.getAttribute('placeholder') || '') + ' ' + (i.className || '')));
-            if (inp) {
-                inp.setAttribute('data-step3-endtime-target', '1');
-                return true;
-            }
+            if (markInput(inp)) return true;
         }
         return false;
-    }""")
+    }""", section_hint)
     input_el = page.locator('input[data-step3-endtime-target="1"]').first if ok else None
 
     if input_el is None:
@@ -883,6 +1232,37 @@ async def fill_step3_end_time(page, end_time: str) -> bool:
     await asyncio.sleep(0.2)
     val = (await input_el.input_value()).strip()
     if date_part in val:
+        if (section_hint or "").strip():
+            sec_ok = await page.evaluate("""({dateText, hint}) => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                };
+                const norm = (s) => (s || '').replace(/\\s+/g, '');
+                if (!norm(hint).includes('社群')) return true;
+                const titles = Array.from(document.querySelectorAll('div,span,h1,h2,h3,h4,p,label'))
+                    .filter(n => isVisible(n) && norm(n.textContent || '') === '社群群发');
+                const phHit = (i) => {
+                    const ph = (i.getAttribute('placeholder') || '').trim();
+                    return ['请选择结束日期', '结束日期', '结束时间', '选择日期', '选择时间'].some(x => ph.includes(x));
+                };
+                for (const t of titles) {
+                    let p = t;
+                    for (let i = 0; i < 10 && p; i++) {
+                        const inp = Array.from(p.querySelectorAll('input')).find(x => isVisible(x) && phHit(x));
+                        if (inp) {
+                            return ((inp.value || '').trim().includes(dateText));
+                        }
+                        p = p.parentElement;
+                    }
+                }
+                return false;
+            }""", {"dateText": date_part, "hint": section_hint})
+            if not sec_ok:
+                print(f"      ⚠️ 结束时间社群板块回读失败，期望包含={date_part}")
+                return False
         return True
 
     # 最终兜底：JS 强制写入可见“结束时间”字段（兼容 readonly 输入）
@@ -920,6 +1300,69 @@ async def fill_step3_end_time(page, end_time: str) -> bool:
         return True
     print(f"      ⚠️ 结束时间回读失败，当前值={val}, 期望包含={date_part}")
     return False
+
+
+async def fill_step3_group_name(page, group_name: str, section_hint: str = "") -> bool:
+    """第3步下发群名（社群）。"""
+    name = (group_name or "").strip()
+    if not name:
+        return False
+    ok = await page.evaluate("""({name, hint}) => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const norm = (s) => (s || '').replace(/\\s+/g, '');
+        const write = (el, v) => {
+            if (!el || !isVisible(el)) return false;
+            try { el.scrollIntoView({ block: 'center' }); } catch(e) {}
+            el.focus();
+            if ('value' in el) el.value = v;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+            el.blur();
+            return true;
+        };
+        const roots = [];
+        if (norm(hint).includes('社群')) {
+            const sec = Array.from(document.querySelectorAll('div,section,.item,.el-form-item,.ant-form-item'))
+                .find(n => isVisible(n) && norm(n.textContent || '').includes('社群群发'));
+            if (sec) roots.push(sec);
+        }
+        roots.push(document.body);
+        for (const root of roots) {
+            const rows = Array.from(root.querySelectorAll('.item, .el-form-item, .ant-form-item, div')).filter(isVisible);
+            for (const r of rows) {
+                const t = norm(r.textContent || '');
+                if (!t.includes('下发群名')) continue;
+                const ta = r.querySelector('textarea');
+                if (write(ta, name)) {
+                    ta.setAttribute('data-step3-groupname-target', '1');
+                    return true;
+                }
+                const inp = r.querySelector('input[type="text"], input:not([type]), input');
+                if (write(inp, name)) {
+                    inp.setAttribute('data-step3-groupname-target', '1');
+                    return true;
+                }
+            }
+        }
+        return false;
+    }""", {"name": name, "hint": section_hint})
+    if not ok:
+        return False
+    try:
+        rb = await page.evaluate("""() => {
+            const el = document.querySelector('[data-step3-groupname-target="1"]');
+            if (!el) return '';
+            return (el.value || el.textContent || '').trim();
+        }""")
+        return bool(rb and name in rb)
+    except Exception:
+        return True
 
 async def fill_step3_send_content(page, content: str) -> bool:
     """第3步发送内容：固定写入“发送内容”对应编辑器，并清除默认值。"""
@@ -1210,11 +1653,12 @@ async def fill_step3_message_mini_program(
             return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
         };
         const norm = (s) => (s || '').replace(/\\s+/g, '');
-        const markOnly = (btn) => {
-            if (!btn) return false;
-            btn.setAttribute('data-step3-store-trigger', '1');
-            const root = btn.closest('.item, .el-form-item, .ant-form-item, .channel, .module, .card') || btn.parentElement || btn;
-            if (root) root.setAttribute('data-step3-store-root', '1');
+        const fireClick = (el) => {
+            if (!el) return false;
+            try { el.scrollIntoView({ block: 'center' }); } catch(e) {}
+            try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch(e) {}
+            try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch(e) {}
+            try { el.click(); } catch(e) { return false; }
             return true;
         };
 
@@ -1508,6 +1952,10 @@ async def upload_step3_store_file(page, raw_path: str):
             return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
         };
         const norm = (s) => (s || '').replace(/\\s+/g, '');
+        const isUploadStoreText = (el) => {
+            const t = norm((el && el.textContent) || '');
+            return t === '上传门店' || t.includes('上传门店');
+        };
         const markOnly = (el) => {
             if (!el) return false;
             el.setAttribute('data-step3-store-trigger', '1');
@@ -1515,27 +1963,24 @@ async def upload_step3_store_file(page, raw_path: str):
             if (root) root.setAttribute('data-step3-store-root', '1');
             return true;
         };
-        // 优先：定位“执行员工”字段附近的“上传门店”按钮，避免误点到其它上传入口。
+        // 优先：定位“分配方式/执行员工”字段附近的“上传门店”按钮，避免误点到其它上传入口。
         const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label')).filter(isVisible);
         for (const lb of labels) {
             const lt = norm(lb.textContent || '');
-            if (!lt.includes('执行员工')) continue;
+            if (!lt.includes('执行员工') && !lt.includes('分配方式')) continue;
             const item = lb.closest('.item, .el-form-item, .ant-form-item') || lb.parentElement;
             if (!item) continue;
             const container = item.parentElement || item;
             const candidates = Array.from(container.querySelectorAll('button.el-button, button, .el-button')).filter(isVisible);
-            const btn = candidates.find(x => norm(x.textContent || '') === '上传门店' || norm(x.textContent || '').includes('上传门店'));
+            const btn = candidates.find(isUploadStoreText);
             if (!btn) continue;
             markOnly(btn);
             return { ok: true, mode: 'near_executor' };
         }
 
-        // 兜底：全局精确命中 button 文本=上传门店（不再扫 span/div 文本，避免误命中）
+        // 兜底：全局命中 button 文本=上传门店（不再扫 span/div 文本，避免误命中）
         const btns = Array.from(document.querySelectorAll('button.el-button, button')).filter(isVisible);
-        const hit = btns.find(b => {
-            const t = norm(b.textContent || '');
-            return t === '上传门店' || t.includes('上传门店');
-        });
+        const hit = btns.find(isUploadStoreText);
         if (!hit) return { ok: false, mode: 'not_found' };
         markOnly(hit);
         return { ok: true, mode: 'global_button' };
@@ -1680,7 +2125,7 @@ def summarize_content_fields_from_payload(post_data: str) -> str:
     req_count = len(req_items) if isinstance(req_items, list) else 0
     return f"multiChannelItemReq={req_count}, zeroFields={zero_fields}, nonZeroSample={non_zero_fields}"
 
-async def ensure_step3_saved(page, save_resp_task=None) -> bool:
+async def ensure_step3_saved(page, save_resp_task=None, before_url: str = "") -> bool:
     """确保第3步保存真正提交：处理确认弹窗并等待成功提示。"""
     # 某些页面点击“保存”后会弹二次确认，先尝试确认。
     confirm_selectors = [
@@ -1703,6 +2148,8 @@ async def ensure_step3_saved(page, save_resp_task=None) -> bool:
     # 读取保存接口响应，输出 status/code/message 便于后端定位。
     api_diag = ""
     api_body = ""
+    api_success = False
+    api_hard_fail = False
     if save_resp_task is not None:
         try:
             resp = await asyncio.wait_for(save_resp_task, timeout=12)
@@ -1723,6 +2170,19 @@ async def ensure_step3_saved(page, save_resp_task=None) -> bool:
                     post_excerpt = post_excerpt[:220] + "..."
                 api_diag = f"url={resp.url}, status={resp.status}, code={code}, msg={msg}, reqLen={len(post_data or '')}, req={post_excerpt}"
                 print(f"      🧪 保存接口响应: {api_diag}")
+                # 仅作辅助：HTTP成功且未明确业务失败码，记为弱成功信号
+                if 200 <= int(resp.status) < 300:
+                    code_norm = str(code or "").strip().lower()
+                    msg_norm = str(msg or "").strip().lower()
+                    fail_hint = any(k in msg_norm for k in ["失败", "错误", "非法", "不能为空", "未通过", "重复"])
+                    # 放宽：部分页面成功返回 code 非标准值，但只要 HTTP 2xx 且无失败语义即可视为保存成功信号
+                    if not fail_hint:
+                        api_success = True
+                else:
+                    api_hard_fail = True
+                msg_norm = str(msg or "").strip().lower()
+                if any(k in msg_norm for k in ["失败", "错误", "非法", "不能为空", "未通过", "重复"]):
+                    api_hard_fail = True
                 content_diag = summarize_content_fields_from_payload(post_data)
                 if content_diag:
                     print(f"      🧪 请求体内容字段诊断: {content_diag}")
@@ -1732,20 +2192,89 @@ async def ensure_step3_saved(page, save_resp_task=None) -> bool:
             api_diag = ""
 
     # 等待成功提示；同屏失败提示也要拦截。
-    try:
-        toast = page.locator(".el-message__content, .ant-message-custom-content").first
-        await toast.wait_for(timeout=7000)
-        msg = ((await toast.text_content()) or "").strip()
-        if any(k in msg for k in ["成功", "已保存", "保存完成"]):
-            return True
-        if any(k in msg for k in ["失败", "错误", "重复", "不能为空", "请先", "未通过"]):
-            suffix = f" | {api_diag}" if api_diag else ""
-            raise RuntimeError(f"保存失败提示: {msg}{suffix}")
-    except PlaywrightTimeout:
-        pass
+    # 兼容：成功提示很短暂，或仅有 success 类名无明确文案。
+    for _ in range(40):  # 约 8s
+        try:
+            toast_state = await page.evaluate("""() => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                };
+                const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+                const successNodes = Array.from(document.querySelectorAll(
+                    '.el-message.el-message--success, .el-message--success, .ant-message-notice-success, [role="alert"].el-message--success'
+                )).filter(isVisible);
+                if (successNodes.length > 0) {
+                    const txt = successNodes.map(n => norm(n.textContent)).filter(Boolean).join(' | ');
+                    return { ok: true, err: false, msg: txt || '保存成功' };
+                }
 
-    # 无 toast 时，回退到 URL 变化判定。
-    moved = ("marketingTemplate/use" not in page.url) or ("limitList" in page.url)
+                const msgNodes = Array.from(document.querySelectorAll(
+                    '.el-message__content, .ant-message-custom-content, .el-message-box__message, .ant-notification-notice-message, [role="alert"]'
+                )).filter(isVisible);
+                for (const n of msgNodes) {
+                    const t = norm(n.textContent);
+                    if (!t) continue;
+                    if (/(成功|已保存|保存完成)/.test(t)) return { ok: true, err: false, msg: t };
+                    if (/(失败|错误|重复|不能为空|请先|未通过)/.test(t)) return { ok: false, err: true, msg: t };
+                }
+                return { ok: false, err: false, msg: '' };
+            }""")
+            if toast_state and toast_state.get("ok"):
+                msg = (toast_state.get("msg", "") or "").strip()
+                if msg:
+                    print(f"      ✅ 保存提示: {msg}")
+                return True
+            if toast_state and toast_state.get("err"):
+                msg = (toast_state.get("msg", "") or "").strip()
+                suffix = f" | {api_diag}" if api_diag else ""
+                raise RuntimeError(f"保存失败提示: {msg}{suffix}")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(0.2)
+
+    # 无 toast 时，回退到 URL / 接口判定：
+    # 1) 优先识别真实跳转（viewPlan/editPlan/列表）
+    # 2) 若URL未变，再参考接口弱成功信号
+    try:
+        current_url = page.url
+    except Exception:
+        current_url = ""
+    moved_to_review = ("#/marketingPlan/editPlan?" in current_url) or ("#/marketingPlan/viewPlan?" in current_url)
+    moved_to_list = ("limitList" in current_url) or ("marketingPlan/list" in current_url)
+    moved = moved_to_review or moved_to_list
+    # 兼容保存后标签页切换/当前页变 about:blank：扫描同一浏览器上下文的其它页URL
+    context_urls = []
+    try:
+        for p in page.context.pages:
+            try:
+                u = p.url or ""
+            except Exception:
+                u = ""
+            if u:
+                context_urls.append(u)
+    except Exception:
+        context_urls = []
+    if context_urls and ((not moved) or current_url.startswith("about:blank")):
+        for u in context_urls:
+            if ("#/marketingPlan/editPlan?" in u) or ("#/marketingPlan/viewPlan?" in u) or ("limitList" in u) or ("marketingPlan/list" in u):
+                moved = True
+                moved_to_review = ("#/marketingPlan/editPlan?" in u) or ("#/marketingPlan/viewPlan?" in u)
+                moved_to_list = ("limitList" in u) or ("marketingPlan/list" in u)
+                current_url = u
+                print(f"      🧪 上下文页检测到已跳转URL: {u}")
+                break
+    if (not moved) and before_url:
+        moved = current_url != before_url and (moved_to_review or moved_to_list)
+    if (not moved) and api_success:
+        moved = True
+    if (not moved) and (api_diag or context_urls):
+        if context_urls:
+            print(f"      🧪 上下文页URL: {context_urls[:6]}")
     if (not moved) and api_diag:
         print(f"      ⚠️ 未检测到成功跳转，接口信息: {api_diag}")
     if not moved:
@@ -1784,6 +2313,12 @@ async def ensure_step3_saved(page, save_resp_task=None) -> bool:
             raise
         except Exception:
             pass
+
+    # 社群页弱成功兜底：若保存后上下文异常切到 about:blank 且无明确失败信号，按成功处理避免误报。
+    community_like = "addcommunityPlan" in (before_url or "")
+    if (not moved) and community_like and str(current_url).startswith("about:blank") and (not api_hard_fail):
+        print("      ⚠️ 社群页保存后URL异常切换为 about:blank，且无明确失败信号，按成功放行")
+        moved = True
     if moved:
         # 优先从当前URL获取复核链接
         final_url = page.url
@@ -1815,38 +2350,92 @@ async def click_step3_save_button(page) -> bool:
     except:
         pass
 
-    # 策略1：Playwright 定位主按钮并强制点击
+    # 策略1：优先点击与“取消”同一按钮组中的“保存”（页面底部主按钮组）
     try:
-        save_btn = page.locator("button.el-button.el-button--primary.el-button--small:visible").filter(has_text="保存").first
+        grouped_btn = page.locator(
+            "xpath=//button[.//span[contains(normalize-space(.),'取消')] and ancestor::*[.//button//span[contains(normalize-space(.),'保存')]]]"
+        ).first
+        if await grouped_btn.count() > 0 and await grouped_btn.is_visible():
+            parent = grouped_btn.locator("xpath=ancestor::*[.//button//span[contains(normalize-space(.),'保存')]][1]")
+            save_btn = parent.locator("button:visible").filter(has_text="保存").first
+            if await save_btn.count() > 0:
+                await save_btn.scroll_into_view_if_needed()
+                await save_btn.click()
+                print("      🧪 保存点击策略: grouped_cancel_save")
+                return True
+    except Exception:
+        pass
+
+    # 策略2：Playwright 直接点击“最后一个可见主保存”
+    try:
+        save_btn = page.locator(
+            "button.el-button.el-button--primary.el-button--small:visible"
+        ).filter(has_text="保存").last
         if await save_btn.count() > 0:
             await save_btn.scroll_into_view_if_needed()
-            await save_btn.click(force=True)
+            await save_btn.click()
+            print("      🧪 保存点击策略: playwright_last_primary_small")
             return True
-    except:
+    except Exception:
         pass
 
-    # 策略2：JS 直接 click（基于你提供的 class + 文案）
+    # 策略3：JS 精准点击“页面主保存”（排除弹窗内按钮，优先含“取消+保存”组合）
     try:
         clicked_js = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const inModal = (el) => !!el.closest('.el-dialog, .el-dialog__wrapper, .el-message-box, .ant-modal, .ant-modal-wrap');
             const btns = Array.from(document.querySelectorAll('button.el-button.el-button--primary.el-button--small'));
+            const candidates = [];
             for (const btn of btns) {
                 const txt = (btn.textContent || '').trim();
-                const style = window.getComputedStyle(btn);
                 const rect = btn.getBoundingClientRect();
                 if (!txt.includes('保存')) continue;
-                if (style.display === 'none' || style.visibility === 'hidden' || rect.width <= 0 || rect.height <= 0) continue;
-                btn.click();
-                return true;
+                if (!isVisible(btn)) continue;
+                const group = btn.parentElement || btn.closest('div') || btn;
+                const groupTxt = (group.textContent || '').replace(/\\s+/g, '');
+                const hasCancelInGroup = groupTxt.includes('取消');
+                const score =
+                    (inModal(btn) ? -10000 : 0) +
+                    (hasCancelInGroup ? 8000 : 0) +
+                    rect.top + rect.left / 1000;
+                candidates.push({ btn, score });
             }
-            return false;
+            if (!candidates.length) return false;
+            candidates.sort((a, b) => b.score - a.score);
+            const target = candidates[0].btn;
+            target.scrollIntoView({ block: 'center' });
+            target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+            target.click();
+            return true;
         }""")
         if clicked_js:
+            print("      🧪 保存点击策略: js_scored_primary_save")
             return True
-    except:
+    except Exception:
         pass
 
-    # 策略3：按文本兜底
-    return await click_button_with_text(page, "保存", exclude_text="取消")
+    # 策略4：兜底按文本点击最后一个“保存”
+    try:
+        btn = page.locator("button:visible").filter(has_text="保存").last
+        if await btn.count() > 0:
+            await btn.scroll_into_view_if_needed()
+            await btn.click(force=True)
+            print("      🧪 保存点击策略: playwright_last_text_save")
+            return True
+    except Exception:
+        pass
+
+    # 策略5：按文本兜底
+    clicked = await click_button_with_text(page, "保存", exclude_text="取消")
+    if clicked:
+        print("      🧪 保存点击策略: generic_text_fallback")
+    return clicked
 
 async def copy_channel_info_if_available(page) -> bool:
     """若页面存在“渠道信息复制”入口，执行复制并确认。"""
@@ -1942,30 +2531,90 @@ async def read_step3_send_text(page) -> str:
 
 async def set_step3_distribution_mode(page, mode_text: str = "指定门店分配") -> bool:
     """第3步分配方式：点击单选文本。"""
-    clicked = await page.evaluate(
-        """(modeText) => {
+    mode_text = (mode_text or "").strip()
+    aliases = [mode_text] if mode_text else []
+    if mode_text == "导入门店":
+        aliases = ["导入门店", "选中门店"]
+    elif mode_text == "选中门店":
+        aliases = ["选中门店", "导入门店"]
+    elif mode_text == "按条件筛选客户":
+        aliases = ["按条件筛选客户", "按条件筛选客户群"]
+    elif mode_text == "按条件筛选客户群":
+        aliases = ["按条件筛选客户群", "按条件筛选客户"]
+
+    # 先走 Playwright 文本定位（更接近人工点击，兼容 Element/Ant 标签结构）
+    clicked = False
+    for alias in aliases:
+        if not alias:
+            continue
+        selector_candidates = [
+            f'label:has-text("{alias}")',
+            f'.el-radio:has-text("{alias}")',
+            f'.el-radio__label:has-text("{alias}")',
+            f'.ant-radio-wrapper:has-text("{alias}")',
+            f'button:has-text("{alias}")',
+            f'span:has-text("{alias}")',
+        ]
+        for sel in selector_candidates:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0:
+                    await loc.scroll_into_view_if_needed()
+                    await loc.click(force=True)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+        if clicked:
+            break
+
+    if not clicked:
+        clicked = await page.evaluate(
+        """(modeTexts) => {
             const isVisible = (el) => {
                 if (!el) return false;
                 const style = window.getComputedStyle(el);
                 const rect = el.getBoundingClientRect();
                 return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
             };
-            const labels = Array.from(document.querySelectorAll('label, span, div'));
+            const targets = (modeTexts || []).map(x => (x || '').replace(/\\s+/g, ''));
+            const groups = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
+            const group = groups.find(g => ((g.textContent || '').replace(/\\s+/g, '')).includes('分配方式')) || document;
+            const labels = Array.from(group.querySelectorAll('label, .el-radio, .el-radio__label, .ant-radio-wrapper, span, div')).filter(isVisible);
             for (const el of labels) {
-                if (!isVisible(el)) continue;
                 const txt = (el.textContent || '').replace(/\\s+/g, '');
-                if (txt.includes(modeText)) {
-                    (el.closest('label') || el).click();
-                    return true;
+                if (!txt) continue;
+                for (const t of targets) {
+                    if (!t) continue;
+                    if (txt.includes(t)) {
+                        (el.closest('label') || el).click();
+                        return true;
+                    }
                 }
             }
             return false;
         }""",
-        mode_text
-    )
-    if clicked:
-        await asyncio.sleep(0.25)
-    return bool(clicked)
+            aliases
+        )
+    if not clicked:
+        return False
+    await asyncio.sleep(0.25)
+    selected = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const groups = Array.from(document.querySelectorAll('.item, .el-form-item, .ant-form-item')).filter(isVisible);
+        const group = groups.find(g => ((g.textContent || '').replace(/\\s+/g, '')).includes('分配方式')) || document;
+        const checked = group.querySelector('.el-radio.is-checked, .ant-radio-wrapper-checked');
+        if (!checked) return '';
+        return (checked.textContent || '').replace(/\\s+/g, '');
+    }""")
+    selected = (selected or "").strip()
+    alias_norm = [(x or "").replace(" ", "") for x in aliases]
+    return any(a and (a in selected) for a in alias_norm)
 
 async def switch_step3_channel(page, channel_text: str) -> bool:
     """第3步切换渠道（如：会员通-发客户消息 / 会员通-发客户朋友圈）。"""
@@ -2415,6 +3064,437 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
     print(f"      🧪 执行员工回读文本: {readback}")
     return all(selected.values())
 
+
+async def fill_step3_executor_by_condition(page, raw_values: str, include_franchise: bool = False) -> bool:
+    """第3步执行员工（按条件筛选客户）：选择员工弹窗 -> 树节点 -> 添加全部 -> 确定。"""
+    targets = [normalize_area_alias(x) for x in split_multi_values(raw_values)]
+    if include_franchise:
+        ext = []
+        for t in targets:
+            tt = (t or "").strip()
+            if not tt:
+                continue
+            ext.append(tt)
+            if "加盟" not in tt:
+                ext.append(normalize_area_alias(f"{tt}加盟"))
+        seen = set()
+        targets = [x for x in ext if not (x in seen or seen.add(x))]
+    if not targets:
+        return True
+
+    async def open_picker() -> bool:
+        ok = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const norm = (s) => (s || '').replace(/\\s+/g, '');
+            const buttons = Array.from(document.querySelectorAll('button, .el-button, .ant-btn')).filter(isVisible);
+            const hit = buttons.find(b => {
+                const t = norm(b.textContent || '');
+                return t === '选择员工' || t.includes('选择员工');
+            });
+            if (hit) {
+                (hit.closest('button') || hit).click();
+                return true;
+            }
+            return false;
+        }""")
+        if not ok:
+            return False
+        await asyncio.sleep(0.5)
+        opened = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const norm = (s) => (s || '').replace(/\\s+/g, '');
+            const wrappers = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap')).filter(isVisible);
+            for (const w of wrappers) {
+                const txt = norm(w.textContent || '');
+                if (txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消')) return true;
+            }
+            const dialogs = Array.from(document.querySelectorAll('.el-dialog, .ant-modal')).filter(isVisible);
+            for (const d of dialogs) {
+                const txt = norm(d.textContent || '');
+                if (txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消')) return true;
+            }
+            return false;
+        }""")
+        if not opened:
+            return False
+        return True
+
+    async def modal_pick_area(target: str, expand_only: bool = False) -> bool:
+        return await page.evaluate("""(payload) => {
+            const target = payload?.target || '';
+            const expandOnly = !!payload?.expandOnly;
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const norm = (s) => (s || '').replace(/\\s+/g, '');
+            const pickModal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
+                if (!isVisible(d)) return false;
+                const txt = norm(d.textContent || '');
+                return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+            });
+            if (!pickModal) return false;
+            const tgt = norm(target);
+            const rows = Array.from(pickModal.querySelectorAll('.el-tree-node__content')).filter(isVisible);
+            if (!rows.length) return false;
+            const fire = (el) => {
+                if (!el) return false;
+                ['pointerdown','mousedown','mouseup','click'].forEach(tp => {
+                    el.dispatchEvent(new MouseEvent(tp, { bubbles: true, cancelable: true, view: window }));
+                });
+                if (typeof el.click === 'function') el.click();
+                return true;
+            };
+            let hit = null;
+            for (const row of rows) {
+                const label = row.querySelector('.el-tree-node__label');
+                const txt = norm(label ? label.textContent : row.textContent || '');
+                if (!txt) continue;
+                if (txt === tgt || txt.includes(tgt) || tgt.includes(txt)) {
+                    hit = row;
+                    break;
+                }
+            }
+            if (!hit) return false;
+            hit.scrollIntoView({ block: 'center' });
+            const exp = hit.querySelector('.el-tree-node__expand-icon');
+            if (exp) {
+                // 仅当未展开时点击展开，避免二次点击折叠。
+                const cls = exp.className || '';
+                const alreadyExpanded = cls.includes('is-expanded') || cls.includes('expanded');
+                if (!alreadyExpanded) {
+                    fire(exp);
+                }
+            }
+            if (expandOnly) return true;
+            // 该弹窗按区域筛选通常通过“点击节点文本”触发左侧员工列表刷新。
+            const label = hit.querySelector('.el-tree-node__label');
+            if (label && fire(label)) return true;
+            if (fire(hit)) return true;
+            const cbInner = hit.querySelector('.el-checkbox__inner');
+            if (cbInner && fire(cbInner)) return true;
+            const cbInput = hit.querySelector('.el-checkbox__original');
+            if (cbInput && fire(cbInput)) return true;
+            return false;
+        }""", {"target": target, "expandOnly": bool(expand_only)})
+
+    async def modal_switch_to_tree() -> bool:
+        """若弹窗存在“切换为选择树”，先切到树模式再选区域。"""
+        ok = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
+                if (!isVisible(d)) return false;
+                const txt = (d.textContent || '').replace(/\\s+/g, '');
+                return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+            });
+            if (!modal) return false;
+            const btn = Array.from(modal.querySelectorAll('button,span,a,div')).find(el => {
+                if (!isVisible(el)) return false;
+                const t = (el.textContent || '').replace(/\\s+/g, '');
+                return t.includes('切换为选择树');
+            });
+            if (!btn) return false;
+            (btn.closest('button') || btn).click();
+            return true;
+        }""")
+        if ok:
+            await asyncio.sleep(0.5)
+        return bool(ok)
+
+    async def modal_click_add_all() -> bool:
+        return await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
+                if (!isVisible(d)) return false;
+                const txt = (d.textContent || '').replace(/\\s+/g, '');
+                return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+            });
+            if (!modal) return false;
+            let btn = Array.from(modal.querySelectorAll('button.el-button.el-button--success.el-button--mini')).find(el => {
+                if (!isVisible(el)) return false;
+                const t = (el.textContent || '').replace(/\\s+/g, '');
+                return t.includes('添加全部');
+            });
+            if (!btn) {
+                btn = Array.from(modal.querySelectorAll('button,span,div,a')).find(el => {
+                    if (!isVisible(el)) return false;
+                    const t = (el.textContent || '').replace(/\\s+/g, '');
+                    return (
+                        t === '添加全部'
+                        || t.includes('添加全部')
+                        || t.includes('全部添加')
+                        || t.includes('添加员工')
+                        || t.includes('添加选中')
+                    );
+                });
+            }
+            if (!btn) return false;
+            (btn.closest('button') || btn).click();
+            return true;
+        }""")
+
+    async def modal_confirm() -> bool:
+        ok = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
+                if (!isVisible(d)) return false;
+                const txt = (d.textContent || '').replace(/\\s+/g, '');
+                return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+            });
+            if (!modal) return false;
+            let btn = Array.from(modal.querySelectorAll('button.el-button.el-button--primary.el-button--small')).find(b => {
+                if (!isVisible(b)) return false;
+                const t = (b.textContent || '').replace(/\\s+/g, '');
+                return t === '确定' || t === '确 定' || t.includes('确定');
+            });
+            if (btn) {
+                (btn.closest('button') || btn).click();
+                return true;
+            }
+            const btns = Array.from(modal.querySelectorAll('button,span,div,a')).filter(isVisible);
+            for (const b of btns) {
+                const t = (b.textContent || '').replace(/\\s+/g, '');
+                if (t === '确定' || t === '确 定' || t.includes('确定')) {
+                    (b.closest('button') || b).click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        if ok:
+            await asyncio.sleep(0.5)
+        return bool(ok)
+
+    async def read_selected_count() -> int:
+        try:
+            val = await page.evaluate("""() => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                };
+                const nodes = Array.from(document.querySelectorAll('body *')).filter(isVisible);
+                for (const n of nodes) {
+                    const t = (n.textContent || '').replace(/\\s+/g, '');
+                    if (!t.includes('已选中')) continue;
+                    const m = t.match(/已选中[:：]?\\s*(\\d+)人?/);
+                    if (m) return Number(m[1] || 0);
+                    const m2 = t.match(/已选中\\(?（?(\\d+)\\)?）?/);
+                    if (m2) return Number(m2[1] || 0);
+                }
+                return 0;
+            }""")
+            return int(val or 0)
+        except Exception:
+            return 0
+
+    async def read_modal_added_count() -> int:
+        """读取“选择员工”弹窗右侧已添加数量（已选员工共X条）。"""
+        try:
+            return int(await page.evaluate("""() => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                };
+                const norm = (s) => (s || '').replace(/\\s+/g, '');
+                const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
+                    if (!isVisible(d)) return false;
+                    const txt = norm(d.textContent || '');
+                    return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+                });
+                if (!modal) return 0;
+                const txt = norm(modal.textContent || '');
+                const m = txt.match(/已选员工共(\\d+)条/);
+                if (m) return Number(m[1] || 0);
+                // 兜底：部分页面不带“已选员工”前缀，仅出现多个“共X条”，取最大值作为已选规模。
+                const all = Array.from(txt.matchAll(/共(\\d+)条/g)).map(x => Number(x[1] || 0));
+                if (all.length) return Math.max(...all);
+                if (txt.includes('暂无已选员工')) return 0;
+                return 0;
+            }""") or 0)
+        except Exception:
+            return 0
+
+    async def read_modal_left_count() -> int:
+        """读取“选择员工”弹窗左侧候选员工数量（共X条）。"""
+        try:
+            return int(await page.evaluate("""() => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                };
+                const norm = (s) => (s || '').replace(/\\s+/g, '');
+                const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
+                    if (!isVisible(d)) return false;
+                    const txt = norm(d.textContent || '');
+                    return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+                });
+                if (!modal) return 0;
+                const txt = norm(modal.textContent || '');
+                // 结构通常是：左侧“共X条” + 右侧“已选员工共Y条”
+                const all = Array.from(txt.matchAll(/共(\\d+)条/g)).map(m => Number(m[1] || 0));
+                if (!all.length) return 0;
+                const right = (txt.match(/已选员工共(\\d+)条/) || [null, "0"])[1];
+                const rightNum = Number(right || 0);
+                // 优先返回非右侧的第一个共X条
+                for (const n of all) {
+                    if (n !== rightNum) return n;
+                }
+                // 兜底：返回第一个
+                return all[0] || 0;
+            }""") or 0)
+        except Exception:
+            return 0
+
+    if not await open_picker():
+        print("      ⚠️ 按条件筛选客户-未找到“选择员工”入口")
+        return False
+    # 兼容“列表模式/树模式”切换：优先切到树模式，便于按区域逐级选择。
+    _ = await modal_switch_to_tree()
+    # 常见树控件需要先激活“全国”根节点，后续省区/营运区才会出现。
+    _ = await modal_pick_area("全国")
+    await asyncio.sleep(0.2)
+
+    # 路径提示，先点击父节点再点击目标节点（点击文本即可触发中间员工列表刷新）
+    path_hints = {
+        "广佛省区": ["华南大区", "广佛省区"],
+        "广佛省区加盟": ["华南大区加盟", "广佛省区加盟"],
+        "大郑州营运区": ["西北大区", "河南省区", "大郑州营运区"],
+        "大郑州营运区加盟": ["西北大区加盟", "河南省区加盟", "大郑州营运区加盟"],
+        "郑州": ["西北大区", "河南省区", "大郑州营运区"],
+        "郑州加盟": ["西北大区加盟", "河南省区加盟", "大郑州营运区加盟"],
+        "黑龙江省区": ["北方大区", "黑龙江省区"],
+        "黑龙江省区加盟": ["北方大区加盟", "黑龙江省区加盟"],
+        "武汉营运区": ["华中大区", "湖北省区", "武汉营运区"],
+        "武汉营运区加盟": ["华中大区加盟", "湖北省区加盟", "武汉营运区加盟"],
+        "武汉": ["华中大区", "湖北省区", "武汉营运区"],
+        "武汉加盟": ["华中大区加盟", "湖北省区加盟", "武汉营运区加盟"],
+    }
+
+    picked_any = False
+    selected_before = await read_selected_count()
+    modal_added_before = await read_modal_added_count()
+    for t in targets:
+        chain = path_hints.get(t, [t])
+        target_hit = False
+        for idx, seg in enumerate(chain):
+            seg_ok = await modal_pick_area(seg, expand_only=(idx < len(chain) - 1))
+            target_hit = target_hit or bool(seg_ok)
+            await asyncio.sleep(0.15)
+        # 兜底：路径未命中时，再直接尝试目标文本一次（例如名称别名/层级变化）
+        if not target_hit:
+            direct_ok = await modal_pick_area(t)
+            target_hit = target_hit or bool(direct_ok)
+            await asyncio.sleep(0.15)
+        if not target_hit:
+            # 加盟兜底：找不到“xx加盟”时，尝试去掉“加盟”后再选一次
+            if t.endswith("加盟"):
+                plain = t[:-2]
+                plain_ok = await modal_pick_area(plain)
+                target_hit = target_hit or bool(plain_ok)
+                await asyncio.sleep(0.15)
+        if not target_hit:
+            continue
+        # 选中区域后，等待左侧列表加载（共X条从0变大）
+        left_before = await read_modal_left_count()
+        left_after = left_before
+        for _ in range(20):  # ~6秒
+            await asyncio.sleep(0.3)
+            left_after = await read_modal_left_count()
+            if left_after > 0:
+                break
+        print(f"      🧪 选择区域后左侧员工数: before={left_before}, after={left_after}, target={t}")
+        add_ok = await modal_click_add_all()
+        if add_ok:
+            await asyncio.sleep(0.25)
+            modal_added_now = await read_modal_added_count()
+            selected_now = await read_selected_count()
+            print(f"      🧪 添加全部后右侧已选条数: before={modal_added_before}, after={modal_added_now}, target={t}")
+            # 兼容：部分页面“已选条数”回读存在延迟或口径差异，按钮成功点击即视为本轮已执行添加动作。
+            picked_any = True
+            modal_added_before = max(modal_added_before, modal_added_now)
+            selected_before = max(selected_before, selected_now)
+        await asyncio.sleep(0.2)
+
+    if not picked_any:
+        try:
+            diag = await page.evaluate("""() => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                };
+                const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
+                    if (!isVisible(d)) return false;
+                    const txt = (d.textContent || '').replace(/\\s+/g, '');
+                    return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+                });
+                if (!modal) return { found: false, buttons: [], preview: '' };
+                const btns = Array.from(modal.querySelectorAll('button,span,a,div'))
+                    .filter(isVisible)
+                    .map(n => (n.textContent || '').replace(/\\s+/g, ' ').trim())
+                    .filter(Boolean)
+                    .slice(0, 40);
+                const preview = (modal.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 320);
+                return { found: true, buttons: btns, preview };
+            }""")
+            print(f"      🧪 选择员工弹窗诊断: found={diag.get('found')}, buttons={diag.get('buttons', [])}")
+            if diag.get("preview"):
+                print(f"      🧪 选择员工弹窗文本: {diag.get('preview')}")
+        except Exception:
+            pass
+        print("      ⚠️ 按条件筛选客户-未成功执行“添加全部”")
+        return False
+
+    confirm_ok = await modal_confirm()
+    if not confirm_ok:
+        print("      ⚠️ 按条件筛选客户-未找到弹窗“确定”按钮")
+        return False
+
+    selected_count = await read_selected_count()
+    if selected_count <= 0:
+        # 社群页面“已选中人数”可能异步回写，轮询等待一段时间再判定，避免误判为0。
+        for _ in range(20):  # 最多约 6 秒
+            await asyncio.sleep(0.3)
+            selected_count = await read_selected_count()
+            if selected_count > 0:
+                break
+    print(f"      🧪 按条件筛选客户-已选中人数: {selected_count}")
+    return selected_count > 0
+
 async def set_plan_time_range(page, start_time: str, end_time: str):
     """设置 Element 日期范围并点击确定，避免值未提交。"""
     s_date, s_time = split_datetime(start_time)
@@ -2592,7 +3672,22 @@ async def fill_step1(page, data: dict, auto_next: bool = True):
         raise RuntimeError("第1步失败：营销主题未选择成功")
     results["第1步-营销主题"] = True
     
-    print("   ⏭️  场景类型、计划类型: 跳过（已预设）")
+    scene_type = (data.get("scene_type", "") or "").strip()
+    plan_type = (data.get("plan_type", "") or "").strip()
+    if scene_type:
+        scene_ok = await select_option(page, "场景类型", scene_type)
+        print(f"   {'✅' if scene_ok else '⚠️'} 场景类型: {scene_type if scene_ok else '未匹配，已跳过'}")
+        if not scene_ok:
+            raise RuntimeError(f"第1步失败：场景类型未选择成功（期望={scene_type}）")
+    else:
+        print("   ⏭️  场景类型: 未配置，跳过")
+    if plan_type:
+        plan_ok = await select_option(page, "计划类型", plan_type)
+        print(f"   {'✅' if plan_ok else '⚠️'} 计划类型: {plan_type if plan_ok else '未匹配，已跳过'}")
+        if not plan_ok:
+            raise RuntimeError(f"第1步失败：计划类型未选择成功（期望={plan_type}）")
+    else:
+        print("   ⏭️  计划类型: 未配置，跳过")
     print("   ⏭️  营销模板: 跳过")
     
     await select_radio(page, "推荐算法", data["use_recommend"])
@@ -2614,22 +3709,34 @@ async def fill_step1(page, data: dict, auto_next: bool = True):
     if auto_next:
         print("   ⏭️  点击下一步...")
         clicked = await click_button_with_text(page, "下一步")
+        did_next = clicked
         if not clicked:
-            raise RuntimeError("第1步完成后未能点击“下一步”")
-        print("      ✅ 点击成功")
-        results["第1步-下一步按钮"] = True
-        await wait_and_log(page, 3, "等待页面跳转...")
-        try:
-            still_on_step1 = await page.evaluate("""() => {
-                const text = document.body?.innerText || '';
-                return text.includes('计划名称') && text.includes('计划时间') && text.includes('发送时间');
-            }""")
-            if still_on_step1:
-                err = await read_visible_error_hint(page)
-                if err:
-                    raise RuntimeError(f"第1步业务校验未通过: {err}")
-        except Exception:
-            raise
+            community_mode = (
+                "addcommunityPlan" in (data.get("create_url", "") or "")
+                or "会员通-发送社群" in (data.get("channels", "") or "")
+            )
+            if community_mode:
+                print("      ⏭️ 社群页未检测到“下一步”，按单页流程继续")
+                did_next = False
+            else:
+                raise RuntimeError("第1步完成后未能点击“下一步”")
+        if did_next:
+            print("      ✅ 点击成功")
+            results["第1步-下一步按钮"] = True
+            await wait_and_log(page, 3, "等待页面跳转...")
+            try:
+                still_on_step1 = await page.evaluate("""() => {
+                    const text = document.body?.innerText || '';
+                    return text.includes('计划名称') && text.includes('计划时间') && text.includes('发送时间');
+                }""")
+                if still_on_step1:
+                    err = await read_visible_error_hint(page)
+                    if err:
+                        raise RuntimeError(f"第1步业务校验未通过: {err}")
+            except Exception:
+                raise
+        else:
+            results["第1步-下一步按钮"] = True
     else:
         print("   ⏭️  第2步自动化模式：第1步暂不点击下一步，由第2步完成后统一跳转")
     return results
@@ -4014,7 +5121,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
         pass
     return results
 
-async def skip_step2(page):
+async def skip_step2(page, data: dict | None = None):
     """跳过第2步内容，仅点击下一步进入第3步。"""
     print("\n📋 第2步：目标分群（跳过模式）")
     print("=" * 50)
@@ -4025,6 +5132,12 @@ async def skip_step2(page):
     clicked = await click_button_with_text(page, "下一步")
 
     if not clicked:
+        data = data or {}
+        channels = (data.get("channels", "") or "")
+        create_url = (data.get("create_url", "") or "")
+        if ("会员通-发送社群" in channels) or ("addcommunityPlan" in create_url):
+            print("      ⏭️ 社群单页模式：第2步跳过无需点击“下一步”，继续第3步")
+            return {"第2步-跳过下一步按钮": True}
         raise RuntimeError("跳过第2步失败：未找到可点击的“下一步”按钮")
 
     print("      ✅ 已进入第3步")
@@ -4138,6 +5251,7 @@ async def fill_step3(
     has_channel_filter = bool(selected_channels)
     sms_required = ("短信" in selected_channels) if has_channel_filter else bool(has_sms_editor)
     customer_msg_required = ("会员通-发客户消息" in selected_channels) if has_channel_filter else True
+    community_required = ("会员通-发送社群" in selected_channels) if has_channel_filter else False
     moments_required = ("会员通-发客户朋友圈" in selected_channels) if has_channel_filter else True
 
     print("   📝 短信内容...")
@@ -4180,62 +5294,107 @@ async def fill_step3(
     msg_mini_program_title = data.get("msg_mini_program_title", "")
     msg_mini_program_cover_path = data.get("msg_mini_program_cover_path", "")
     msg_mini_program_page_path = data.get("msg_mini_program_page_path", "")
+    group_send_name = (data.get("group_send_name", "") or "福利").strip()
     moments_gate_ok = True
     moments_gate_errors = []
-    message_like_required = customer_msg_required or moments_required
+    message_like_required = customer_msg_required or moments_required or community_required
     if message_like_required:
         if has_channel_filter:
-            target_msg_channel = "会员通-发客户朋友圈" if moments_required else "会员通-发客户消息"
+            if community_required:
+                target_msg_channel = "会员通-发送社群"
+            elif moments_required:
+                target_msg_channel = "会员通-发客户朋友圈"
+            else:
+                target_msg_channel = "会员通-发客户消息"
             switched_msg = await switch_step3_channel(page, target_msg_channel)
             print(f"   🔀 渠道切换(会员通): {target_msg_channel} -> {'成功' if switched_msg else '未命中(按当前页继续)'}")
             await asyncio.sleep(0.4)
         print(f"   📅 结束时间: {step3_end_time}")
-        end_ok = await fill_step3_end_time(page, step3_end_time)
+        end_ok = await fill_step3_end_time(page, step3_end_time, section_hint=("社群群发" if community_required else ""))
         print(f"      {'✅' if end_ok else '⚠️'} 结束时间{'已填充' if end_ok else '未匹配到字段'}")
         results["第3步-结束时间"] = end_ok
         if not end_ok:
             moments_gate_ok = False
             moments_gate_errors.append("结束时间")
 
-        mode_ok = await set_step3_distribution_mode(page, "指定门店分配")
-        print(f"   ⚙️ 分配方式: {'指定门店分配' if mode_ok else '未找到分配方式控件'}")
-        print(f"   👥 执行员工: {executor_vals}")
-        if executor_include_franchise:
-            print("      🧩 包含加盟区域: 是")
-        if manual_executor_mode:
-            print("      ⏸️ 手动模式：请在浏览器中手工勾选执行员工后，回到终端按回车继续...")
-            await asyncio.to_thread(input, "Press Enter to continue after manual executor selection...")
-            debug_data = await dump_executor_debug(page)
-            targets = split_multi_values(executor_check_override) if executor_check_override else split_multi_values(executor_vals)
-            overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
-            if overlap_msg:
-                print(f"      ⚠️ {overlap_msg}（当前按业务场景仅提示，不阻断保存）")
-            haystack = " ".join([
-                debug_data.get("inputValue", ""),
-                " ".join(debug_data.get("tags", [])),
-                " ".join([n.get("text", "") for n in debug_data.get("checked", []) if isinstance(n, dict)]),
-            ])
-            manual_ok = all(t in haystack for t in targets)
-            if not manual_ok:
-                print(f"      ⚠️ 手动执行员工校验失败：当前未匹配目标 {targets}")
+        if community_required:
+            print(f"   👥 下发群名: {group_send_name}")
+            group_ok = await fill_step3_group_name(page, group_send_name, section_hint="社群群发")
+            print(f"      {'✅' if group_ok else '⚠️'} 下发群名{'已填充' if group_ok else '未匹配到字段'}")
+            results["第3步-下发群名"] = group_ok
+            if not group_ok:
+                moments_gate_ok = False
+                moments_gate_errors.append("下发群名")
+
+        distribution_mode = (data.get("distribution_mode", "") or "").strip()
+        if not distribution_mode:
+            if community_required:
+                distribution_mode = "导入门店" if upload_stores else "按条件筛选客户群"
             else:
-                print("      ✅ 手动执行员工校验通过")
-            results["第3步-执行员工"] = manual_ok
-            if not manual_ok:
+                distribution_mode = "指定门店分配"
+        mode_norm = distribution_mode.replace(" ", "")
+        community_condition_mode = community_required and ("按条件筛选客户" in mode_norm or "按条件筛选客户群" in mode_norm)
+        community_import_mode = community_required and ("导入门店" in mode_norm or "选中门店" in mode_norm)
+
+        need_executor = customer_msg_required or moments_required or community_condition_mode
+        if need_executor or community_required:
+            mode_ok = await set_step3_distribution_mode(page, distribution_mode)
+            print(f"   ⚙️ 分配方式: {distribution_mode if mode_ok else '未找到分配方式控件'}")
+            if not mode_ok:
                 moments_gate_ok = False
-                moments_gate_errors.append("执行员工")
+                moments_gate_errors.append("分配方式")
+
+        if need_executor:
+            print(f"   👥 执行员工: {executor_vals}")
+            if executor_include_franchise:
+                print("      🧩 包含加盟区域: 是")
+            if manual_executor_mode:
+                print("      ⏸️ 手动模式：请在浏览器中手工勾选执行员工后，回到终端按回车继续...")
+                await asyncio.to_thread(input, "Press Enter to continue after manual executor selection...")
+                debug_data = await dump_executor_debug(page)
+                targets = split_multi_values(executor_check_override) if executor_check_override else split_multi_values(executor_vals)
+                overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
+                if overlap_msg:
+                    print(f"      ⚠️ {overlap_msg}（当前按业务场景仅提示，不阻断保存）")
+                haystack = " ".join([
+                    debug_data.get("inputValue", ""),
+                    " ".join(debug_data.get("tags", [])),
+                    " ".join([n.get("text", "") for n in debug_data.get("checked", []) if isinstance(n, dict)]),
+                ])
+                manual_ok = all(t in haystack for t in targets)
+                if not manual_ok:
+                    print(f"      ⚠️ 手动执行员工校验失败：当前未匹配目标 {targets}")
+                else:
+                    print("      ✅ 手动执行员工校验通过")
+                results["第3步-执行员工"] = manual_ok
+                if not manual_ok:
+                    moments_gate_ok = False
+                    moments_gate_errors.append("执行员工")
+            else:
+                if "按条件筛选客户" in distribution_mode:
+                    exec_ok = await fill_step3_executor_by_condition(
+                        page, executor_vals, include_franchise=executor_include_franchise
+                    )
+                else:
+                    exec_ok = await fill_step3_executor(
+                        page, executor_vals, include_franchise=executor_include_franchise
+                    )
+                print(f"      {'✅' if exec_ok else '⚠️'} 执行员工{'已选择' if exec_ok else '未完整选择'}")
+                results["第3步-执行员工"] = exec_ok
+                if not exec_ok:
+                    moments_gate_ok = False
+                    moments_gate_errors.append("执行员工")
+                debug_data = await dump_executor_debug(page)
+                targets = split_multi_values(executor_vals)
+                overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
+                if overlap_msg:
+                    print(f"      ⚠️ {overlap_msg}（当前按业务场景仅提示，不阻断保存）")
         else:
-            exec_ok = await fill_step3_executor(page, executor_vals, include_franchise=executor_include_franchise)
-            print(f"      {'✅' if exec_ok else '⚠️'} 执行员工{'已选择' if exec_ok else '未完整选择'}")
-            results["第3步-执行员工"] = exec_ok
-            if not exec_ok:
-                moments_gate_ok = False
-                moments_gate_errors.append("执行员工")
-            debug_data = await dump_executor_debug(page)
-            targets = split_multi_values(executor_vals)
-            overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
-            if overlap_msg:
-                print(f"      ⚠️ {overlap_msg}（当前按业务场景仅提示，不阻断保存）")
+            if community_import_mode:
+                print("   👥 执行员工: ⏭️ 当前为“导入门店/选中门店”，无需选择员工")
+            else:
+                print("   👥 执行员工: ⏭️ 社群渠道无需填写，已跳过")
+            results["第3步-执行员工"] = True
 
         print(f"   📝 发送内容: {send_content}")
         send_ok = await fill_step3_send_content(page, send_content)
@@ -4245,8 +5404,9 @@ async def fill_step3(
             moments_gate_ok = False
             moments_gate_errors.append("发送内容")
 
-        print(f"   🏬 上传门店: {'需要上传' if upload_stores else '不上传'}")
-        if upload_stores:
+        effective_upload_stores = bool(upload_stores or community_import_mode)
+        print(f"   🏬 上传门店: {'需要上传' if effective_upload_stores else '不上传'}")
+        if effective_upload_stores:
             store_ok, store_msg = await upload_step3_store_file(page, store_file_path)
             print(f"      {'✅' if store_ok else '⚠️'} {store_msg}")
             results["第3步-上传门店"] = store_ok
@@ -4257,7 +5417,7 @@ async def fill_step3(
             print("      ⏭️ 未勾选上传门店，已跳过")
             results["第3步-上传门店"] = True
 
-        if customer_msg_required:
+        if customer_msg_required or community_required:
             print(f"   🧩 添加小程序: {'需要配置' if msg_add_mini_program else '不配置'}")
             if msg_add_mini_program:
                 mini_ok, mini_msg = await fill_step3_message_mini_program(
@@ -4279,7 +5439,7 @@ async def fill_step3(
             print("   🧩 添加小程序: ⏭️ 当前所选渠道无需填写，已跳过")
             results["第3步-添加小程序"] = True
 
-        if moments_required:
+        if moments_required or community_required:
             print(f"   🖼️ 朋友圈图片: {'需要上传' if moments_add_images else '不上传'}")
             if moments_add_images:
                 img_ok, img_msg = await upload_step3_moments_images(page, moments_image_paths)
@@ -4311,6 +5471,16 @@ async def fill_step3(
     # 显式约束：会员通-发客户消息始终要求结束时间/执行员工/发送内容都成功
     if customer_msg_required:
         must_keys = ["第3步-结束时间", "第3步-执行员工", "第3步-发送内容"]
+        missing = [k.replace("第3步-", "") for k in must_keys if not results.get(k, False)]
+        if missing:
+            moments_gate_ok = False
+            for m in missing:
+                if m not in moments_gate_errors:
+                    moments_gate_errors.append(m)
+    if community_required:
+        must_keys = ["第3步-结束时间", "第3步-下发群名", "第3步-发送内容"]
+        if upload_stores:
+            must_keys.append("第3步-上传门店")
         missing = [k.replace("第3步-", "") for k in must_keys if not results.get(k, False)]
         if missing:
             moments_gate_ok = False
@@ -4372,6 +5542,7 @@ async def fill_step3(
             pass
 
     page.on("response", _on_response)
+    save_start_url = page.url
     clicked = await click_step3_save_button(page)
     if not clicked:
         if not save_resp_task.done():
@@ -4391,11 +5562,43 @@ async def fill_step3(
         print(f"      🧪 点击保存后发送内容回读长度: {len(send_after_click)}")
     else:
         print("      🧪 点击保存后发送内容回读: 已跳过（当前渠道无需发送内容）")
-    saved_ok = await ensure_step3_saved(page, save_resp_task=save_resp_task)
+    saved_ok = await ensure_step3_saved(page, save_resp_task=save_resp_task, before_url=save_start_url)
     try:
         page.remove_listener("response", _on_response)
     except Exception:
         pass
+    community_like = "addcommunityPlan" in (save_start_url or "")
+    if (not saved_ok) and (not community_like):
+        # 兜底：补点一次“主保存”后再次判定，规避首次点击命中错误按钮或点击未生效
+        print("      ⚠️ 首次保存未确认成功，补点一次主保存后重试判定...")
+        retry_task = asyncio.get_running_loop().create_future()
+        def _on_response_retry(r):
+            try:
+                url_l = (r.url or "").lower()
+                matched = (
+                    r.request.method in ("POST", "PUT")
+                    and (
+                        ("/api/" in url_l and "precision.dslyy.com" in url_l)
+                        or "marketingtemplate" in url_l
+                        or "template" in url_l
+                        or "save" in url_l
+                    )
+                )
+                if matched and (not retry_task.done()):
+                    retry_task.set_result(r)
+            except Exception:
+                pass
+        page.on("response", _on_response_retry)
+        clicked_retry = await click_step3_save_button(page)
+        if clicked_retry:
+            await wait_and_log(page, 1.6, "补点保存中...")
+            saved_ok = await ensure_step3_saved(page, save_resp_task=retry_task, before_url=save_start_url)
+        try:
+            page.remove_listener("response", _on_response_retry)
+        except Exception:
+            pass
+    elif (not saved_ok) and community_like:
+        print("      ⚠️ 社群页首次保存未确认成功，已禁用二次补点（避免误切换到 about:blank）")
     if not saved_ok:
         raise RuntimeError(f"保存未真正提交（未检测到成功提示/跳转），当前URL={page.url}")
     print("      ✅ 已检测到保存成功")
@@ -4461,11 +5664,19 @@ async def connect_browser(p, connect_cdp: bool, cdp_endpoint: str):
     """连接浏览器：本地启动或接管已有 Chrome(CDP)。"""
     if connect_cdp:
         print(f"   🔌 通过 CDP 接管已有浏览器: {cdp_endpoint}")
-        browser = await p.chromium.connect_over_cdp(cdp_endpoint)
-        if not browser.contexts:
-            # CDP 模式下通常至少有 1 个默认上下文，这里兜底。
-            await browser.new_context()
-        return browser
+        last_err = None
+        for i in range(3):
+            try:
+                browser = await p.chromium.connect_over_cdp(cdp_endpoint)
+                if not browser.contexts:
+                    # CDP 模式下通常至少有 1 个默认上下文，这里兜底。
+                    await browser.new_context()
+                return browser
+            except Exception as e:
+                last_err = e
+                print(f"   ⚠️ CDP 连接失败({i+1}/3): {e}")
+                await asyncio.sleep(1.2 * (i + 1))
+        raise RuntimeError(f"CDP 连接失败（重试3次后仍失败）: {last_err}")
 
     print("   🚀 启动新浏览器会话")
     return await p.chromium.launch(
@@ -4546,12 +5757,21 @@ async def process_single_plan(
                     print(f"   🔗 创建链接: 渠道={primary_channel} -> {current_base_url}")
                 else:
                     print(f"   🔗 创建链接: 默认 -> {current_base_url}")
+                if not (current_base_url or "").strip():
+                    raise RuntimeError("缺少创建链接：当前渠道不提供默认链接，请在Excel“创建链接”字段填写后再执行")
                 await page.goto(current_base_url)
                 await wait_and_log(page, 2, "页面加载中...")
 
-                if skip_step2_mode:
+                selected_channels_for_plan = parse_step3_channels(step3_channels_override) or parse_step3_channels(plan.get("channels", ""))
+                community_only = bool(selected_channels_for_plan) and all(c == "会员通-发送社群" for c in selected_channels_for_plan)
+                community_url = (create_url_override or plan.get("create_url", "") or current_base_url or "")
+                auto_skip_step2_for_community = community_only or ("addcommunityPlan" in community_url)
+
+                if skip_step2_mode or auto_skip_step2_for_community:
+                    if auto_skip_step2_for_community and not skip_step2_mode:
+                        print("   ⏭️  社群渠道模式：自动跳过第2步，直接进入第3步")
                     field_results.update(await fill_step1(page, plan, auto_next=True))
-                    field_results.update(await skip_step2(page))
+                    field_results.update(await skip_step2(page, plan))
                 else:
                     field_results.update(await fill_step1(page, plan, auto_next=False))
                     field_results.update(await fill_step2(page, plan, strict_step2=strict_step2))
