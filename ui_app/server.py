@@ -136,26 +136,28 @@ def _default_headers() -> List[str]:
 
 
 def load_template_headers_and_sample() -> tuple[List[str], List[str]]:
+    # 模板字段固定使用系统标准字段，避免受本地旧CSV表头污染（导致下载模板出现英文/脏字段）
+    headers = _default_headers()
+    sample_map: Dict[str, str] = {}
     if DEFAULT_DATA_CSV.exists():
         for enc in ("utf-8-sig", "utf-8", "gbk"):
             try:
                 with DEFAULT_DATA_CSV.open("r", encoding=enc, newline="") as f:
-                    reader = csv.reader(f)
-                    rows = list(reader)
-                    if rows:
-                        headers = [str(x or "").strip() for x in rows[0]]
-                        sample = [str(x or "").strip() for x in (rows[1] if len(rows) > 1 else [""] * len(headers))]
-                        if headers:
-                            defaults = _default_headers()
-                            missing = [h for h in defaults if h not in headers]
-                            if missing:
-                                headers = headers + missing
-                                sample = sample + [""] * len(missing)
-                            return headers, sample
+                    rows = list(csv.reader(f))
+                if not rows:
+                    continue
+                raw_headers = [str(x or "").strip() for x in rows[0]]
+                raw_sample = [str(x or "").strip() for x in (rows[1] if len(rows) > 1 else [""] * len(raw_headers))]
+                norm_headers = [HEADER_CN_TO_EN.get(h, h) for h in raw_headers]
+                sample_map = {
+                    h: (raw_sample[idx] if idx < len(raw_sample) else "")
+                    for idx, h in enumerate(norm_headers)
+                }
+                break
             except Exception:
                 continue
-    headers = _default_headers()
-    return headers, [""] * len(headers)
+    sample = [sample_map.get(h, "") for h in headers]
+    return headers, sample
 
 
 def _filter_template_fields(headers: List[str], sample: List[str]) -> tuple[List[str], List[str]]:
@@ -1018,35 +1020,35 @@ async def get_task_logs(task_id: str, offset: int = 0, limit: int = 300) -> JSON
 
 @app.get("/api/template/csv")
 async def download_template_csv():
-    p = UPLOAD_DIR / "precision_template_utf8_bom.csv"
+    p = UPLOAD_DIR / "精准营销任务模板_防乱码.csv"
     write_template_csv(p)
-    return FileResponse(path=str(p), filename="精准营销导入模板_UTF8BOM.csv", media_type="text/csv")
+    return FileResponse(path=str(p), filename="精准营销任务模板（CSV防乱码）.csv", media_type="text/csv")
 
 
 @app.get("/api/template/xlsx")
 async def download_template_xlsx():
-    p = UPLOAD_DIR / "precision_template.xlsx"
+    p = UPLOAD_DIR / "精准营销任务模板.xlsx"
     try:
         write_template_xlsx(p)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     return FileResponse(
         path=str(p),
-        filename="精准营销导入模板.xlsx",
+        filename="精准营销任务模板（含目标门店与目标商品）.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 
 @app.get("/api/template/community-xlsx")
 async def download_community_template_xlsx():
-    p = UPLOAD_DIR / "precision_community_template.xlsx"
+    p = UPLOAD_DIR / "精准营销社群任务模板.xlsx"
     try:
         write_community_template_xlsx(p)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     return FileResponse(
         path=str(p),
-        filename="精准营销-社群专用模板.xlsx",
+        filename="精准营销社群任务模板（含目标门店）.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
