@@ -688,6 +688,7 @@ class Task:
     generated_links: List[str] = field(default_factory=list)
     plan_name_display: str = ""
     channel_display: str = ""
+    queued: bool = False
 
     def _latest_link_for_ui(self) -> str:
         # 优先给业务展示真正可复核的 viewPlan 链接，其次 editPlan。
@@ -721,6 +722,7 @@ class Task:
             "latest_link": self._latest_link_for_ui(),
             "plan_name": self.plan_name_display,
             "send_channels": self.channel_display,
+            "queued": self.queued,
             "options": {
                 "connect_cdp": self.options.connect_cdp,
                 "cdp_endpoint": self.options.cdp_endpoint,
@@ -871,10 +873,24 @@ class TaskRunner:
         for i in range(self.workers):
             self.worker_tasks.append(asyncio.create_task(self._worker_loop(i + 1)))
 
-    async def add_task(self, task: Task) -> None:
+    async def add_task(self, task: Task, auto_start: bool = True) -> None:
         async with self.lock:
             self.tasks[task.id] = task
-        await self.queue.put(task.id)
+        if auto_start:
+            await self.enqueue_task(task.id)
+
+    async def enqueue_task(self, task_id: str) -> bool:
+        async with self.lock:
+            task = self.tasks.get(task_id)
+            if not task:
+                return False
+            if task.status != "pending":
+                return False
+            if task.queued:
+                return False
+            task.queued = True
+        await self.queue.put(task_id)
+        return True
 
     async def retry_task(self, task_id: str) -> Task:
         async with self.lock:
@@ -890,8 +906,21 @@ class TaskRunner:
                 operator=old.operator,
             )
             self.tasks[new_id] = new_task
-        await self.queue.put(new_id)
+        await self.enqueue_task(new_id)
         return new_task
+
+    async def start_pending(self) -> List[str]:
+        async with self.lock:
+            ids = [tid for tid, t in self.tasks.items() if t.status == "pending" and not t.queued]
+        started: List[str] = []
+        for tid in ids:
+            ok = await self.enqueue_task(tid)
+            if ok:
+                started.append(tid)
+        return started
+
+    async def start_task(self, task_id: str) -> bool:
+        return await self.enqueue_task(task_id)
 
     async def retry_failed(self) -> List[str]:
         async with self.lock:
@@ -981,6 +1010,7 @@ class TaskRunner:
 
     async def _run_task(self, task: Task, worker_id: int) -> None:
         task.status = "running"
+        task.queued = False
         task.started_at = now_iso()
         task.error = ""
         task.logs = []
@@ -1364,7 +1394,7 @@ async def upload_tasks(
             plan_name_display=plan_name_display,
             channel_display=channel_display,
         )
-        await runner.add_task(task)
+        await runner.add_task(task, auto_start=False)
         created.append(task.to_dict())
     return JSONResponse({"created": created})
 
@@ -1373,6 +1403,18 @@ async def upload_tasks(
 async def retry_task(task_id: str) -> JSONResponse:
     t = await runner.retry_task(task_id)
     return JSONResponse({"created": t.to_dict()})
+
+
+@app.post("/api/tasks/start")
+async def start_pending_tasks() -> JSONResponse:
+    ids = await runner.start_pending()
+    return JSONResponse({"started_ids": ids, "count": len(ids)})
+
+
+@app.post("/api/tasks/{task_id}/start")
+async def start_one_task(task_id: str) -> JSONResponse:
+    ok = await runner.start_task(task_id)
+    return JSONResponse({"task_id": task_id, "started": bool(ok)})
 
 
 @app.post("/api/tasks/retry-failed")
@@ -1392,7 +1434,7 @@ UI_HTML = """
     :root{
       --bg:#f3f2fb;
       --card:#ffffff;
-      --line:#e8e6f3;
+      --line:#ecebf5;
       --text:#1d1d1f;
       --sub:#515154;
       --hint:#6e6e73;
@@ -1415,24 +1457,24 @@ UI_HTML = """
     .main{padding:0}
     .page-title{margin:0 0 var(--space-2) 0;font-size:22px;line-height:1.2;font-weight:700;letter-spacing:-.01em;color:var(--text)}
     .card-title{margin:0 0 var(--space-2) 0;font-size:18px;line-height:1.25;font-weight:700;letter-spacing:-.01em;color:var(--text)}
-    .card{background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:16px;padding:var(--space-3);margin-bottom:var(--space-2);box-shadow:0 10px 30px rgba(42,34,94,.08)}
+    .card{background:rgba(255,255,255,.96);border:none;border-radius:18px;padding:var(--space-3);margin-bottom:var(--space-2);box-shadow:0 10px 30px rgba(42,34,94,.08)}
     .row{display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center}
     .section-title{font-size:15px;font-weight:700;color:#1d1d1f;margin:0 0 var(--space-2) 0;display:flex;align-items:center;gap:8px;line-height:1.3}
     .step-no{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:999px;background:var(--brand);color:#fff;font-size:12px;font-weight:700}
-    .step-box{border:1px solid #eceaf6;border-radius:14px;padding:var(--space-2);background:#fff;margin-bottom:10px;transition:all .2s ease}
-    .step-box:hover{box-shadow:0 8px 24px rgba(47,42,126,.08);border-color:#ddd8f4}
+    .step-box{border:none;border-radius:14px;padding:var(--space-2);background:#fff;margin-bottom:10px;transition:all .2s ease;box-shadow:inset 0 0 0 1px rgba(120,110,190,.10)}
+    .step-box:hover{box-shadow:inset 0 0 0 1px rgba(120,110,190,.16),0 8px 20px rgba(47,42,126,.06)}
     /* 按步骤区分渐变背景（参考卡片轻渐变风格） */
     .card .step-box:nth-of-type(1){
       background:linear-gradient(135deg,#f6f2ff 0%,#fff 55%,#f2f7ff 100%);
-      border-color:#e3dcff;
+      border-color:transparent;
     }
     .card .step-box:nth-of-type(2){
       background:linear-gradient(135deg,#fff7f3 0%,#fff 52%,#f3f9ff 100%);
-      border-color:#f1ddcf;
+      border-color:transparent;
     }
     .card .step-box:nth-of-type(3){
       background:linear-gradient(135deg,#f2fff8 0%,#fff 55%,#f4f5ff 100%);
-      border-color:#d7eee2;
+      border-color:transparent;
     }
     .step-box.compact{
       padding:10px;
@@ -1463,8 +1505,8 @@ UI_HTML = """
       max-width:560px;
       height:44px;
       padding:6px 10px;
-      background:#fff;
-      border:1px solid #d7d4e8;
+      background:rgba(255,255,255,.78);
+      border:1px solid rgba(120,110,190,.20);
       border-radius:12px;
       color:#66647a;
       line-height:30px;
@@ -1491,9 +1533,9 @@ UI_HTML = """
     .field.vertical .row{width:100%}
     .field.vertical .row label{display:flex;align-items:center;gap:6px;color:var(--sub);font-size:13px}
     .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding-top:6px}
-    .subcard{border:1px solid var(--line);background:linear-gradient(180deg,#fefeff,#faf9ff);border-radius:12px;padding:12px;margin-top:8px}
+    .subcard{border:none;background:linear-gradient(180deg,#fefeff,#faf9ff);border-radius:12px;padding:12px;margin-top:8px;box-shadow:inset 0 0 0 1px rgba(120,110,190,.08)}
     .adv-toggle{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 14px;border-radius:999px;background:var(--brand-soft);color:#312b84;border:1px solid #dbd4ff;cursor:pointer;font-weight:600}
-    .adv-panel{display:none;border:1px dashed #ddd6ff;background:#faf8ff;border-radius:12px;padding:12px;margin-top:8px}
+    .adv-panel{display:none;border:none;background:#faf8ff;border-radius:12px;padding:12px;margin-top:8px;box-shadow:inset 0 0 0 1px rgba(120,110,190,.14)}
     .adv-panel.open{display:block}
     .tiny{font-size:12px;color:var(--hint);line-height:1.55}
     .field.full .tiny{
@@ -1528,8 +1570,8 @@ UI_HTML = """
       min-width:560px !important;
     }
     .channel-grid{display:grid;grid-template-columns:1fr;gap:10px}
-    .channel-block{border:1px solid #e8e6f3;border-radius:12px;background:#fff;padding:10px;transition:all .16s ease}
-    .channel-block:hover{border-color:#cfc8f6;background:#faf8ff}
+    .channel-block{border:none;border-radius:12px;background:rgba(255,255,255,.86);padding:10px;transition:all .16s ease;box-shadow:inset 0 0 0 1px rgba(120,110,190,.10)}
+    .channel-block:hover{background:#faf8ff;box-shadow:inset 0 0 0 1px rgba(120,110,190,.18)}
     .channel-item{display:flex;align-items:center;gap:8px;padding:2px 0}
     .channel-item input{margin-top:2px}
     .channel-icon{font-size:16px}
@@ -1548,8 +1590,9 @@ UI_HTML = """
     .tip{font-size:12px;color:var(--hint);line-height:1.55}
     .hint{font-size:12px;color:var(--hint);display:block}
     table{width:100%;border-collapse:separate;border-spacing:0}
-    th,td{border-bottom:1px solid var(--line);padding:10px 8px;text-align:left;font-size:13px;vertical-align:top}
+    th,td{border-bottom:1px solid rgba(120,110,190,.12);padding:10px 8px;text-align:left;font-size:13px;vertical-align:top}
     th{background:#f7f6fc;font-weight:600;color:#3e3a56;position:sticky;top:0;z-index:1}
+    tbody tr:hover td{background:rgba(245,243,255,.45)}
     .status-pending{color:#6b7280}
     .status-running{color:#2563eb}
     .status-success{color:#059669}
@@ -1585,8 +1628,8 @@ UI_HTML = """
     .log-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
     .material-modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;align-items:center;justify-content:center;z-index:9998}
     .material-modal.open{display:flex}
-    .material-panel{width:min(1260px,94vw);max-height:90vh;background:#fff;border-radius:14px;border:1px solid #d1d5db;padding:14px;overflow:auto}
-    .material-row{border:1px solid #e8e6f3;border-radius:12px;padding:10px;margin-bottom:10px}
+    .material-panel{width:min(1260px,94vw);max-height:90vh;background:#fff;border-radius:14px;border:none;padding:14px;overflow:auto;box-shadow:0 18px 42px rgba(15,23,42,.16)}
+    .material-row{border:none;border-radius:12px;padding:10px;margin-bottom:10px;box-shadow:inset 0 0 0 1px rgba(120,110,190,.10)}
     .material-row h4{margin:0 0 8px 0;font-size:14px}
     .material-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
     .img-preview{display:flex;gap:8px;flex-wrap:wrap}
@@ -1699,10 +1742,11 @@ UI_HTML = """
 
         <div class="section-title">执行动作</div>
         <div class="actions primary-actions">
-          <button onclick="upload()">上传并开始执行</button>
+          <button onclick="upload()">上传任务</button>
+          <button onclick="startExecute()">开始执行</button>
           <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
         </div>
-        <div class="tip" style="margin-top:8px">重点：上传单个 Excel（或 CSV）即可。若为 Excel，请在不同 sheet 中维护“任务文件 / 目标门店 / 目标商品”；系统会自动读取。社群场景建议优先使用“社群专用模板”。</div>
+        <div class="tip" style="margin-top:8px">先“上传任务”让计划进入任务列表，再按计划“添加素材”，最后点击“开始执行”批量自动化创建。</div>
       </div>
 
       <div class="card">
@@ -1876,6 +1920,19 @@ async function upload(){
   saveUiPrefs();
   const r = await fetch('/api/tasks/upload', {method:'POST', body:fd});
   if(!r.ok){ alert(await r.text()); return; }
+  alert('任务已上传到列表（待执行）。请先按需添加素材，再点击“开始执行”。');
+  await refreshTasks();
+}
+
+async function startExecute(){
+  const r = await fetch('/api/tasks/start', {method:'POST'});
+  if(!r.ok){ alert(await r.text()); return; }
+  const data = await r.json();
+  if(!data.count){
+    alert('当前没有待执行任务。');
+    return;
+  }
+  alert(`已开始执行 ${data.count} 个任务。`);
   await refreshTasks();
 }
 
