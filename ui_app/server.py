@@ -2070,6 +2070,14 @@ UI_HTML = """
     .adv-panel{display:none;border:none;background:#faf8ff;border-radius:12px;padding:12px;margin-top:8px;box-shadow:inset 0 0 0 1px rgba(120,110,190,.14)}
     .adv-panel.open{display:block}
     .tiny{font-size:12px;color:var(--hint);line-height:1.55}
+    .tiny.wrap{
+      display:block;
+      white-space:normal;
+      word-break:normal;
+      overflow-wrap:break-word;
+      line-break:auto;
+      max-width:100%;
+    }
     .field.full .tiny{
       margin-left:8px;
       white-space:normal;
@@ -2658,16 +2666,8 @@ UI_HTML = """
           <div id="advancedConfig" class="adv-panel">
             <div class="form-grid">
               <div class="field vertical">
-                <label class="inline-check"><input id="connect_cdp" type="checkbox" checked/> 复用当前已登录浏览器</label>
-                <span class="tiny">作用：复用你当前 Chrome 登录态，减少重复登录。</span>
-              </div>
-              <div class="field vertical">
                 <label><span class="label">浏览器调试地址</span><input id="cdp_endpoint" value="http://127.0.0.1:18800" style="width:220px"/></label>
                 <span class="tiny">作用：接管本地已登录浏览器（默认 127.0.0.1:18800）。</span>
-              </div>
-              <div class="field vertical">
-                <label class="inline-check"><input id="strict_step2" type="checkbox" checked/> 严格校验第2步</label>
-                <span class="tiny">作用：第2步关键字段失败时立即中断，避免脏数据提交。</span>
               </div>
               <div class="field vertical">
                 <label><span class="label">并发任务数</span><input id="concurrent" type="number" min="1" value="1" style="width:88px"/></label>
@@ -2677,17 +2677,12 @@ UI_HTML = """
                 <label><span class="label">保留浏览器(秒)</span><input id="hold_seconds" type="number" min="0" value="2" style="width:88px"/></label>
                 <span class="tiny">作用：任务结束后页面停留时间，便于人工复核。</span>
               </div>
-              <div class="field vertical">
-                <label class="inline-check"><input id="executor_store_upload" type="checkbox" checked/> 执行员工-指定门店（默认开启）</label>
-                <span class="tiny">作用：执行员工支持通过“目标门店”sheet自动上传门店并勾选节点。</span>
-              </div>
-              <div class="field vertical">
+              <div class="field vertical full">
                 <label class="inline-check channel-strong"><input id="executor_include_franchise" type="checkbox" checked/> 执行员工包含加盟区域（自动同步勾选“xx加盟”节点）</label>
-                <span class="tiny">示例：执行员工=广佛省区，自动追加广佛省区加盟；执行员工=大郑州营运区，自动追加大郑州营运区加盟。</span>
+                <span class="tiny wrap">示例：执行员工=广佛省区，自动追加广佛省区加盟；执行员工=大郑州营运区，自动追加大郑州营运区加盟。</span>
               </div>
             </div>
           </div>
-          <div class="step-caption">先上传 CSV/XLSX，再根据需要展开“高级配置”。</div>
             </div>
           </div>
           <div class="compose-side">
@@ -2910,12 +2905,6 @@ function syncChannelMaterials(){
     if(coverCommunity) coverCommunity.value = '';
   }
   if(emptyTip) emptyTip.style.display = (showMoments || showMsg) ? 'none' : 'block';
-  // “执行员工-指定门店”控制第3步上传门店开关（默认开启）
-  const executorStore = document.getElementById('executor_store_upload');
-  const uploadStores = document.getElementById('upload_stores');
-  if(executorStore && uploadStores){
-    uploadStores.checked = !!executorStore.checked;
-  }
   saveUiPrefs();
 }
 
@@ -2942,9 +2931,11 @@ async function upload(){
   fileInput.disabled = true;
   const fd = new FormData();
   for(const f of files){ fd.append('files', f); }
-  fd.append('connect_cdp', document.getElementById('connect_cdp').checked ? 'true' : 'false');
+  // 系统默认复用已登录浏览器（固定开启）
+  fd.append('connect_cdp', 'true');
   fd.append('cdp_endpoint', document.getElementById('cdp_endpoint').value);
-  fd.append('strict_step2', document.getElementById('strict_step2').checked ? 'true' : 'false');
+  // 严格第2步由文件/渠道预设逻辑处理（前端不再暴露开关）
+  fd.append('strict_step2', 'true');
   fd.append('skip_step2', 'false');
   fd.append('concurrent', document.getElementById('concurrent').value || '1');
   fd.append('start', '');
@@ -2958,8 +2949,8 @@ async function upload(){
   fd.append('moments_add_images', 'false');
   const momentImgs = [];
   for(const img of momentImgs){ fd.append('moments_images', img); }
-  const uploadStoreEnabled = !!document.getElementById('executor_store_upload')?.checked;
-  fd.append('upload_stores', uploadStoreEnabled ? 'true' : 'false');
+  // 上传门店是否生效由任务文件字段控制，这里不做全局强制
+  fd.append('upload_stores', 'false');
   fd.append('msg_add_mini_program', 'false');
   saveUiPrefs();
   try{
@@ -3359,14 +3350,11 @@ function saveUiPrefs(){
   const momentsChecked = !!document.getElementById('moments_add_images')?.checked || !!document.getElementById('moments_add_images_community')?.checked;
   const miniProgramChecked = !!document.getElementById('msg_add_mini_program')?.checked || !!document.getElementById('msg_add_mini_program_community')?.checked;
   const prefs = {
-    connect_cdp: !!document.getElementById('connect_cdp')?.checked,
     cdp_endpoint: document.getElementById('cdp_endpoint')?.value || '',
-    strict_step2: !!document.getElementById('strict_step2')?.checked,
     concurrent: document.getElementById('concurrent')?.value || '1',
     hold_seconds: document.getElementById('hold_seconds')?.value || '2',
     channels: selectedChannels(),
     executor_include_franchise: !!document.getElementById('executor_include_franchise')?.checked,
-    executor_store_upload: !!document.getElementById('executor_store_upload')?.checked,
     moments_add_images: momentsChecked,
     msg_add_mini_program: miniProgramChecked,
     advanced_open: document.getElementById('advancedConfig')?.classList.contains('open') || false,
@@ -3377,15 +3365,12 @@ function saveUiPrefs(){
 function restoreUiFromCache(){
   const prefs = loadLocal(LS_KEYS.prefs, null);
   if(prefs){
-    if(document.getElementById('connect_cdp')) document.getElementById('connect_cdp').checked = !!prefs.connect_cdp;
     if(document.getElementById('cdp_endpoint')) document.getElementById('cdp_endpoint').value = prefs.cdp_endpoint || 'http://127.0.0.1:18800';
-    if(document.getElementById('strict_step2')) document.getElementById('strict_step2').checked = !!prefs.strict_step2;
     if(document.getElementById('concurrent')) document.getElementById('concurrent').value = prefs.concurrent || '1';
     if(document.getElementById('hold_seconds')) document.getElementById('hold_seconds').value = prefs.hold_seconds || '2';
     const channels = new Set(prefs.channels || []);
     document.querySelectorAll('.step3_channel').forEach(el => { el.checked = channels.has(el.value); });
     if(document.getElementById('executor_include_franchise')) document.getElementById('executor_include_franchise').checked = !!prefs.executor_include_franchise;
-    if(document.getElementById('executor_store_upload')) document.getElementById('executor_store_upload').checked = (prefs.executor_store_upload !== false);
     if(document.getElementById('moments_add_images')) document.getElementById('moments_add_images').checked = !!prefs.moments_add_images;
     if(document.getElementById('msg_add_mini_program')) document.getElementById('msg_add_mini_program').checked = !!prefs.msg_add_mini_program;
     if(prefs.advanced_open){
@@ -3420,7 +3405,7 @@ if(filesEl){
     }
   });
 }
-['connect_cdp','cdp_endpoint','strict_step2','concurrent','hold_seconds','executor_include_franchise','executor_store_upload','moments_add_images','msg_add_mini_program']
+['cdp_endpoint','concurrent','hold_seconds','executor_include_franchise','moments_add_images','msg_add_mini_program']
   .forEach(id => {
     const el = document.getElementById(id);
     if(el){ el.addEventListener('change', saveUiPrefs); el.addEventListener('input', saveUiPrefs); }
