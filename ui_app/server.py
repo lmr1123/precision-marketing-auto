@@ -57,7 +57,7 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "executor_employees": "执行员工",
     "send_content": "发送内容",
     "group_send_name": "下发群名",
-    "channels": "第3步渠道(可多选)",
+    "channels": "发送渠道",
     "moments_add_images": "朋友圈是否上传图片",
     "moments_image_paths": "朋友圈图片路径(用|分隔)",
     "upload_stores": "是否上传门店",
@@ -69,6 +69,23 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "msg_mini_program_page_path": "1对1-小程序链接",
 }
 HEADER_CN_TO_EN: Dict[str, str] = {v: k for k, v in HEADER_EN_TO_CN.items()}
+
+CHANNEL_CODE_TO_NAME: Dict[str, str] = {
+    "1": "短信",
+    "2": "会员通-发客户消息",
+    "3": "会员通-发客户朋友圈",
+    "4": "会员通-发送社群",
+}
+CHANNEL_ALIAS_TO_NAME: Dict[str, str] = {
+    "短信": "短信",
+    "会员通-发客户消息": "会员通-发客户消息",
+    "会员通发客户消息": "会员通-发客户消息",
+    "会员通-发客户朋友圈": "会员通-发客户朋友圈",
+    "会员通客户朋友圈": "会员通-发客户朋友圈",
+    "会员通发客户朋友圈": "会员通-发客户朋友圈",
+    "会员通-发送社群": "会员通-发送社群",
+    "会员通发送社群": "会员通-发送社群",
+}
 TEMPLATE_HIDE_FIELDS = {
     "group_name",
     "channels",
@@ -246,7 +263,12 @@ def normalize_uploaded_csv_headers(dst_csv: Path) -> None:
         if not rows:
             return
         raw_headers = [str(x or "").strip() for x in rows[0]]
-        normalized = [HEADER_CN_TO_EN.get(h, h) for h in raw_headers]
+        normalized: List[str] = []
+        for h in raw_headers:
+            if h == "第3步渠道(可多选)":
+                normalized.append("channels")
+            else:
+                normalized.append(HEADER_CN_TO_EN.get(h, h))
         if normalized == raw_headers:
             return
         rows[0] = normalized
@@ -255,6 +277,43 @@ def normalize_uploaded_csv_headers(dst_csv: Path) -> None:
             writer.writerows(rows)
     except Exception:
         # 不阻断上传；后续由脚本校验字段
+        return
+
+
+def _normalize_channel_text(raw: str) -> str:
+    parts = [p.strip() for p in re.split(r"[|,，、/]+", str(raw or "")) if p.strip()]
+    out: List[str] = []
+    for p in parts:
+        v = CHANNEL_CODE_TO_NAME.get(p) or CHANNEL_ALIAS_TO_NAME.get(p) or p
+        if v not in out:
+            out.append(v)
+    return "、".join(out)
+
+
+def normalize_channels_in_csv(dst_csv: Path) -> None:
+    """支持文件中发送渠道填写序号（1/2/3/4），统一标准化为中文渠道名称。"""
+    try:
+        with dst_csv.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            headers = list(reader.fieldnames or [])
+        if not headers or "channels" not in headers:
+            return
+        changed = False
+        for row in rows:
+            old = str(row.get("channels", "") or "")
+            new = _normalize_channel_text(old)
+            if new and new != old:
+                row["channels"] = new
+                changed = True
+        if not changed:
+            return
+        with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in headers})
+    except Exception:
         return
 
 
@@ -450,9 +509,9 @@ def inject_moments_images_to_csv(dst_csv: Path, image_paths: List[str], step3_ch
         if col not in headers:
             headers.append(col)
 
-    ui_channels = step3_channels or ""
+    ui_channels = _normalize_channel_text(step3_channels or "")
     for row in rows:
-        row_channels = str(row.get("channels", "") or "").strip()
+        row_channels = _normalize_channel_text(str(row.get("channels", "") or "").strip())
         channel_scope = row_channels or ui_channels
         if ("会员通-发客户朋友圈" not in channel_scope) and ("会员通-发送社群" not in channel_scope):
             continue
@@ -496,9 +555,9 @@ def inject_message_mini_program_to_csv(
         if col not in headers:
             headers.append(col)
 
-    ui_channels = step3_channels or ""
+    ui_channels = _normalize_channel_text(step3_channels or "")
     for row in rows:
-        row_channels = str(row.get("channels", "") or "").strip()
+        row_channels = _normalize_channel_text(str(row.get("channels", "") or "").strip())
         channel_scope = row_channels or ui_channels
         if ("会员通-发客户消息" not in channel_scope) and ("会员通-发送社群" not in channel_scope):
             continue
@@ -535,9 +594,9 @@ def inject_store_file_to_csv(
         if col not in headers:
             headers.append(col)
 
-    ui_channels = step3_channels or ""
+    ui_channels = _normalize_channel_text(step3_channels or "")
     for row in rows:
-        row_channels = str(row.get("channels", "") or "").strip()
+        row_channels = _normalize_channel_text(str(row.get("channels", "") or "").strip())
         channel_scope = row_channels or ui_channels
         if ("会员通-发客户消息" not in channel_scope) and ("会员通-发送社群" not in channel_scope) and ("会员通-发客户朋友圈" not in channel_scope):
             continue
@@ -621,9 +680,9 @@ def normalize_community_create_url_in_csv(dst_csv: Path, step3_channels: str) ->
 
     default_add_url = "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add"
     changed = False
-    ui_channels = step3_channels or ""
+    ui_channels = _normalize_channel_text(step3_channels or "")
     for row in rows:
-        row_channels = str(row.get("channels", "") or "").strip()
+        row_channels = _normalize_channel_text(str(row.get("channels", "") or "").strip())
         channel_scope = row_channels or ui_channels
         if "会员通-发送社群" not in channel_scope:
             continue
@@ -747,7 +806,7 @@ def summarize_csv_meta(csv_path: Path) -> tuple[str, str]:
             reader = csv.DictReader(f)
             for i, row in enumerate(reader):
                 n = (row.get("name", "") or "").strip()
-                c = (row.get("channels", "") or "").strip()
+                c = _normalize_channel_text((row.get("channels", "") or "").strip())
                 if n and n not in names:
                     names.append(n)
                 if c:
@@ -775,7 +834,7 @@ def parse_task_plans(csv_path: Path) -> List[dict]:
             reader = csv.DictReader(f)
             for idx, row in enumerate(reader):
                 name = str(row.get("name", "") or "").strip() or f"计划{idx+1}"
-                channels = str(row.get("channels", "") or "").strip()
+                channels = _normalize_channel_text(str(row.get("channels", "") or "").strip())
                 plans.append(
                     {
                         "index": idx,
@@ -1357,6 +1416,7 @@ async def upload_tasks(
             with dst.open("wb") as out:
                 shutil.copyfileobj(f.file, out)
         normalize_uploaded_csv_headers(dst)
+        normalize_channels_in_csv(dst)
         normalize_community_create_url_in_csv(dst, options.step3_channels)
         if moments_add_images and image_blobs:
             image_paths = save_uploaded_moments_images(tid, image_blobs)
