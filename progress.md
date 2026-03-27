@@ -771,3 +771,59 @@
 
 ### 后续建议
 - 当前“about:blank + 请求兜底”已解决误判，但建议后续再补一层“创建成功后复核链接回读”做强校验，进一步减少假阳性风险。
+
+## 2026-03-27 任务列表暂停/删除能力（UI+后端）
+- 需求：任务列表新增“单个/批量暂停、删除”，且暂停/删除后不再执行自动化创建。
+
+### 已完成
+1. 后端状态控制（`/Users/liminrong/precision-marketing-auto/ui_app/server.py`）
+- `Task` 新增：`paused`、`deleted`。
+- 执行队列拦截：`enqueue_task` 对 `paused/deleted` 任务直接拒绝入队。
+- 启动执行过滤：`start_pending` 仅启动 `pending && !queued && !paused && !deleted`。
+- Worker 防护：从队列取到任务后再次判断，若 `deleted/paused/非pending` 则跳过执行并清除 `queued`。
+- 列表过滤：`list_tasks` 不再返回 `deleted` 任务。
+
+2. 新增 API
+- 单个暂停：`POST /api/tasks/{task_id}/pause`
+- 单个恢复：`POST /api/tasks/{task_id}/resume`
+- 单个删除：`POST /api/tasks/{task_id}/delete`
+- 批量暂停：`POST /api/tasks/pause-batch`
+- 批量删除：`POST /api/tasks/delete-batch`
+
+3. 前端交互
+- 任务表新增勾选列（含表头全选）。
+- 行内新增按钮：`暂停/恢复`、`删除`（运行中任务不显示这两个操作）。
+- 顶部执行条新增批量按钮：`批量暂停`、`批量删除`，并实时显示“已选 N 项”。
+- 状态展示新增 `paused`（橙色）。
+
+### 验证
+- 语法检查通过：
+  - `./.venv/bin/python -m py_compile ui_app/server.py` -> `OK`
+
+### 下一步
+- 用户侧联调：验证“暂停后开始执行不会被拉起、删除后任务列表消失、批量操作仅影响已勾选任务”。
+
+## 2026-03-27 任务拆分修复（空行不再生成任务）
+- 问题：上传 `精准营销任务模板（统一模板） (1)-测试数据.xlsx` 期望 4 条任务，实际被拆出 7 条。
+- 原因：拆分函数 `split_csv_to_single_plan_files` 把 Excel 尾部空行也当成计划行。
+- 修复：仅按“有效计划行”拆分（优先检查 `name/channels/region/theme/push_content/send_time/end_time/create_url`，兜底任意非空值）。
+- 结果：空行/占位行不再生成额外任务记录。
+
+## 2026-03-27 页面主题模式（自动/浅色/深色）
+- 新增顶部“显示模式”切换：`跟随系统 / 浅色 / 深色`。
+- 默认策略：跟随系统（`prefers-color-scheme`）。
+- 手动切换后本地记忆（localStorage），刷新后保持。
+- 系统主题变化时：若当前模式为“跟随系统”，页面自动同步。
+- 实现位置：`/Users/liminrong/precision-marketing-auto/ui_app/server.py`（UI_HTML 中 CSS+JS）。
+
+## 2026-03-27 主题切换交互优化（图标模式）
+- 将“显示模式”从下拉改为 3 个线条风图标按钮：系统 / 深色 / 浅色。
+- 保留原逻辑：默认跟随系统、手动切换可记忆、系统主题变化自动同步（仅在跟随系统模式）。
+- 深浅色下图标均有 hover/active 态，统一视觉风格。
+
+## 2026-03-27 主题切换规则更新（按时间自动）
+- 去掉“系统”图标与“显示模式”文案，仅保留月亮/太阳两个线条图标。
+- 主题规则改为固定时间自动切换：
+  - 07:00-17:29 -> 浅色
+  - 17:30-次日06:59 -> 深色
+- 页面每分钟自动校准一次主题，确保跨时段自动切换。

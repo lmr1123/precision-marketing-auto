@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 try:
@@ -946,6 +946,14 @@ def normalize_community_create_url_in_csv(dst_csv: Path, step3_channels: str) ->
     changed = False
     ui_channels = _normalize_channel_text(step3_channels or "")
     for row in rows:
+        # 空白行不做任何默认链接注入，避免被误拆分为额外任务
+        row_has_real_data = any(
+            str(v or "").strip()
+            for k, v in row.items()
+            if k not in {"create_url"}
+        )
+        if not row_has_real_data:
+            continue
         row_channels = _normalize_channel_text(str(row.get("channels", "") or "").strip())
         channel_scope = row_channels or ui_channels
         if "会员通-发送社群" not in channel_scope:
@@ -1012,6 +1020,8 @@ class Task:
     plan_name_display: str = ""
     channel_display: str = ""
     queued: bool = False
+    paused: bool = False
+    deleted: bool = False
 
     def _latest_link_for_ui(self) -> str:
         # 优先给业务展示真正可复核的 viewPlan 链接，其次 editPlan。
@@ -1046,6 +1056,7 @@ class Task:
             "plan_name": self.plan_name_display,
             "send_channels": self.channel_display,
             "queued": self.queued,
+            "paused": self.paused,
             "options": {
                 "connect_cdp": self.options.connect_cdp,
                 "cdp_endpoint": self.options.cdp_endpoint,
@@ -1123,11 +1134,31 @@ def split_csv_to_single_plan_files(src_csv: Path, stem: str) -> List[Path]:
         headers = list(reader.fieldnames or [])
     if not headers:
         return [src_csv]
-    if len(rows) <= 1:
+
+    def _row_has_plan_data(row: dict) -> bool:
+        # 只把有业务内容的行视为计划，过滤 Excel 末尾空行/占位行
+        keys = [
+            "name",
+            "channels",
+            "region",
+            "theme",
+            "push_content",
+            "send_time",
+            "end_time",
+        ]
+        for k in keys:
+            v = str(row.get(k, "") or "").strip()
+            if v:
+                return True
+        # create_url / 文件路径等附属字段不单独作为“有效计划行”判定
+        return False
+
+    valid_rows = [r for r in rows if _row_has_plan_data(r)]
+    if len(valid_rows) <= 1:
         return [src_csv]
 
     out_paths: List[Path] = []
-    for i, row in enumerate(rows, 1):
+    for i, row in enumerate(valid_rows, 1):
         tid = str(uuid.uuid4())
         out = UPLOAD_DIR / f"{tid}_{stem}_plan{i}.csv"
         with out.open("w", encoding="utf-8-sig", newline="") as fw:
@@ -1230,6 +1261,8 @@ class TaskRunner:
             task = self.tasks.get(task_id)
             if not task:
                 return False
+            if task.deleted or task.paused:
+                return False
             if task.status != "pending":
                 return False
             if task.queued:
@@ -1238,10 +1271,64 @@ class TaskRunner:
         await self.queue.put(task_id)
         return True
 
+    async def pause_task(self, task_id: str) -> Optional[Task]:
+        async with self.lock:
+            task = self.tasks.get(task_id)
+            if not task or task.deleted:
+                return None
+            if task.status == "running":
+                return task
+            task.paused = True
+            task.queued = False
+            return task
+
+    async def resume_task(self, task_id: str) -> Optional[Task]:
+        async with self.lock:
+            task = self.tasks.get(task_id)
+            if not task or task.deleted:
+                return None
+            task.paused = False
+            return task
+
+    async def delete_task(self, task_id: str) -> bool:
+        async with self.lock:
+            task = self.tasks.get(task_id)
+            if not task:
+                return False
+            if task.status == "running":
+                return False
+            task.deleted = True
+            task.queued = False
+            return True
+
+    async def batch_pause_tasks(self, ids: List[str]) -> dict:
+        changed = 0
+        ignored = 0
+        for tid in ids:
+            t = await self.pause_task(tid)
+            if t is None:
+                ignored += 1
+            elif t.status == "running":
+                ignored += 1
+            else:
+                changed += 1
+        return {"changed": changed, "ignored": ignored}
+
+    async def batch_delete_tasks(self, ids: List[str]) -> dict:
+        changed = 0
+        ignored = 0
+        for tid in ids:
+            ok = await self.delete_task(tid)
+            if ok:
+                changed += 1
+            else:
+                ignored += 1
+        return {"changed": changed, "ignored": ignored}
+
     async def retry_task(self, task_id: str) -> Task:
         async with self.lock:
             old = self.tasks.get(task_id)
-            if not old:
+            if not old or old.deleted:
                 raise HTTPException(status_code=404, detail="Task not found")
             new_id = str(uuid.uuid4())
             new_task = Task(
@@ -1257,7 +1344,11 @@ class TaskRunner:
 
     async def start_pending(self) -> List[str]:
         async with self.lock:
-            ids = [tid for tid, t in self.tasks.items() if t.status == "pending" and not t.queued]
+            ids = [
+                tid
+                for tid, t in self.tasks.items()
+                if t.status == "pending" and not t.queued and not t.paused and not t.deleted
+            ]
         started: List[str] = []
         for tid in ids:
             ok = await self.enqueue_task(tid)
@@ -1270,7 +1361,7 @@ class TaskRunner:
 
     async def retry_failed(self) -> List[str]:
         async with self.lock:
-            failed_ids = [tid for tid, t in self.tasks.items() if t.status == "failed"]
+            failed_ids = [tid for tid, t in self.tasks.items() if t.status == "failed" and not t.deleted]
         new_ids = []
         for tid in failed_ids:
             t = await self.retry_task(tid)
@@ -1279,14 +1370,14 @@ class TaskRunner:
 
     async def list_tasks(self) -> List[dict]:
         async with self.lock:
-            tasks = list(self.tasks.values())
+            tasks = [t for t in self.tasks.values() if not t.deleted]
         tasks.sort(key=lambda x: x.created_at, reverse=True)
         return [t.to_dict() for t in tasks]
 
     async def get_task(self, task_id: str) -> Task:
         async with self.lock:
             t = self.tasks.get(task_id)
-        if not t:
+        if not t or t.deleted:
             raise HTTPException(status_code=404, detail="Task not found")
         return t
 
@@ -1349,7 +1440,13 @@ class TaskRunner:
         while True:
             task_id = await self.queue.get()
             try:
-                task = await self.get_task(task_id)
+                async with self.lock:
+                    task = self.tasks.get(task_id)
+                if not task or task.deleted:
+                    continue
+                if task.paused or task.status != "pending":
+                    task.queued = False
+                    continue
                 await self._run_task(task, worker_id)
             finally:
                 self.queue.task_done()
@@ -1759,6 +1856,48 @@ async def retry_task(task_id: str) -> JSONResponse:
     return JSONResponse({"created": t.to_dict()})
 
 
+@app.post("/api/tasks/{task_id}/pause")
+async def pause_task(task_id: str) -> JSONResponse:
+    t = await runner.pause_task(task_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if t.status == "running":
+        raise HTTPException(status_code=409, detail="运行中任务不支持暂停，请等待完成后再操作")
+    return JSONResponse({"task": t.to_dict()})
+
+
+@app.post("/api/tasks/{task_id}/resume")
+async def resume_task(task_id: str) -> JSONResponse:
+    t = await runner.resume_task(task_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return JSONResponse({"task": t.to_dict()})
+
+
+@app.post("/api/tasks/{task_id}/delete")
+async def delete_task(task_id: str) -> JSONResponse:
+    ok = await runner.delete_task(task_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail="删除失败：任务不存在或正在运行")
+    return JSONResponse({"task_id": task_id, "deleted": True})
+
+
+@app.post("/api/tasks/pause-batch")
+async def batch_pause_tasks(ids: List[str] = Body(...)) -> JSONResponse:
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="ids 不能为空")
+    result = await runner.batch_pause_tasks([str(i) for i in ids])
+    return JSONResponse(result)
+
+
+@app.post("/api/tasks/delete-batch")
+async def batch_delete_tasks(ids: List[str] = Body(...)) -> JSONResponse:
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="ids 不能为空")
+    result = await runner.batch_delete_tasks([str(i) for i in ids])
+    return JSONResponse(result)
+
+
 @app.post("/api/tasks/start")
 async def start_pending_tasks() -> JSONResponse:
     ids = await runner.start_pending()
@@ -1832,6 +1971,11 @@ UI_HTML = """
     }
     .step-box.compact{
       padding:10px;
+      background:rgba(255,255,255,.52) !important;
+      border:none !important;
+      box-shadow:0 8px 22px rgba(62,54,120,.08) !important;
+      backdrop-filter:blur(10px) saturate(118%);
+      -webkit-backdrop-filter:blur(10px) saturate(118%);
     }
     .step-box.compact .form-grid{
       gap:8px 10px;
@@ -1883,6 +2027,27 @@ UI_HTML = """
     }
     .field input[type="file"]::file-selector-button:hover{
       background:linear-gradient(180deg,#efeaff,#e4ddff);
+    }
+    /* 仅任务文件：去掉线框和背景，保持更简洁 */
+    #files.file-uniform{
+      background:transparent !important;
+      border:none !important;
+      box-shadow:none !important;
+      padding:0 !important;
+      height:auto !important;
+      line-height:normal !important;
+      color:var(--sub);
+    }
+    #files.file-uniform:hover{
+      border:none !important;
+      box-shadow:none !important;
+    }
+    #files.file-uniform::file-selector-button{
+      margin-right:10px;
+      border:none;
+      border-radius:12px;
+      background:linear-gradient(135deg,rgba(146,126,255,.26),rgba(134,189,255,.22));
+      box-shadow:inset 0 0 0 1px rgba(114,126,196,.22);
     }
     .field.vertical .row{width:100%}
     .field.vertical .row label{display:flex;align-items:center;gap:6px;color:var(--sub);font-size:13px}
@@ -1937,11 +2102,45 @@ UI_HTML = """
       min-width:560px !important;
     }
     .channel-grid{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:8px 14px}
+    .compose-side .channel-grid{
+      grid-template-columns:repeat(2,minmax(170px,1fr));
+      gap:8px 10px;
+    }
     .channel-block{border:none;border-radius:0;background:transparent;padding:0;box-shadow:none}
-    .channel-item{display:flex;align-items:center;gap:8px;padding:4px 0}
-    .channel-item input{margin-top:2px}
-    .channel-icon{font-size:16px}
-    .channel-main{font-size:13px;color:#111827;font-weight:600;line-height:1.35}
+    .channel-item{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      padding:6px 2px;
+      border-radius:0;
+      background:transparent;
+      border:none;
+      transition:all .2s ease;
+    }
+    .channel-item:hover{
+      background:transparent;
+      transform:none;
+    }
+    .channel-item input{margin-top:0;transform:scale(1.08)}
+    .channel-icon{
+      width:30px;
+      height:30px;
+      border-radius:10px;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      font-size:12px;
+      font-weight:800;
+      letter-spacing:.2px;
+      color:#fff;
+      box-shadow:0 6px 12px rgba(28,35,52,.18);
+      flex:0 0 30px;
+    }
+    .channel-icon.sms{background:linear-gradient(135deg,#8aa0c8 0%,#6f86b2 52%,#5d739f 100%)}
+    .channel-icon.msg{background:linear-gradient(135deg,#334155 0%,#273449 48%,#1f2937 100%)}
+    .channel-icon.group{background:linear-gradient(135deg,#1f9d8f 0%,#178f84 50%,#137a74 100%)}
+    .channel-icon.moments{background:linear-gradient(135deg,#7b5cff 0%,#6b46f0 50%,#5b34dd 100%)}
+    .channel-main{font-size:13px;color:#111827;font-weight:700;line-height:1.35}
     .channel-strong{font-weight:800;color:#312b84}
     .material-panel{border:1px solid #e8e6f3;background:#fcfcfe;border-radius:12px;padding:12px}
     .material-title{font-size:14px;font-weight:600;color:#0f172a;margin-bottom:8px}
@@ -1963,6 +2162,7 @@ UI_HTML = """
     .status-running{color:#2563eb}
     .status-success{color:#059669}
     .status-failed{color:#dc2626}
+    .status-paused{color:#b45309}
     #logs{background:#0b1020;color:#dbeafe;height:58vh;overflow:auto;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px}
     .file-hero{
       background:transparent;
@@ -2010,6 +2210,409 @@ UI_HTML = """
       .upload-line{grid-template-columns:1fr}
       .file-uniform{width:100% !important;min-width:0 !important;max-width:none !important}
     }
+    /* === Editorial high-end visual refresh (DESIGN.md aligned, no behavior changes) === */
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Work+Sans:wght@400;500;600;700&display=swap');
+    :root{
+      --im-bg:#f9f9f9;
+      --im-bg-soft:#f4f3f3;
+      --im-bg-deep:#eceaea;
+      --im-ink:#1c2334;
+      --im-sub:#454b5a;
+      --im-hint:#6a6f7d;
+      --im-brand:#1c2334;
+      --im-brand-2:#2b3348;
+      --im-accent:#e4c02f;
+      --im-accent-deep:#715d00;
+      --im-card:#ffffff;
+      --im-ghost:rgba(28,35,52,.13);
+      --im-shadow:0 28px 56px rgba(28,35,52,.07);
+    }
+    body{
+      background:
+        radial-gradient(1200px 640px at 8% -10%, rgba(228,192,47,.12), transparent 58%),
+        radial-gradient(1400px 760px at 100% -16%, rgba(28,35,52,.10), transparent 62%),
+        linear-gradient(180deg,#fafafa 0%,#f5f5f7 100%);
+      color:var(--im-ink);
+      font-family:"Work Sans","PingFang SC","Helvetica Neue",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    }
+    .app-shell{
+      max-width:1440px;
+      padding:22px 18px 28px;
+    }
+    .card{
+      background:linear-gradient(180deg,rgba(255,255,255,.96),rgba(247,247,248,.96));
+      border:none;
+      border-radius:22px;
+      box-shadow:var(--im-shadow);
+      padding:18px;
+      margin-bottom:14px;
+    }
+    .card-title{
+      font-family:"Plus Jakarta Sans","PingFang SC","Helvetica Neue",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      font-size:1.78rem;
+      font-weight:700;
+      color:var(--im-ink);
+      margin-bottom:14px;
+      letter-spacing:.2px;
+    }
+    .section-title{
+      font-family:"Plus Jakarta Sans","PingFang SC","Helvetica Neue",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      font-size:1.04rem;
+      font-weight:700;
+      color:var(--im-ink);
+      margin-bottom:10px;
+    }
+    .step-no{
+      width:24px;
+      height:24px;
+      background:linear-gradient(135deg,var(--im-brand),var(--im-brand-2));
+      box-shadow:0 6px 14px rgba(28,35,52,.25);
+    }
+    .step-box{
+      border:none;
+      box-shadow:none;
+      border-radius:16px;
+      padding:12px;
+      margin-bottom:12px;
+    }
+    .card .step-box:nth-of-type(1){
+      background:linear-gradient(135deg,#ffffff 0%,#f4f3f3 100%);
+    }
+    .card .step-box:nth-of-type(2){
+      background:linear-gradient(135deg,#fbfbfb 0%,#f2f2f2 100%);
+    }
+    .card .step-box:nth-of-type(3){
+      background:linear-gradient(135deg,#fefefe 0%,#efefef 100%);
+    }
+    .step-caption,.tip,.tiny,.hint{
+      color:var(--im-hint);
+      line-height:1.55;
+    }
+    .label{
+      color:var(--im-sub);
+      font-weight:600;
+    }
+    .upload-line{
+      grid-template-columns:104px minmax(580px,1fr) minmax(180px,auto);
+      gap:10px;
+    }
+    input,button,select{
+      border-radius:10px;
+      border:1px solid rgba(28,35,52,.10);
+      font-size:13px;
+    }
+    input[type="text"],input[type="number"],select{
+      background:transparent;
+      border:none;
+      border-bottom:1px solid rgba(28,35,52,.24);
+      border-radius:0;
+      padding-left:0;
+      padding-right:0;
+    }
+    input:focus,select:focus{
+      border-color:var(--im-brand);
+      box-shadow:none;
+    }
+    .field input[type="file"]{
+      height:42px;
+      padding:5px 10px;
+      border:1px solid rgba(28,35,52,.16);
+      border-radius:12px;
+      background:linear-gradient(180deg,#ffffff,#f4f3f3);
+      color:#3f4657;
+    }
+    .field input[type="file"]::file-selector-button{
+      border-radius:10px;
+      border:1px solid rgba(28,35,52,.18);
+      background:linear-gradient(180deg,#ffffff,#eeeeef);
+      color:#222938;
+      font-weight:600;
+    }
+    .field input[type="file"]::file-selector-button:hover{
+      background:linear-gradient(180deg,#f8f8f8,#e9e9ea);
+    }
+    .adv-panel{
+      background:linear-gradient(180deg,#fbfbfb,#f3f3f4);
+      border:none;
+      box-shadow:none;
+    }
+    .adv-toggle.text-link{
+      color:#2f3650;
+      text-decoration:none;
+      border-bottom:1px dashed rgba(28,35,52,.38);
+      font-weight:600;
+    }
+    .adv-toggle.text-link:hover{
+      color:#111827;
+      border-bottom-color:rgba(28,35,52,.62);
+    }
+    button{
+      background:linear-gradient(135deg,#7c89d9 0%,#9aa5ea 52%,#b7c0f2 100%);
+      border:1px solid rgba(92,108,185,.38);
+      box-shadow:0 10px 22px rgba(124,137,217,.24);
+      font-weight:700;
+      letter-spacing:.15px;
+      color:#ffffff;
+    }
+    button:hover{
+      background:linear-gradient(135deg,#8896e1 0%,#a8b2ee 54%,#c3cbf6 100%);
+      border-color:rgba(92,108,185,.44);
+    }
+    button.secondary{
+      background:linear-gradient(135deg,#f8faff 0%,#eef2ff 50%,#f5f7ff 100%);
+      color:#4a5685;
+      border:1px solid rgba(123,137,217,.30);
+      box-shadow:none;
+      font-weight:600;
+    }
+    button.secondary:hover{
+      background:linear-gradient(135deg,#f3f6ff 0%,#e9eeff 52%,#f1f4ff 100%);
+      border-color:rgba(123,137,217,.42);
+      color:#3f4b79;
+    }
+    .primary-actions button{
+      min-width:140px;
+      height:46px;
+    }
+    .link-pill{
+      border:1px solid rgba(28,35,52,.18);
+      background:linear-gradient(180deg,#fbfbfb,#f2f2f2);
+      color:#2b3348;
+      font-weight:600;
+      border-radius:999px;
+      padding:4px 10px;
+    }
+    table{
+      border:none;
+      border-radius:12px;
+      overflow:hidden;
+      background:linear-gradient(180deg,#ffffff,#f8f8f8);
+    }
+    th{
+      background:linear-gradient(180deg,#f2f2f3,#ececec);
+      color:#2d3342;
+      font-weight:700;
+      border-bottom:1px solid rgba(28,35,52,.08);
+    }
+    td{
+      border-bottom:1px solid rgba(28,35,52,.06);
+      color:#1f2937;
+    }
+    tbody tr:hover td{
+      background:rgba(28,35,52,.035);
+    }
+    .material-panel,.log-panel{
+      border:none;
+      border-radius:16px;
+      box-shadow:0 22px 52px rgba(28,35,52,.22);
+    }
+    .material-row{
+      border:none;
+      box-shadow:none;
+      background:linear-gradient(180deg,#ffffff,#f3f3f3);
+    }
+    .hero-bar{
+      display:flex;
+      align-items:flex-end;
+      justify-content:space-between;
+      gap:12px;
+      margin-bottom:10px;
+    }
+    .hero-title{
+      font-family:"Plus Jakarta Sans","PingFang SC","Helvetica Neue",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      font-size:1.42rem;
+      font-weight:700;
+      color:var(--im-ink);
+      letter-spacing:.1px;
+    }
+    .hero-sub{
+      font-size:12px;
+      color:var(--im-hint);
+      margin-top:2px;
+    }
+    .theme-wrap{display:flex;align-items:center;gap:8px}
+    .theme-switch{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:4px;
+      border:1px solid rgba(28,35,52,.12);
+      border-radius:999px;
+      background:linear-gradient(180deg,#fff,#f4f6fb);
+    }
+    .theme-btn{
+      width:30px;height:30px;border-radius:999px;border:none;cursor:pointer;
+      display:inline-flex;align-items:center;justify-content:center;
+      color:#4b5563;background:transparent;box-shadow:none;padding:0;
+      transition:all .18s ease;
+    }
+    .theme-btn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+    .theme-btn:hover{color:#111827;background:rgba(28,35,52,.08)}
+    .theme-btn.active{
+      background:linear-gradient(135deg,#7c89d9 0%,#9aa5ea 52%,#b7c0f2 100%);
+      color:#fff;
+      box-shadow:0 8px 16px rgba(124,137,217,.28);
+    }
+    .compose-layout{
+      display:grid;
+      grid-template-columns:1fr;
+      gap:14px;
+      align-items:stretch;
+    }
+    .compose-main>.step-box,.compose-side>.step-box{height:100%}
+    .compose-side{display:none !important}
+    .compose-main,.compose-side{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+    }
+    .action-strip{
+      display:flex;
+      align-items:center;
+      justify-content:flex-start;
+      gap:12px;
+      margin:2px 0 10px 0;
+      padding:2px 0;
+    }
+    .action-strip button{
+      min-width:180px;
+      height:48px;
+      font-size:16px;
+      border-radius:14px;
+    }
+    .action-strip button.secondary{
+      min-width:200px;
+    }
+    .batch-op{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      margin-left:8px;
+      padding-left:10px;
+      border-left:1px solid rgba(28,35,52,.12);
+    }
+    .batch-op .tiny{margin:0;color:#6b7280}
+    .task-table-wrap{
+      border-radius:14px;
+      overflow:hidden;
+      background:#fff;
+    }
+    .check-col{width:38px;text-align:center}
+    .check-col input{transform:scale(1.05)}
+    .task-card-head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      margin-bottom:10px;
+    }
+    .task-meta{
+      font-size:12px;
+      color:var(--im-hint);
+    }
+    .task-section-spacer{
+      margin-top:2px;
+      border-top:1px solid rgba(28,35,52,.08);
+      padding-top:10px;
+    }
+    @media (max-width: 1180px){
+      .compose-layout{grid-template-columns:1fr}
+      .hero-bar{flex-direction:column;align-items:flex-start}
+      .theme-wrap{width:100%}
+      .theme-switch{width:100%;justify-content:flex-start}
+    }
+    html[data-theme="dark"]{color-scheme:dark}
+    html[data-theme="dark"] body{
+      background:
+        radial-gradient(1180px 620px at 10% -12%, rgba(127,160,255,.18), transparent 60%),
+        radial-gradient(1380px 760px at 100% -18%, rgba(182,151,255,.15), transparent 62%),
+        linear-gradient(180deg,#283043 0%,#222a3b 54%,#1d2433 100%);
+      color:#ecf1fa;
+    }
+    html[data-theme="dark"] .card{
+      background:linear-gradient(180deg,rgba(47,57,78,.94),rgba(38,47,66,.95));
+      box-shadow:0 22px 46px rgba(16,22,38,.28), inset 0 1px 0 rgba(255,255,255,.06);
+    }
+    html[data-theme="dark"] .hero-title,
+    html[data-theme="dark"] .section-title,
+    html[data-theme="dark"] .card-title{color:#f5f8ff}
+    html[data-theme="dark"] .label,
+    html[data-theme="dark"] .channel-main{color:#dbe4f2}
+    html[data-theme="dark"] .tiny,
+    html[data-theme="dark"] .hint,
+    html[data-theme="dark"] .step-caption,
+    html[data-theme="dark"] .hero-sub,
+    html[data-theme="dark"] .task-meta{color:#aab6c9}
+    html[data-theme="dark"] .step-box{
+      background:linear-gradient(180deg,#313b52,#283247) !important;
+      box-shadow:inset 0 0 0 1px rgba(183,196,228,.14), 0 8px 20px rgba(15,21,35,.16);
+    }
+    html[data-theme="dark"] .step-box.compact{
+      background:rgba(57,69,95,.52) !important;
+      border:none !important;
+      box-shadow:0 10px 24px rgba(8,13,24,.22) !important;
+      backdrop-filter:blur(10px) saturate(120%);
+      -webkit-backdrop-filter:blur(10px) saturate(120%);
+    }
+    html[data-theme="dark"] .field input[type="file"]{
+      background:linear-gradient(180deg,#334059,#2a3448);
+      border-color:rgba(203,216,245,.22);
+      color:#e8eefc;
+    }
+    html[data-theme="dark"] .field input[type="file"]::file-selector-button{
+      background:linear-gradient(180deg,#4a5a79,#394a67);
+      border-color:rgba(203,216,245,.28);
+      color:#f6f9ff;
+    }
+    html[data-theme="dark"] #files.file-uniform{
+      background:transparent !important;
+      border:none !important;
+      box-shadow:none !important;
+      color:#dbe4f3;
+    }
+    html[data-theme="dark"] #files.file-uniform:hover{
+      border:none !important;
+      box-shadow:none !important;
+    }
+    html[data-theme="dark"] #files.file-uniform::file-selector-button{
+      background:linear-gradient(135deg,rgba(161,178,255,.28),rgba(124,206,255,.22));
+      border:none;
+      box-shadow:inset 0 0 0 1px rgba(214,226,246,.24);
+      color:#f5f8ff;
+    }
+    html[data-theme="dark"] .adv-panel{background:linear-gradient(180deg,#303b54,#273349)}
+    html[data-theme="dark"] .link-pill{
+      background:linear-gradient(180deg,#394865,#2f3d58);
+      border-color:rgba(203,216,245,.25);
+      color:#e0e8ff;
+    }
+    html[data-theme="dark"] .task-table-wrap{background:#2a3449}
+    html[data-theme="dark"] table{background:linear-gradient(180deg,#34425d,#2a3449)}
+    html[data-theme="dark"] th{
+      background:linear-gradient(180deg,#455677,#374762);
+      color:#edf2fb;
+      border-bottom-color:rgba(214,226,246,.24);
+    }
+    html[data-theme="dark"] td{
+      color:#f1f5ff;
+      border-bottom-color:rgba(214,226,246,.16);
+    }
+    html[data-theme="dark"] tbody tr:hover td{background:rgba(189,206,242,.12)}
+    html[data-theme="dark"] .theme-switch{
+      background:linear-gradient(180deg,#3a4967,#2f3d58);
+      border-color:rgba(214,226,246,.26);
+    }
+    html[data-theme="dark"] .theme-btn{color:#b7c3d8}
+    html[data-theme="dark"] .theme-btn:hover{color:#f4f7ff;background:rgba(214,226,246,.14)}
+    html[data-theme="dark"] .theme-btn.active{
+      background:linear-gradient(135deg,#8ea2ff 0%,#9f89ff 52%,#8de1ff 100%);
+      color:#ffffff;
+    }
+    #logs{
+      background:#132138;
+      color:#e3ecff;
+      border-radius:10px;
+      border:1px solid rgba(180,202,243,.30);
+    }
   </style>
 </head>
 <body>
@@ -2017,16 +2620,31 @@ UI_HTML = """
   <main class="main">
     <div>
       <div class="card">
-        <h3 class="card-title">批量导入并执行（业务版）</h3>
-        <div class="step-box compact">
-          <div class="section-title"><span class="step-no">1</span>第1步：导入与基础配置</div>
+        <div class="hero-bar">
+          <div>
+            <div class="hero-title">精准营销自动化配置（业务版）</div>
+            <div class="hero-sub">选择文件 -> 添加素材 -> 开始执行</div>
+          </div>
+          <div class="theme-wrap">
+            <div class="theme-switch" role="group" aria-label="页面显示模式">
+              <button id="themeModeLight" class="theme-btn" type="button" title="浅色" data-mode="light" aria-label="浅色">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"/></svg>
+              </button>
+              <button id="themeModeDark" class="theme-btn" type="button" title="深色" data-mode="dark" aria-label="深色">
+                <svg viewBox="0 0 24 24"><path d="M20 14.3A8 8 0 1 1 9.7 4 6.5 6.5 0 1 0 20 14.3Z"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="compose-layout">
+          <div class="compose-main">
+            <div class="step-box compact">
           <div class="form-grid">
             <div class="field full upload-line file-hero">
               <span class="label">任务文件</span>
               <input id="files" class="file-uniform" type="file" multiple accept=".csv,.xlsx"/>
             </div>
             <div class="field full upload-actions">
-              <button onclick="upload()">上传任务</button>
               <button id="advToggleBtn" type="button" class="adv-toggle text-link" onclick="toggleAdvancedConfig()">高级配置（展开）</button>
             </div>
             <div class="field full">
@@ -2070,59 +2688,71 @@ UI_HTML = """
             </div>
           </div>
           <div class="step-caption">先上传 CSV/XLSX，再根据需要展开“高级配置”。</div>
-        </div>
-
-        <div class="step-box">
-          <div class="section-title"><span class="step-no">2</span>第2步：选中发送渠道（可多选）</div>
-          <div class="channel-grid">
+            </div>
+          </div>
+          <div class="compose-side">
+            <div class="step-box">
+              <div class="section-title"><span class="step-no">2</span>第2步：选中发送渠道（可多选）</div>
+              <div class="channel-grid">
             <div class="channel-block">
               <label class="channel-item">
                 <input class="step3_channel" type="checkbox" value="短信"/>
-                <span class="channel-icon">💬</span>
+                <span class="channel-icon sms">短信</span>
                 <span><div class="channel-main">短信</div></span>
               </label>
             </div>
             <div class="channel-block">
               <label class="channel-item">
                 <input class="step3_channel" type="checkbox" value="会员通-发客户消息"/>
-                <span class="channel-icon">👥</span>
+                <span class="channel-icon msg">1对1</span>
                 <span><div class="channel-main">会员通-发客户消息</div></span>
               </label>
             </div>
             <div class="channel-block">
               <label class="channel-item">
                 <input class="step3_channel" type="checkbox" value="会员通-发送社群"/>
-                <span class="channel-icon">👥</span>
+                <span class="channel-icon group">社群</span>
                 <span><div class="channel-main">会员通-发送社群</div></span>
               </label>
             </div>
             <div class="channel-block">
               <label class="channel-item">
                 <input class="step3_channel" type="checkbox" value="会员通-发客户朋友圈"/>
-                <span class="channel-icon">🖼️</span>
+                <span class="channel-icon moments">朋友</span>
                 <span><div class="channel-main">会员通-发客户朋友圈</div></span>
               </label>
             </div>
+              </div>
+              <div class="step-caption">素材配置请在任务列表中按计划点击“添加素材”进行设置。</div>
+            </div>
           </div>
-          <div class="step-caption">素材配置请在任务列表中按计划点击“添加素材”进行设置。</div>
         </div>
-
-        <div class="section-title">执行动作</div>
-        <div class="actions primary-actions">
-          <button onclick="startExecute()">开始执行</button>
-          <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
-        </div>
-        <div class="tip" style="margin-top:8px">先“上传任务”让计划进入任务列表，再按计划“添加素材”，最后点击“开始执行”批量自动化创建。</div>
       </div>
 
-      <div class="card">
-        <h3 class="card-title">任务列表</h3>
-        <table>
-          <thead><tr>
-            <th>文件</th><th>计划名称</th><th>发送渠道</th><th>状态</th><th>进度</th><th>成功/失败</th><th>开始</th><th>完成</th><th>耗时(s)</th><th>操作</th>
-          </tr></thead>
-          <tbody id="taskRows"></tbody>
-        </table>
+      <div class="action-strip">
+        <button onclick="startExecute()">开始执行</button>
+        <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
+        <div class="batch-op">
+          <button class="secondary" onclick="batchPauseSelected()">批量暂停</button>
+          <button class="secondary" onclick="batchDeleteSelected()">批量删除</button>
+          <span class="tiny" id="batchInfo">已选 0 项</span>
+        </div>
+      </div>
+
+      <div class="card task-section-spacer">
+        <div class="task-card-head">
+          <h3 class="card-title" style="margin-bottom:0">任务列表</h3>
+          <div class="task-meta">按计划添加素材后，再执行任务</div>
+        </div>
+        <div class="task-table-wrap">
+          <table>
+            <thead><tr>
+              <th class="check-col"><input id="selectAllTasks" type="checkbox" onchange="toggleSelectAllTasks(this.checked)"/></th>
+              <th>文件</th><th>计划名称</th><th>发送渠道</th><th>状态</th><th>进度</th><th>成功/失败</th><th>开始</th><th>完成</th><th>耗时(s)</th><th>操作</th>
+            </tr></thead>
+            <tbody id="taskRows"></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </main>
@@ -2155,6 +2785,8 @@ let logOffset = 0;
 let materialTaskId = "";
 let materialPlans = [];
 let materialTokenSeq = 0;
+let uploading = false;
+let selectedTaskIds = new Set();
 const materialFileMap = new Map();
 const LS_KEYS = {
   tasks: 'pm_ui_cached_tasks_v1',
@@ -2163,6 +2795,44 @@ const LS_KEYS = {
   logsTitle: 'pm_ui_cached_logs_title_v1',
   prefs: 'pm_ui_prefs_v1',
 };
+
+let currentThemeMode = 'light';
+function applyTheme(theme){
+  const root = document.documentElement;
+  if(theme === 'dark') root.setAttribute('data-theme', 'dark');
+  else root.removeAttribute('data-theme');
+}
+function updateThemeButtons(mode){
+  document.querySelectorAll('.theme-btn').forEach(btn => {
+    const active = btn.getAttribute('data-mode') === mode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+function setThemeMode(mode, persist=true){
+  const m = (mode === 'dark') ? 'dark' : 'light';
+  currentThemeMode = m;
+  if(persist){
+    // 仅记录临时操作态；页面最终仍以时间规则自动切换
+    saveLocal('pm_ui_theme_manual_last', m);
+  }
+  updateThemeButtons(m);
+  applyTheme(m);
+}
+function modeByTime(){
+  const now = new Date();
+  const h = now.getHours();
+  const m = now.getMinutes();
+  const mins = h * 60 + m;
+  // 07:00-17:29 浅色；17:30-次日06:59 深色
+  return (mins >= 420 && mins < 1050) ? 'light' : 'dark';
+}
+function syncThemeByTime(){
+  const mode = modeByTime();
+  if(mode !== currentThemeMode){
+    setThemeMode(mode, false);
+  }
+}
 
 function saveLocal(key, value){
   try{ localStorage.setItem(key, JSON.stringify(value)); }catch(_){}
@@ -2260,6 +2930,7 @@ function esc(s){
 }
 
 async function upload(){
+  if(uploading) return;
   const fileInput = document.getElementById('files');
   const files = fileInput.files;
   if(!files.length){
@@ -2267,6 +2938,8 @@ async function upload(){
     fileInput.click();
     return;
   }
+  uploading = true;
+  fileInput.disabled = true;
   const fd = new FormData();
   for(const f of files){ fd.append('files', f); }
   fd.append('connect_cdp', document.getElementById('connect_cdp').checked ? 'true' : 'false');
@@ -2289,10 +2962,18 @@ async function upload(){
   fd.append('upload_stores', uploadStoreEnabled ? 'true' : 'false');
   fd.append('msg_add_mini_program', 'false');
   saveUiPrefs();
-  const r = await fetch('/api/tasks/upload', {method:'POST', body:fd});
-  if(!r.ok){ alert(await r.text()); return; }
-  alert('任务已上传到列表（待执行）。请先按需添加素材，再点击“开始执行”。');
-  await refreshTasks();
+  try{
+    const r = await fetch('/api/tasks/upload', {method:'POST', body:fd});
+    if(!r.ok){
+      alert(await r.text());
+    } else {
+      await refreshTasks();
+    }
+  } finally {
+    fileInput.value = '';
+    fileInput.disabled = false;
+    uploading = false;
+  }
 }
 
 async function startExecute(){
@@ -2312,8 +2993,58 @@ async function retryTask(id){
   await refreshTasks();
 }
 
+async function pauseTask(id){
+  const r = await fetch('/api/tasks/' + id + '/pause', {method:'POST'});
+  if(!r.ok){ alert(await r.text()); return; }
+  await refreshTasks();
+}
+
+async function resumeTask(id){
+  const r = await fetch('/api/tasks/' + id + '/resume', {method:'POST'});
+  if(!r.ok){ alert(await r.text()); return; }
+  await refreshTasks();
+}
+
+async function deleteTask(id){
+  if(!confirm('确认删除该任务？删除后不会执行。')) return;
+  const r = await fetch('/api/tasks/' + id + '/delete', {method:'POST'});
+  if(!r.ok){ alert(await r.text()); return; }
+  selectedTaskIds.delete(id);
+  await refreshTasks();
+}
+
 async function retryFailed(){
   await fetch('/api/tasks/retry-failed', {method:'POST'});
+  await refreshTasks();
+}
+
+async function batchPauseSelected(){
+  const ids = Array.from(selectedTaskIds);
+  if(!ids.length){ alert('请先勾选任务'); return; }
+  const r = await fetch('/api/tasks/pause-batch', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(ids),
+  });
+  if(!r.ok){ alert(await r.text()); return; }
+  const data = await r.json();
+  alert(`批量暂停完成：成功 ${data.changed || 0}，忽略 ${data.ignored || 0}`);
+  await refreshTasks();
+}
+
+async function batchDeleteSelected(){
+  const ids = Array.from(selectedTaskIds);
+  if(!ids.length){ alert('请先勾选任务'); return; }
+  if(!confirm(`确认删除已选 ${ids.length} 个任务？删除后不会执行。`)) return;
+  const r = await fetch('/api/tasks/delete-batch', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(ids),
+  });
+  if(!r.ok){ alert(await r.text()); return; }
+  const data = await r.json();
+  alert(`批量删除完成：成功 ${data.changed || 0}，忽略 ${data.ignored || 0}`);
+  selectedTaskIds.clear();
   await refreshTasks();
 }
 
@@ -2323,14 +3054,50 @@ function renderFileLink(task){
   return `<a class="link-pill" href="/api/tasks/${task.id}/file">下载CSV</a>`;
 }
 
+function updateBatchInfo(){
+  const n = selectedTaskIds.size;
+  const el = document.getElementById('batchInfo');
+  if(el) el.textContent = `已选 ${n} 项`;
+  const all = document.getElementById('selectAllTasks');
+  if(all){
+    const boxes = Array.from(document.querySelectorAll('.task-select'));
+    all.checked = boxes.length > 0 && boxes.every(b => b.checked);
+  }
+}
+
+function toggleTaskSelection(id, checked){
+  if(checked) selectedTaskIds.add(id);
+  else selectedTaskIds.delete(id);
+  updateBatchInfo();
+}
+
+function toggleSelectAllTasks(checked){
+  document.querySelectorAll('.task-select').forEach(el => {
+    el.checked = checked;
+    const id = el.getAttribute('data-id');
+    if(!id) return;
+    if(checked) selectedTaskIds.add(id);
+    else selectedTaskIds.delete(id);
+  });
+  updateBatchInfo();
+}
+
+function _statusText(t){
+  if(t.paused && t.status === 'pending') return 'paused';
+  return t.status;
+}
+
 function renderTasks(rows){
+  const visibleIds = new Set(rows.map(r => r.id));
+  selectedTaskIds = new Set(Array.from(selectedTaskIds).filter(id => visibleIds.has(id)));
   const tbody = document.getElementById('taskRows');
   tbody.innerHTML = rows.map(t => `
     <tr>
+      <td class="check-col"><input class="task-select" data-id="${t.id}" type="checkbox" ${selectedTaskIds.has(t.id) ? 'checked' : ''} onchange="toggleTaskSelection('${t.id}', this.checked)"/></td>
       <td><div class="file-hero">${esc(t.filename)}</div><div style="margin-top:4px">${renderFileLink(t)}</div></td>
       <td>${esc(t.plan_name || '-')}</td>
       <td>${esc(t.send_channels || '-')}</td>
-      <td>${fmtStatus(t.status)}</td>
+      <td>${fmtStatus(_statusText(t))}</td>
       <td>${t.completed_plans}/${t.total_plans || '-'}</td>
       <td>${t.success_count}/${t.fail_count}</td>
       <td>${esc(t.started_at || '-')}</td>
@@ -2339,10 +3106,13 @@ function renderTasks(rows){
       <td>
         <button onclick="openLogModal('${t.id}')">日志</button>
         <button class="secondary" onclick="openMaterialModal('${t.id}')">添加素材</button>
+        ${t.status === 'running' ? '' : (t.paused && t.status === 'pending' ? `<button class="secondary" onclick="resumeTask('${t.id}')">恢复</button>` : `<button class="secondary" onclick="pauseTask('${t.id}')">暂停</button>`)}
+        ${t.status === 'running' ? '' : `<button class="secondary" onclick="deleteTask('${t.id}')">删除</button>`}
         ${t.status === 'failed' ? `<button class="secondary" onclick="retryTask('${t.id}')">重试</button>` : ''}
       </td>
     </tr>
   `).join('');
+  updateBatchInfo();
 }
 
 async function refreshTasks(){
@@ -2599,7 +3369,7 @@ function saveUiPrefs(){
     executor_store_upload: !!document.getElementById('executor_store_upload')?.checked,
     moments_add_images: momentsChecked,
     msg_add_mini_program: miniProgramChecked,
-    advanced_open: document.getElementById('advancedConfig')?.classList.contains('open') || false
+    advanced_open: document.getElementById('advancedConfig')?.classList.contains('open') || false,
   };
   saveLocal(LS_KEYS.prefs, prefs);
 }
@@ -2625,6 +3395,7 @@ function restoreUiFromCache(){
       if(btn) btn.textContent = '高级配置（收起）';
     }
   }
+  setThemeMode('light', false);
   const cachedRows = loadLocal(LS_KEYS.tasks, []);
   if(cachedRows.length){
     renderTasks(cachedRows);
@@ -2641,11 +3412,25 @@ function restoreUiFromCache(){
 
 setInterval(async ()=>{ await refreshTasks(); await pollLogs(); }, 2000);
 document.querySelectorAll('.step3_channel').forEach(el => el.addEventListener('change', syncChannelMaterials));
+const filesEl = document.getElementById('files');
+if(filesEl){
+  filesEl.addEventListener('change', () => {
+    if(filesEl.files && filesEl.files.length){
+      upload();
+    }
+  });
+}
 ['connect_cdp','cdp_endpoint','strict_step2','concurrent','hold_seconds','executor_include_franchise','executor_store_upload','moments_add_images','msg_add_mini_program']
   .forEach(id => {
     const el = document.getElementById(id);
     if(el){ el.addEventListener('change', saveUiPrefs); el.addEventListener('input', saveUiPrefs); }
   });
+document.querySelectorAll('.theme-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const mode = btn.getAttribute('data-mode') || 'light';
+    setThemeMode(mode, true);
+  });
+});
 [['moments_add_images_community','moments_add_images'], ['msg_add_mini_program_community','msg_add_mini_program']].forEach(([fromId, toId]) => {
   const from = document.getElementById(fromId);
   const to = document.getElementById(toId);
