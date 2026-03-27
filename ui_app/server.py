@@ -1907,8 +1907,13 @@ function esc(s){
 }
 
 async function upload(){
-  const files = document.getElementById('files').files;
-  if(!files.length){ alert('请先选择CSV或XLSX文件'); return; }
+  const fileInput = document.getElementById('files');
+  const files = fileInput.files;
+  if(!files.length){
+    // 更顺手：未选文件时直接拉起文件选择框，而不是报错中断
+    fileInput.click();
+    return;
+  }
   const fd = new FormData();
   for(const f of files){ fd.append('files', f); }
   fd.append('connect_cdp', document.getElementById('connect_cdp').checked ? 'true' : 'false');
@@ -1920,7 +1925,7 @@ async function upload(){
   fd.append('end', '');
   fd.append('hold_seconds', document.getElementById('hold_seconds').value || '2');
   const channels = selectedChannels();
-  if(!channels.length){ alert('请至少选择一个发送渠道'); return; }
+  // 允许不勾选页面渠道：优先使用任务文件内“第3步渠道(可多选)”字段
   fd.append('step3_channels', channels.join(','));
   fd.append('executor_include_franchise', document.getElementById('executor_include_franchise').checked ? 'true' : 'false');
   // 素材已迁移至任务列表“添加素材”，这里默认不携带全局素材
