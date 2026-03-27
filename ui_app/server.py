@@ -792,6 +792,29 @@ def parse_task_plans(csv_path: Path) -> List[dict]:
     return plans
 
 
+def split_csv_to_single_plan_files(src_csv: Path, stem: str) -> List[Path]:
+    """将一个任务CSV按计划行拆分为多个单计划CSV文件。"""
+    with src_csv.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not headers:
+        return [src_csv]
+    if len(rows) <= 1:
+        return [src_csv]
+
+    out_paths: List[Path] = []
+    for i, row in enumerate(rows, 1):
+        tid = str(uuid.uuid4())
+        out = UPLOAD_DIR / f"{tid}_{stem}_plan{i}.csv"
+        with out.open("w", encoding="utf-8-sig", newline="") as fw:
+            w = csv.DictWriter(fw, fieldnames=headers)
+            w.writeheader()
+            w.writerow({k: row.get(k, "") for k in headers})
+        out_paths.append(out)
+    return out_paths
+
+
 def apply_task_materials_to_csv(csv_path: Path, specs: List[dict]) -> int:
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
@@ -1367,35 +1390,38 @@ async def upload_tasks(
         if resolved_step2_product_blob:
             step2_product_path = save_uploaded_main_store_file(tid, resolved_step2_product_blob)
             inject_step2_product_file_to_csv(dst, step2_product_path)
-        plan_name_display, channel_display = summarize_csv_meta(dst)
-        # 自动策略：仅社群渠道时，默认关闭严格第2步并启用跳过第2步（免人工配置）。
-        # 优先使用任务文件中的渠道；若文件为空则回退到页面勾选渠道。
-        community_only = _is_community_only_channels(channel_display or options.step3_channels)
-        file_options = TaskOptions(
-            connect_cdp=options.connect_cdp,
-            cdp_endpoint=options.cdp_endpoint,
-            strict_step2=(False if community_only else options.strict_step2),
-            skip_step2=(True if community_only else options.skip_step2),
-            concurrent=options.concurrent,
-            start=options.start,
-            end=options.end,
-            hold_seconds=options.hold_seconds,
-            step3_channels=options.step3_channels,
-            create_url=options.create_url,
-            executor_include_franchise=options.executor_include_franchise,
-        )
+        # 关键：一个上传文件内若有多条计划，拆成多条任务记录（每条计划一条任务）
+        split_files = split_csv_to_single_plan_files(dst, stem)
         op = operator.strip() or os.getenv("USER") or getpass.getuser() or "unknown"
-        task = Task(
-            id=tid,
-            filename=f.filename,
-            file_path=str(dst),
-            options=file_options,
-            operator=op,
-            plan_name_display=plan_name_display,
-            channel_display=channel_display,
-        )
-        await runner.add_task(task, auto_start=False)
-        created.append(task.to_dict())
+        for sf in split_files:
+            plan_name_display, channel_display = summarize_csv_meta(sf)
+            # 自动策略：仅社群渠道时，默认关闭严格第2步并启用跳过第2步（免人工配置）。
+            # 优先使用任务文件中的渠道；若文件为空则回退到页面勾选渠道。
+            community_only = _is_community_only_channels(channel_display or options.step3_channels)
+            file_options = TaskOptions(
+                connect_cdp=options.connect_cdp,
+                cdp_endpoint=options.cdp_endpoint,
+                strict_step2=(False if community_only else options.strict_step2),
+                skip_step2=(True if community_only else options.skip_step2),
+                concurrent=options.concurrent,
+                start=options.start,
+                end=options.end,
+                hold_seconds=options.hold_seconds,
+                step3_channels=options.step3_channels,
+                create_url=options.create_url,
+                executor_include_franchise=options.executor_include_franchise,
+            )
+            task = Task(
+                id=str(uuid.uuid4()),
+                filename=f.filename if len(split_files) == 1 else f"{f.filename}#{sf.stem.split('_')[-1]}",
+                file_path=str(sf),
+                options=file_options,
+                operator=op,
+                plan_name_display=plan_name_display,
+                channel_display=channel_display,
+            )
+            await runner.add_task(task, auto_start=False)
+            created.append(task.to_dict())
     return JSONResponse({"created": created})
 
 
