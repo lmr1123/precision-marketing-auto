@@ -1657,6 +1657,7 @@ UI_HTML = """
             <div class="field full upload-line file-hero">
               <span class="label">任务文件</span>
               <input id="files" class="file-uniform" type="file" multiple accept=".csv,.xlsx"/>
+              <button onclick="upload()">上传任务</button>
               <button id="advToggleBtn" type="button" class="adv-toggle" onclick="toggleAdvancedConfig()">高级配置（展开）</button>
             </div>
             <div class="field full">
@@ -1742,7 +1743,6 @@ UI_HTML = """
 
         <div class="section-title">执行动作</div>
         <div class="actions primary-actions">
-          <button onclick="upload()">上传任务</button>
           <button onclick="startExecute()">开始执行</button>
           <button class="secondary" onclick="retryFailed()">一键重试失败任务</button>
         </div>
