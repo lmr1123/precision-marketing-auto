@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import json
 import getpass
 import io
 import os
@@ -765,6 +766,88 @@ def summarize_csv_meta(csv_path: Path) -> tuple[str, str]:
     return plan_name, "、".join(channels)
 
 
+def parse_task_plans(csv_path: Path) -> List[dict]:
+    plans: List[dict] = []
+    try:
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for idx, row in enumerate(reader):
+                name = str(row.get("name", "") or "").strip() or f"计划{idx+1}"
+                channels = str(row.get("channels", "") or "").strip()
+                plans.append(
+                    {
+                        "index": idx,
+                        "name": name,
+                        "channels": channels,
+                        "msg_add_mini_program": str(row.get("msg_add_mini_program", "") or "").strip() in {"是", "true", "True", "1"},
+                        "moments_add_images": str(row.get("moments_add_images", "") or "").strip() in {"是", "true", "True", "1"},
+                        "msg_mini_program_cover_path": str(row.get("msg_mini_program_cover_path", "") or "").strip(),
+                        "moments_image_paths": str(row.get("moments_image_paths", "") or "").strip(),
+                    }
+                )
+    except Exception:
+        return plans
+    return plans
+
+
+def apply_task_materials_to_csv(csv_path: Path, specs: List[dict]) -> int:
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not headers:
+        return 0
+
+    required = [
+        "msg_add_mini_program",
+        "msg_mini_program_name",
+        "msg_mini_program_title",
+        "msg_mini_program_cover_path",
+        "msg_mini_program_page_path",
+        "moments_add_images",
+        "moments_image_paths",
+    ]
+    for col in required:
+        if col not in headers:
+            headers.append(col)
+
+    touched = 0
+    spec_map = {}
+    for s in specs:
+        try:
+            spec_map[int(s.get("index"))] = s
+        except Exception:
+            continue
+
+    for idx, row in enumerate(rows):
+        s = spec_map.get(idx)
+        if not s:
+            continue
+        touched += 1
+        if "msg_add_mini_program" in s:
+            row["msg_add_mini_program"] = "是" if bool(s.get("msg_add_mini_program")) else "否"
+        if s.get("msg_mini_program_name") is not None:
+            row["msg_mini_program_name"] = str(s.get("msg_mini_program_name") or "")
+        if s.get("msg_mini_program_title") is not None:
+            row["msg_mini_program_title"] = str(s.get("msg_mini_program_title") or "")
+        if s.get("msg_mini_program_page_path") is not None:
+            row["msg_mini_program_page_path"] = str(s.get("msg_mini_program_page_path") or "")
+        if s.get("msg_mini_program_cover_path") is not None:
+            row["msg_mini_program_cover_path"] = str(s.get("msg_mini_program_cover_path") or "")
+
+        if "moments_add_images" in s:
+            row["moments_add_images"] = "是" if bool(s.get("moments_add_images")) else "否"
+        if s.get("moments_image_paths") is not None:
+            row["moments_image_paths"] = str(s.get("moments_image_paths") or "")
+
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in headers})
+    return touched
+
+
 def _parse_channel_list(raw: str) -> List[str]:
     return [p.strip() for p in re.split(r"[|,，、/]+", str(raw or "")) if p.strip()]
 
@@ -1005,6 +1088,16 @@ async def download_task_file(task_id: str):
     return FileResponse(path=str(p), filename=p.name, media_type="text/csv")
 
 
+@app.get("/api/tasks/{task_id}/plans")
+async def get_task_plans(task_id: str) -> JSONResponse:
+    task = await runner.get_task(task_id)
+    p = Path(task.file_path)
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="Task file not found")
+    plans = parse_task_plans(p)
+    return JSONResponse({"task_id": task_id, "plans": plans})
+
+
 @app.get("/api/tasks/{task_id}/logs")
 async def get_task_logs(task_id: str, offset: int = 0, limit: int = 300) -> JSONResponse:
     task = await runner.get_task(task_id)
@@ -1016,6 +1109,63 @@ async def get_task_logs(task_id: str, offset: int = 0, limit: int = 300) -> JSON
         "logs": logs,
         "status": task.status,
     })
+
+
+@app.post("/api/tasks/{task_id}/materials")
+async def save_task_materials(
+    task_id: str,
+    specs_json: str = Form(...),
+    files: List[UploadFile] = File(default=[]),
+) -> JSONResponse:
+    task = await runner.get_task(task_id)
+    csv_path = Path(task.file_path)
+    if not csv_path.exists():
+        raise HTTPException(status_code=404, detail="Task file not found")
+
+    try:
+        specs = json.loads(specs_json)
+        if not isinstance(specs, list):
+            raise ValueError("specs_json must be a list")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid specs_json: {e}")
+
+    file_map: Dict[str, UploadFile] = {f.filename or "": f for f in files}
+    out_dir = UPLOAD_DIR / f"{task_id}_plan_materials"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for spec in specs:
+        idx = int(spec.get("index", -1))
+        if idx < 0:
+            continue
+        plan_dir = out_dir / f"plan_{idx+1:03d}"
+        plan_dir.mkdir(parents=True, exist_ok=True)
+
+        cover_token = str(spec.get("cover_token", "") or "")
+        if cover_token:
+            uf = file_map.get(cover_token)
+            if uf:
+                b = await uf.read()
+                if b:
+                    cover_path = save_uploaded_mini_program_cover(f"{task_id}_p{idx+1}", (uf.filename or cover_token, b))
+                    spec["msg_mini_program_cover_path"] = cover_path
+
+        img_tokens = spec.get("moment_tokens", []) or []
+        if img_tokens:
+            img_blobs: List[Tuple[str, bytes]] = []
+            for tok in img_tokens:
+                tok = str(tok or "")
+                uf = file_map.get(tok)
+                if not uf:
+                    continue
+                b = await uf.read()
+                if b:
+                    img_blobs.append((uf.filename or tok, b))
+            if img_blobs:
+                img_paths = save_uploaded_moments_images(f"{task_id}_p{idx+1}", img_blobs)
+                spec["moments_image_paths"] = "|".join(img_paths)
+
+    touched = apply_task_materials_to_csv(csv_path, specs)
+    return JSONResponse({"task_id": task_id, "updated_plans": touched})
 
 
 @app.get("/api/template/csv")
@@ -1433,6 +1583,15 @@ UI_HTML = """
     .log-modal.open{display:flex}
     .log-panel{width:min(1200px,92vw);max-height:88vh;background:#fff;border-radius:14px;border:1px solid #d1d5db;padding:14px}
     .log-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+    .material-modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;align-items:center;justify-content:center;z-index:9998}
+    .material-modal.open{display:flex}
+    .material-panel{width:min(1260px,94vw);max-height:90vh;background:#fff;border-radius:14px;border:1px solid #d1d5db;padding:14px;overflow:auto}
+    .material-row{border:1px solid #e8e6f3;border-radius:12px;padding:10px;margin-bottom:10px}
+    .material-row h4{margin:0 0 8px 0;font-size:14px}
+    .material-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .img-preview{display:flex;gap:8px;flex-wrap:wrap}
+    .img-preview img{width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid #ddd}
+    .path-chip{display:inline-block;font-size:12px;padding:2px 8px;border:1px solid #ddd;border-radius:999px;background:#fafafa;margin:0 6px 6px 0}
     .link-pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#f5f1ff;color:#312b84;border:1px solid #d9d0ff;font-size:12px;text-decoration:none}
     @media (max-width: 1100px){
       .form-grid{grid-template-columns:1fr}
@@ -1587,9 +1746,26 @@ UI_HTML = """
     <div id="logs"></div>
   </div>
 </div>
+<div id="materialModal" class="material-modal" onclick="closeMaterialModal(event)">
+  <div class="material-panel" onclick="event.stopPropagation()">
+    <div class="log-head">
+      <div id="materialTitle" style="color:#374151;font-weight:600">按计划添加素材</div>
+      <div class="row">
+        <button class="secondary" onclick="closeMaterialModal()">关闭</button>
+        <button onclick="saveTaskMaterials()">保存素材</button>
+      </div>
+    </div>
+    <div class="tiny" style="margin-bottom:8px">说明：素材按计划行独立配置，可随时覆盖，保存后会回写到该任务CSV，重试任务会按最新素材执行。</div>
+    <div id="materialRows"></div>
+  </div>
+</div>
 <script>
 let selectedTaskId = "";
 let logOffset = 0;
+let materialTaskId = "";
+let materialPlans = [];
+let materialTokenSeq = 0;
+const materialFileMap = new Map();
 const LS_KEYS = {
   tasks: 'pm_ui_cached_tasks_v1',
   selectedTaskId: 'pm_ui_selected_task_id_v1',
@@ -1763,6 +1939,7 @@ function renderTasks(rows){
       <td>${t.duration_sec ? t.duration_sec.toFixed(1) : '-'}</td>
       <td>
         <button onclick="openLogModal('${t.id}')">日志</button>
+        <button class="secondary" onclick="openMaterialModal('${t.id}')">添加素材</button>
         ${t.status === 'failed' ? `<button class="secondary" onclick="retryTask('${t.id}')">重试</button>` : ''}
       </td>
     </tr>
@@ -1812,6 +1989,160 @@ function closeLogModal(evt){
   if(evt && evt.target && evt.target.id !== 'logModal') return;
   const m = document.getElementById('logModal');
   if(m) m.classList.remove('open');
+}
+
+function _channelList(raw){
+  return String(raw || '').split(/[|,，、/]/).map(s => s.trim()).filter(Boolean);
+}
+
+function _supportMini(channels){
+  const s = new Set(_channelList(channels));
+  return s.has('会员通-发客户消息') || s.has('会员通-发送社群');
+}
+
+function _supportMoments(channels){
+  const s = new Set(_channelList(channels));
+  return s.has('会员通-发客户朋友圈') || s.has('会员通-发送社群');
+}
+
+function closeMaterialModal(evt){
+  if(evt && evt.target && evt.target.id !== 'materialModal') return;
+  const m = document.getElementById('materialModal');
+  if(m) m.classList.remove('open');
+}
+
+function _renderMaterialPreviews(row, idx){
+  const box = row.querySelector(`.img-preview[data-kind="moments"][data-idx="${idx}"]`);
+  if(!box) return;
+  box.innerHTML = '';
+  (materialPlans[idx]?.moment_tokens || []).forEach(tok => {
+    const f = materialFileMap.get(tok);
+    if(!f) return;
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(f);
+    img.alt = f.name;
+    box.appendChild(img);
+  });
+}
+
+function renderMaterialRows(){
+  const root = document.getElementById('materialRows');
+  if(!root) return;
+  if(!materialPlans.length){
+    root.innerHTML = '<div class="tiny">当前任务没有可配置计划行。</div>';
+    return;
+  }
+  root.innerHTML = materialPlans.map(p => {
+    const mini = _supportMini(p.channels);
+    const moments = _supportMoments(p.channels);
+    const idx = p.index;
+    const chips = (p.moments_image_paths || '').split('|').filter(Boolean).map(x => `<span class="path-chip">${esc(x.split('/').pop())}</span>`).join('');
+    return `
+      <div class="material-row" data-idx="${idx}">
+        <h4>计划${idx + 1}：${esc(p.name)} <span class="tiny">（渠道：${esc(p.channels || '-')}）</span></h4>
+        <div class="material-grid">
+          <div>
+            <label class="inline-check ${mini ? '' : 'hidden'}"><input type="checkbox" data-kind="mini" data-idx="${idx}" ${p.msg_add_mini_program ? 'checked' : ''}/> 添加小程序卡片</label>
+            <div class="${mini ? '' : 'hidden'}" style="margin-top:6px">
+              <input type="file" data-kind="mini-cover" data-idx="${idx}" accept=".jpg,.jpeg,.png"/>
+              ${p.msg_mini_program_cover_path ? `<div class="tiny" style="margin-top:4px">当前封面：${esc(p.msg_mini_program_cover_path.split('/').pop())}</div>` : ''}
+            </div>
+          </div>
+          <div>
+            <label class="inline-check ${moments ? '' : 'hidden'}"><input type="checkbox" data-kind="moments" data-idx="${idx}" ${p.moments_add_images ? 'checked' : ''}/> 启用图片上传</label>
+            <div class="${moments ? '' : 'hidden'}" style="margin-top:6px">
+              <input type="file" data-kind="moments-files" data-idx="${idx}" multiple accept=".jpg,.jpeg,.png"/>
+              <div class="img-preview" data-kind="moments" data-idx="${idx}"></div>
+              ${chips ? `<div style="margin-top:4px">${chips}</div>` : ''}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  root.querySelectorAll('input[data-kind="mini"]').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const idx = Number(e.target.dataset.idx);
+      materialPlans[idx].msg_add_mini_program = !!e.target.checked;
+    });
+  });
+  root.querySelectorAll('input[data-kind="moments"]').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const idx = Number(e.target.dataset.idx);
+      materialPlans[idx].moments_add_images = !!e.target.checked;
+    });
+  });
+  root.querySelectorAll('input[data-kind="mini-cover"]').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const idx = Number(e.target.dataset.idx);
+      const f = e.target.files && e.target.files[0];
+      if(!f) return;
+      const token = `cover_${Date.now()}_${++materialTokenSeq}_${idx}`;
+      materialFileMap.set(token, f);
+      materialPlans[idx].cover_token = token;
+    });
+  });
+  root.querySelectorAll('input[data-kind="moments-files"]').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const idx = Number(e.target.dataset.idx);
+      const list = Array.from(e.target.files || []);
+      const tokens = [];
+      list.forEach((f, i) => {
+        const token = `mom_${Date.now()}_${++materialTokenSeq}_${idx}_${i}`;
+        materialFileMap.set(token, f);
+        tokens.push(token);
+      });
+      materialPlans[idx].moment_tokens = tokens;
+      _renderMaterialPreviews(el.closest('.material-row'), idx);
+    });
+  });
+}
+
+async function openMaterialModal(id){
+  materialTaskId = id;
+  materialFileMap.clear();
+  const resp = await fetch('/api/tasks/' + id + '/plans');
+  if(!resp.ok){ alert('获取计划列表失败'); return; }
+  const data = await resp.json();
+  materialPlans = (data.plans || []).map(p => ({
+    index: Number(p.index),
+    name: p.name || '',
+    channels: p.channels || '',
+    msg_add_mini_program: !!p.msg_add_mini_program,
+    moments_add_images: !!p.moments_add_images,
+    msg_mini_program_cover_path: p.msg_mini_program_cover_path || '',
+    moments_image_paths: p.moments_image_paths || '',
+    cover_token: '',
+    moment_tokens: []
+  }));
+  document.getElementById('materialTitle').textContent = `按计划添加素材（任务 ${id.slice(0,8)}）`;
+  renderMaterialRows();
+  const m = document.getElementById('materialModal');
+  if(m) m.classList.add('open');
+}
+
+async function saveTaskMaterials(){
+  if(!materialTaskId){ return; }
+  const specs = materialPlans.map(p => ({
+    index: p.index,
+    msg_add_mini_program: !!p.msg_add_mini_program,
+    moments_add_images: !!p.moments_add_images,
+    cover_token: p.cover_token || '',
+    moment_tokens: p.moment_tokens || [],
+  }));
+  const fd = new FormData();
+  fd.append('specs_json', JSON.stringify(specs));
+  materialFileMap.forEach((file, token) => {
+    fd.append('files', file, token);
+  });
+  const resp = await fetch(`/api/tasks/${materialTaskId}/materials`, {method:'POST', body:fd});
+  if(!resp.ok){
+    alert(await resp.text());
+    return;
+  }
+  alert('素材已保存，可直接重试该任务执行。');
+  closeMaterialModal();
 }
 
 async function selectTask(id){
