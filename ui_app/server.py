@@ -244,6 +244,46 @@ def write_template_xlsx(path: Path) -> None:
     ws.title = "任务文件"
     ws.append(cn_headers)
     ws.append(sample)
+    # 业务示例：用于给非技术同事直接参考填写（不参与程序逻辑判断）
+    ws_example = wb.create_sheet("任务文件（示例）")
+    ws_example.append(cn_headers)
+    ws_example.append([
+        "测试1-社群", "营运区", "其他、会员生日礼", "会员营销", "会员权益",
+        "测试1-社群", "2026-03-16 08:00:00", "2026-03-30 08:00:00",
+        "定时-单次任务", "2026-03-28 08:00:00", "限制",
+        "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add",
+        "辽宁省区、九江、南昌、广州二", "《目标商品 1》", "",
+        "2026-03-30 08:00:00", "导入门店", "《目标门店1》", "福利",
+        "会员通-发送社群", "大参林健康", "测试1-卡片",
+        "apps/member/integralMall/pages/home/index",
+    ])
+    ws_example.append([
+        "测试2-企微1对1", "省区", "其他、26年3月积分换券", "", "",
+        "测试2-企微1对1", "2026-03-16 08:00:00", "2026-03-30 08:00:00",
+        "定时-单次任务", "2026-03-28 08:00:00", "限制",
+        "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=594094287227023360",
+        "《目标门店1》", "", "《券规则ID1》",
+        "2026-03-30 08:00:00", "", "西北大区、湖北省区", "",
+        "会员通-发客户消息", "大参林健康", "测试1-卡片",
+        "apps/member/integralMall/pages/home/index",
+    ])
+    ws_example.append([
+        "测试3-朋友圈", "省区", "其他、26年3月积分换券", "", "",
+        "测试3-朋友圈", "2026-03-16 08:00:00", "2026-03-30 08:00:00",
+        "定时-单次任务", "2026-03-28 08:00:00", "限制",
+        "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702926159527936",
+        "华南大区", "", "《券规则ID1》",
+        "2026-03-30 08:00:00", "", "黑龙江省区、武汉营运区", "",
+        "会员通-发客户朋友圈", "", "", "",
+    ])
+    ws_example.append([
+        "测试4-短信", "省区", "其他、26年3月积分换券", "", "",
+        "测试4-短信", "2026-03-16 08:00:00", "2026-03-30 08:00:00",
+        "定时-单次任务", "2026-03-28 08:00:00", "限制",
+        "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702746907561984",
+        "来宾、华中大区", "《目标商品 1》", "《券规则ID1》",
+        "", "", "", "", "短信", "", "", "",
+    ])
     ws_store_1 = wb.create_sheet("目标门店 1")
     ws_store_1.append(["门店编码"])
     ws_store_1.append(["1001010022"])
