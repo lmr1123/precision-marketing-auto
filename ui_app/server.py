@@ -36,24 +36,24 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "theme": "营销主题",
     "scene_type": "场景类型",
     "plan_type": "计划类型",
-    "use_recommend": "推荐算法",
+    "push_content": "推送内容",
     "start_time": "计划开始时间",
     "end_time": "计划结束时间",
     "trigger_type": "触发方式",
     "send_time": "发送时间",
     "global_limit": "全局触达限制",
-    "set_target": "是否设置目标",
     "create_url": "创建链接",
     "group_name": "分群名称",
-    "update_type": "更新方式",
     "main_operating_area": "主消费营运区",
     "main_store_file_path": "主消费门店文件路径",
     "step2_store_file_path": "第2步门店信息文件路径",
     "step2_product_file_path": "第2步商品编码文件路径",
     "coupon_ids": "券规则ID",
+    "coupon_ids_sheet_ref": "已领或已使用券规则ID",
+    "purchase_target_product_code": "购买目标商品编码",
     "sms_content": "短信内容",
-    "step3_end_time": "第3步结束时间",
-    "distribution_mode": "分配方式",
+    "step3_end_time": "员工任务结束时间",
+    "distribution_mode": "社群任务分配方式",
     "executor_employees": "执行员工",
     "send_content": "发送内容",
     "group_send_name": "下发群名",
@@ -69,6 +69,13 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "msg_mini_program_page_path": "1对1-小程序链接",
 }
 HEADER_CN_TO_EN: Dict[str, str] = {v: k for k, v in HEADER_EN_TO_CN.items()}
+HEADER_CN_TO_EN.update({
+    "第3步结束时间": "step3_end_time",
+    "分配方式": "distribution_mode",
+    "发送内容": "send_content",
+    "短信内容": "sms_content",
+    "主消费运营区": "main_operating_area",
+})
 
 CHANNEL_CODE_TO_NAME: Dict[str, str] = {
     "1": "短信",
@@ -97,6 +104,13 @@ TEMPLATE_HIDE_FIELDS = {
     "step2_product_file_path",
     "msg_add_mini_program",
     "msg_mini_program_cover_path",
+    "coupon_ids",
+    "use_recommend",
+    "set_target",
+    "update_type",
+    "sms_content",
+    "send_content",
+    "group_name",
 }
 
 
@@ -118,21 +132,20 @@ def _default_headers() -> List[str]:
         "theme",
         "scene_type",
         "plan_type",
-        "use_recommend",
+        "push_content",
         "start_time",
         "end_time",
         "trigger_type",
         "send_time",
         "global_limit",
-        "set_target",
         "create_url",
-        "group_name",
-        "update_type",
         "main_operating_area",
         "main_store_file_path",
         "step2_store_file_path",
         "step2_product_file_path",
+        "purchase_target_product_code",
         "coupon_ids",
+        "coupon_ids_sheet_ref",
         "sms_content",
         "step3_end_time",
         "distribution_mode",
@@ -185,10 +198,28 @@ def _filter_template_fields(headers: List[str], sample: List[str]) -> tuple[List
     if "theme" in out_headers:
         idx = out_headers.index("theme")
         out_sample[idx] = "其他、26年3月积分换券"
+    if "channels" in out_headers:
+        idx = out_headers.index("channels")
+        out_sample[idx] = "短信、会员通-发客户消息"
+    if "create_url" in out_headers:
+        idx = out_headers.index("create_url")
+        out_sample[idx] = "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=600035736992907264"
+    if "push_content" in out_headers:
+        idx = out_headers.index("push_content")
+        out_sample[idx] = "示例推送内容（按发送渠道自动映射到短信内容或发送内容）"
     # 业务引导示例：第2步主消费营运区支持多区域填写
     if "main_operating_area" in out_headers:
         idx = out_headers.index("main_operating_area")
         out_sample[idx] = "辽宁省区、九江、南昌、广州二"
+    if "executor_employees" in out_headers:
+        idx = out_headers.index("executor_employees")
+        out_sample[idx] = "《目标门店 1》"
+    if "purchase_target_product_code" in out_headers:
+        idx = out_headers.index("purchase_target_product_code")
+        out_sample[idx] = "《目标商品 1》"
+    if "coupon_ids_sheet_ref" in out_headers:
+        idx = out_headers.index("coupon_ids_sheet_ref")
+        out_sample[idx] = "《券规则 ID 1》"
     return out_headers, out_sample
 
 
@@ -213,12 +244,18 @@ def write_template_xlsx(path: Path) -> None:
     ws.title = "任务文件"
     ws.append(cn_headers)
     ws.append(sample)
-    ws_store = wb.create_sheet("目标门店")
-    ws_store.append(["门店编码", "大区", "省区", "营运区", "片区", "门店"])
-    ws_store.append(["1001010022", "华南大区", "广佛省区", "广州一", "张惠敏", "00022店广州泰沙"])
-    ws_product = wb.create_sheet("目标商品")
-    ws_product.append(["商品编码", "大类", "中类", "小类", "商品名"])
-    ws_product.append(["1010002", "RX", "心脑血管用药", "高血压用药", "硝苯地平片"])
+    ws_store_1 = wb.create_sheet("目标门店 1")
+    ws_store_1.append(["门店编码"])
+    ws_store_1.append(["1001010022"])
+    ws_store_1.append(["1001010026"])
+    ws_product_1 = wb.create_sheet("目标商品 1")
+    ws_product_1.append(["商品编码"])
+    ws_product_1.append(["1010002"])
+    ws_product_1.append(["1012058"])
+    ws_coupon = wb.create_sheet("券规则 ID 1")
+    ws_coupon.append(["券规则ID"])
+    ws_coupon.append(["1-20000005313"])
+    ws_coupon.append(["1-20000005475"])
     wb.save(path)
     wb.close()
 
@@ -244,10 +281,10 @@ def write_community_template_xlsx(path: Path) -> None:
         "会员通-发送社群", "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add",
         "大参林健康", "社群小程序示例", "pages/index/index",
     ])
-    ws_store = wb.create_sheet("目标门店")
+    ws_store = wb.create_sheet("目标门店 1")
     ws_store.append(["门店编码"])
     ws_store.append(["2000081179"])
-    ws_product = wb.create_sheet("目标商品")
+    ws_product = wb.create_sheet("目标商品 1")
     ws_product.append(["商品编码"])
     ws_product.append(["1012058"])
     wb.save(path)
@@ -316,6 +353,184 @@ def normalize_channels_in_csv(dst_csv: Path) -> None:
         return
 
 
+def _norm_sheet_name(name: str) -> str:
+    return re.sub(r"\s+", "", str(name or "")).strip().lower()
+
+
+def _extract_book_title_ref(raw: str) -> str:
+    m = re.search(r"《\s*([^》]+?)\s*》", str(raw or ""))
+    return (m.group(1).strip() if m else "")
+
+
+def _collect_sheet_first_col_values(values: List[List[str]]) -> List[str]:
+    if not values:
+        return []
+    out: List[str] = []
+    for i, row in enumerate(values):
+        if not row:
+            continue
+        first = str(row[0] or "").strip()
+        if not first:
+            continue
+        if i == 0 and ("券规则" in first or "id" in first.lower()):
+            continue
+        if first not in out:
+            out.append(first)
+    return out
+
+
+def apply_unified_field_mapping_and_refs(
+    dst_csv: Path,
+    task_id: str,
+    step3_channels: str,
+    sheet_assets: Dict[str, dict],
+) -> None:
+    """
+    统一模板字段映射与书名号sheet引用处理：
+    - 推送内容 -> 按发送渠道映射到 sms_content / send_content
+    - 执行员工《目标门店X》 -> 自动映射 store_file_path + upload_stores=是
+    - 购买目标商品编码《目标商品X》 -> step2_product_file_path
+    - 已领或已使用券规则ID《券规则IDX》 -> coupon_ids（用/拼接）
+    - 创建链接规则：社群空值自动补默认；非社群空值报错阻断
+    """
+    with dst_csv.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not headers:
+        return
+
+    for col in (
+        "sms_content",
+        "send_content",
+        "upload_stores",
+        "store_file_path",
+        "main_store_file_path",
+        "step2_store_file_path",
+        "step2_product_file_path",
+        "coupon_ids",
+        "channels",
+        "create_url",
+        "msg_add_mini_program",
+        "msg_mini_program_cover_path",
+    ):
+        if col not in headers:
+            headers.append(col)
+
+    ui_channels = _normalize_channel_text(step3_channels or "")
+    community_default = "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add"
+
+    def _pick_default_mini_cover() -> str:
+        patterns = ("cover_*.JPG", "cover_*.jpg", "cover_*.jpeg", "cover_*.png")
+        files: List[Path] = []
+        for pat in patterns:
+            files.extend(UPLOAD_DIR.glob(f"*_mini_program/{pat}"))
+        if not files:
+            return ""
+        files = sorted(files, key=lambda x: x.stat().st_mtime, reverse=True)
+        return str(files[0].resolve())
+
+    def _save_sheet_blob_for_store(sheet_title: str, row_no: int) -> str:
+        asset = sheet_assets.get(_norm_sheet_name(sheet_title))
+        if not asset:
+            raise HTTPException(status_code=400, detail=f"第{row_no}行：未找到sheet《{sheet_title}》")
+        return save_uploaded_store_file(f"{task_id}_r{row_no}", (asset["filename"], asset["bytes"]))
+
+    def _save_sheet_blob_for_step2_product(sheet_title: str, row_no: int) -> str:
+        asset = sheet_assets.get(_norm_sheet_name(sheet_title))
+        if not asset:
+            raise HTTPException(status_code=400, detail=f"第{row_no}行：未找到sheet《{sheet_title}》")
+        return save_uploaded_main_store_file(f"{task_id}_r{row_no}", (asset["filename"], asset["bytes"]))
+
+    normalized_rows: List[Dict[str, str]] = []
+    for row in rows:
+        # 跳过 Excel 末尾空行（避免误报“发送渠道不能为空”）
+        if not any(str(v or "").strip() for v in row.values()):
+            continue
+        normalized_rows.append(row)
+
+    for idx, row in enumerate(normalized_rows, 1):
+        row_channels = _normalize_channel_text(str(row.get("channels", "") or "").strip())
+        channel_scope = row_channels or ui_channels
+        parts = [p.strip() for p in re.split(r"[|,，、/]+", channel_scope) if p.strip()]
+        is_community = "会员通-发送社群" in parts
+
+        # 发送渠道严格校验
+        if not parts:
+            raise HTTPException(status_code=400, detail=f"第{idx}行：发送渠道不能为空")
+
+        # 创建链接规则：社群可默认；其他渠道必须填写
+        create_url = str(row.get("create_url", "") or "").strip()
+        has_non_community = any(p != "会员通-发送社群" for p in parts)
+        if has_non_community and (not create_url):
+            raise HTTPException(status_code=400, detail=f"第{idx}行：非社群渠道必须填写“创建链接”")
+        if is_community and (not create_url):
+            row["create_url"] = community_default
+
+        # 推送内容路由
+        push_content = str(row.get("push_content", "") or "").strip()
+        if push_content:
+            if "短信" in parts:
+                row["sms_content"] = push_content
+            if any(p in {"会员通-发客户消息", "会员通-发客户朋友圈", "会员通-发送社群"} for p in parts):
+                row["send_content"] = push_content
+
+        # 主消费营运区书名号引用 -> 第2步门店信息sheet（兼容用户把《目标门店X》写在该字段）
+        main_area_ref = _extract_book_title_ref(row.get("main_operating_area", ""))
+        if main_area_ref:
+            step2_store_path = _save_sheet_blob_for_store(main_area_ref, idx)
+            row["main_store_file_path"] = step2_store_path
+            row["step2_store_file_path"] = step2_store_path
+            # 书名号引用场景下不再走“主消费营运区树节点选择”
+            row["main_operating_area"] = ""
+
+        # 执行员工书名号引用 -> 目标门店sheet（第3步上传门店）
+        emp_ref = _extract_book_title_ref(row.get("executor_employees", ""))
+        if emp_ref:
+            store_path = _save_sheet_blob_for_store(emp_ref, idx)
+            row["upload_stores"] = "是"
+            row["store_file_path"] = store_path
+            # 会员通消息/朋友圈渠道下，执行员工仍为必填：用主消费营运区做兜底，避免仅书名号导致执行员工为空
+            if any(p in {"会员通-发客户消息", "会员通-发客户朋友圈"} for p in parts):
+                fallback_exec = str(row.get("main_operating_area", "") or "").strip()
+                if fallback_exec:
+                    row["executor_employees"] = fallback_exec
+
+        # 购买目标商品编码书名号引用 -> 商品编码上传sheet
+        product_ref = _extract_book_title_ref(row.get("purchase_target_product_code", ""))
+        if product_ref:
+            row["step2_product_file_path"] = _save_sheet_blob_for_step2_product(product_ref, idx)
+
+        # 已领或已使用券规则ID书名号引用 -> 券规则ID文本（/拼接）
+        coupon_ref = _extract_book_title_ref(row.get("coupon_ids_sheet_ref", ""))
+        if coupon_ref:
+            asset = sheet_assets.get(_norm_sheet_name(coupon_ref))
+            if not asset:
+                raise HTTPException(status_code=400, detail=f"第{idx}行：未找到sheet《{coupon_ref}》")
+            values = _collect_sheet_first_col_values(asset.get("rows", []))
+            if not values:
+                raise HTTPException(status_code=400, detail=f"第{idx}行：sheet《{coupon_ref}》未找到有效券规则ID")
+            row["coupon_ids"] = "/".join(values)
+
+        # 小程序自动判定：有名称/标题/链接任一字段，自动开启添加小程序；
+        # 若封面路径缺失，则自动复用最近一次已上传的封面图用于测试验证。
+        mp_name = str(row.get("msg_mini_program_name", "") or "").strip()
+        mp_title = str(row.get("msg_mini_program_title", "") or "").strip()
+        mp_link = str(row.get("msg_mini_program_page_path", "") or "").strip()
+        if mp_name or mp_title or mp_link:
+            row["msg_add_mini_program"] = "是"
+            if not str(row.get("msg_mini_program_cover_path", "") or "").strip():
+                default_cover = _pick_default_mini_cover()
+                if default_cover:
+                    row["msg_mini_program_cover_path"] = default_cover
+
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in normalized_rows:
+            writer.writerow({k: row.get(k, "") for k in headers})
+
+
 def convert_uploaded_xlsx_to_csv(upload: UploadFile, dst_csv: Path) -> None:
     if load_workbook is None:
         raise HTTPException(status_code=500, detail="Server missing openpyxl. Please install requirements-ui.txt")
@@ -364,9 +579,9 @@ def _sheet_to_xlsx_blob(ws_title: str, ws) -> Tuple[str, bytes]:
     return f"{ws_title or 'sheet'}.xlsx", bio.getvalue()
 
 
-def convert_uploaded_xlsx_multi_sheet(
-    upload: UploadFile, dst_csv: Path
-) -> Tuple[Optional[Tuple[str, bytes]], Optional[Tuple[str, bytes]]]:
+def convert_uploaded_xlsx_multi_sheet_from_bytes(
+    xlsx_bytes: bytes, dst_csv: Path
+) -> Tuple[Optional[Tuple[str, bytes]], Optional[Tuple[str, bytes]], Dict[str, dict]]:
     """
     一个Excel多sheet模式：
     - 任务文件sheet -> 转CSV
@@ -375,8 +590,7 @@ def convert_uploaded_xlsx_multi_sheet(
     """
     if load_workbook is None:
         raise HTTPException(status_code=500, detail="Server missing openpyxl. Please install requirements-ui.txt")
-    upload.file.seek(0)
-    wb = load_workbook(upload.file, read_only=True, data_only=True)
+    wb = load_workbook(io.BytesIO(xlsx_bytes), read_only=True, data_only=True)
     names = list(wb.sheetnames)
 
     task_sheet = _pick_sheet_name(
@@ -402,12 +616,23 @@ def convert_uploaded_xlsx_multi_sheet(
 
     store_blob: Optional[Tuple[str, bytes]] = None
     product_blob: Optional[Tuple[str, bytes]] = None
+    sheet_assets: Dict[str, dict] = {}
     if store_sheet:
         store_blob = _sheet_to_xlsx_blob(store_sheet, wb[store_sheet])
     if product_sheet:
         product_blob = _sheet_to_xlsx_blob(product_sheet, wb[product_sheet])
+    for n in names:
+        ws = wb[n]
+        blob_name, blob_bytes = _sheet_to_xlsx_blob(n, ws)
+        rows = [["" if v is None else str(v) for v in row] for row in ws.iter_rows(values_only=True)]
+        sheet_assets[_norm_sheet_name(n)] = {
+            "title": n,
+            "filename": blob_name,
+            "bytes": blob_bytes,
+            "rows": rows,
+        }
     wb.close()
-    return store_blob, product_blob
+    return store_blob, product_blob, sheet_assets
 
 def _is_valid_jpeg_png_bytes(data: bytes) -> bool:
     """校验图片真实格式（避免仅后缀正确但内容非法/加密）。"""
@@ -1295,7 +1520,7 @@ async def download_template_xlsx():
         raise HTTPException(status_code=500, detail=str(e))
     return FileResponse(
         path=str(p),
-        filename="精准营销任务模板（含目标门店与目标商品）.xlsx",
+        filename="精准营销任务模板（统一模板）.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -1406,17 +1631,21 @@ async def upload_tasks(
         dst = UPLOAD_DIR / f"{tid}_{stem}.csv"
         file_step2_store_blob: Optional[Tuple[str, bytes]] = None
         file_step2_product_blob: Optional[Tuple[str, bytes]] = None
+        file_sheet_assets: Dict[str, dict] = {}
         if lower.endswith(".xlsx"):
             # 优先按“单Excel多sheet”读取；若无对应sheet则仅任务sheet生效
-            ms_store_blob, ms_product_blob = convert_uploaded_xlsx_multi_sheet(f, dst)
+            raw_xlsx = await f.read()
+            ms_store_blob, ms_product_blob, ms_sheet_assets = convert_uploaded_xlsx_multi_sheet_from_bytes(raw_xlsx, dst)
             file_step2_store_blob = ms_store_blob
             file_step2_product_blob = ms_product_blob
+            file_sheet_assets = ms_sheet_assets or {}
         else:
             with dst.open("wb") as out:
                 shutil.copyfileobj(f.file, out)
         normalize_uploaded_csv_headers(dst)
         normalize_channels_in_csv(dst)
         normalize_community_create_url_in_csv(dst, options.step3_channels)
+        apply_unified_field_mapping_and_refs(dst, tid, options.step3_channels, file_sheet_assets)
         if moments_add_images and image_blobs:
             image_paths = save_uploaded_moments_images(tid, image_blobs)
             inject_moments_images_to_csv(dst, image_paths, options.step3_channels)
@@ -1763,9 +1992,8 @@ UI_HTML = """
             <div class="field full">
               <span class="label">模板下载</span>
               <div class="row">
-                <a class="link-pill" href="/api/template/xlsx">下载Excel模板</a>
+                <a class="link-pill" href="/api/template/xlsx">下载Excel统一模板</a>
                 <a class="link-pill" href="/api/template/csv">下载CSV模板(防乱码)</a>
-                <a class="link-pill" href="/api/template/community-xlsx">下载社群专用模板</a>
               </div>
             </div>
           </div>

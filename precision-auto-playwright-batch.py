@@ -131,6 +131,7 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "scene_type": row.get("scene_type", "").strip(),
                 "plan_type": row.get("plan_type", "").strip(),
                 "use_recommend": row.get("use_recommend", "").strip(),
+                "push_content": (row.get("push_content", "") or row.get("推送内容", "")).strip(),
                 "start_time": row.get("start_time", "").strip(),
                 "end_time": row.get("end_time", "").strip(),
                 "trigger_type": row.get("trigger_type", "").strip(),
@@ -143,11 +144,13 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "main_store_file_path": row.get("main_store_file_path", "").strip(),
                 "step2_store_file_path": row.get("step2_store_file_path", "").strip(),
                 "step2_product_file_path": row.get("step2_product_file_path", "").strip(),
+                "purchase_target_product_code": (row.get("purchase_target_product_code", "") or row.get("购买目标商品编码", "")).strip(),
                 "coupon_ids": row.get("coupon_ids", "").strip(),
+                "coupon_ids_sheet_ref": (row.get("coupon_ids_sheet_ref", "") or row.get("已领或已使用券规则ID", "")).strip(),
                 "sms_content": row.get("sms_content", "").strip(),
-                "step3_end_time": row.get("step3_end_time", "").strip(),
+                "step3_end_time": (row.get("step3_end_time", "") or row.get("员工任务结束时间", "")).strip(),
                 "executor_employees": row.get("executor_employees", "").strip(),
-                "distribution_mode": row.get("distribution_mode", "").strip(),
+                "distribution_mode": (row.get("distribution_mode", "") or row.get("社群任务分配方式", "")).strip(),
                 "group_send_name": (row.get("group_send_name", "") or row.get("delivery_group_name", "") or row.get("下发群名", "")).strip(),
                 "executor_include_franchise": row.get("executor_include_franchise", "").strip(),
                 "send_content": row.get("send_content", "").strip(),
@@ -163,6 +166,18 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "msg_mini_program_cover_path": row.get("msg_mini_program_cover_path", "").strip(),
                 "msg_mini_program_page_path": row.get("msg_mini_program_page_path", "").strip(),
             }
+            # 统一模板：推送内容按渠道路由到短信/发送内容。
+            push_content = plan.get("push_content", "")
+            if push_content:
+                channels_raw = str(plan.get("channels", "") or "")
+                if ("短信" in channels_raw) and (not plan.get("sms_content", "")):
+                    plan["sms_content"] = push_content
+                if any(k in channels_raw for k in ("会员通-发客户消息", "会员通-发客户朋友圈", "会员通-发送社群")) and (not plan.get("send_content", "")):
+                    plan["send_content"] = push_content
+                if (not plan.get("sms_content", "")) and (not plan.get("send_content", "")):
+                    # 未指定渠道时兜底：两个都写，交给后续渠道判定使用。
+                    plan["sms_content"] = push_content
+                    plan["send_content"] = push_content
             plans.append(plan)
     return plans
 
@@ -3666,6 +3681,10 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
     area_path_hints = {
         "广佛省区": ["华南大区", "广佛省区"],
         "广佛省区加盟": ["华南大区加盟", "广佛省区加盟"],
+        "黑龙江省区": ["北方大区", "黑龙江省区"],
+        "黑龙江省区加盟": ["北方大区加盟", "黑龙江省区加盟"],
+        "武汉营运区": ["华中大区", "湖北省区", "武汉营运区"],
+        "武汉营运区加盟": ["华中大区加盟", "湖北省区加盟", "武汉营运区加盟"],
         "大郑州营运区": ["西北大区", "河南省区", "大郑州营运区"],
         "大郑州营运区加盟": ["西北大区加盟", "河南省区加盟", "大郑州营运区加盟"],
         "郑州": ["西北大区", "河南省区", "大郑州营运区"],
@@ -3699,12 +3718,26 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
         return False
 
     # 先按业务规则双击“全国”：第一次全选，第二次清空。
+    # 但仅在面板稳定可读时执行；并在每次点击后重开面板，避免被弹层自动收起。
     await reopen_executor_panel()
     nation_before = await get_menu_checked_state(0, "全国")
-    first_ok = await toggle_in_menu(0, "全国")
-    nation_after_first = await get_menu_checked_state(0, "全国")
-    second_ok = await toggle_in_menu(0, "全国")
-    nation_after_second = await get_menu_checked_state(0, "全国")
+    first_ok = False
+    second_ok = False
+    nation_after_first = nation_before
+    nation_after_second = nation_before
+    if nation_before in ("checked", "unchecked"):
+        first_ok = await toggle_in_menu(0, "全国")
+        try:
+            await reopen_executor_panel()
+        except Exception:
+            pass
+        nation_after_first = await get_menu_checked_state(0, "全国")
+        second_ok = await toggle_in_menu(0, "全国")
+        try:
+            await reopen_executor_panel()
+        except Exception:
+            pass
+        nation_after_second = await get_menu_checked_state(0, "全国")
     print(
         "      🧪 全国双击清空: "
         f"before={nation_before}, firstClick={first_ok}, afterFirst={nation_after_first}, "
@@ -5870,6 +5903,24 @@ async def skip_step2(page, data: dict | None = None):
         data = data or {}
         channels = (data.get("channels", "") or "")
         create_url = (data.get("create_url", "") or "")
+        # 通用单页模式：若已能识别第3步字段，则无需强制点“下一步”
+        try:
+            step3_like = await page.evaluate("""() => {
+                const txt = (document.body?.innerText || '').replace(/\\s+/g, '');
+                return (
+                    txt.includes('短信内容') ||
+                    txt.includes('结束时间') ||
+                    txt.includes('员工任务结束时间') ||
+                    txt.includes('执行员工') ||
+                    txt.includes('发送内容') ||
+                    txt.includes('社群群发')
+                );
+            }""")
+            if step3_like:
+                print("      ⏭️ 单页模式：已识别第3步字段，无需点击“下一步”")
+                return {"第2步-跳过下一步按钮": True}
+        except Exception:
+            pass
         if ("会员通-发送社群" in channels) or ("addcommunityPlan" in create_url):
             print("      ⏭️ 社群单页模式：第2步跳过无需点击“下一步”，继续第3步")
             return {"第2步-跳过下一步按钮": True}
@@ -6044,9 +6095,9 @@ async def fill_step3(
             switched_msg = await switch_step3_channel(page, target_msg_channel)
             print(f"   🔀 渠道切换(会员通): {target_msg_channel} -> {'成功' if switched_msg else '未命中(按当前页继续)'}")
             await asyncio.sleep(0.4)
-        print(f"   📅 结束时间: {step3_end_time}")
+        print(f"   📅 员工任务结束时间: {step3_end_time}")
         end_ok = await fill_step3_end_time(page, step3_end_time, section_hint=("社群群发" if community_required else ""))
-        print(f"      {'✅' if end_ok else '⚠️'} 结束时间{'已填充' if end_ok else '未匹配到字段'}")
+        print(f"      {'✅' if end_ok else '⚠️'} 员工任务结束时间{'已填充' if end_ok else '未匹配到字段'}")
         results["第3步-结束时间"] = end_ok
         if not end_ok:
             moments_gate_ok = False
@@ -6078,7 +6129,7 @@ async def fill_step3(
                 distribution_mode,
                 section_hint=("社群群发" if community_required else ""),
             )
-            print(f"   ⚙️ 分配方式: {distribution_mode if mode_ok else '未找到分配方式控件'}")
+            print(f"   ⚙️ 社群任务分配方式: {distribution_mode if mode_ok else '未找到分配方式控件'}")
             if not mode_ok:
                 moments_gate_ok = False
                 moments_gate_errors.append("分配方式")
@@ -6194,7 +6245,7 @@ async def fill_step3(
             print("   🖼️ 朋友圈图片: ⏭️ 当前所选渠道无需填写，已跳过")
             results["第3步-朋友圈图片"] = True
     else:
-        print("   📅 结束时间: ⏭️ 当前所选渠道无需填写，已跳过")
+        print("   📅 员工任务结束时间: ⏭️ 当前所选渠道无需填写，已跳过")
         print("   👥 执行员工: ⏭️ 当前所选渠道无需填写，已跳过")
         print("   📝 发送内容: ⏭️ 当前所选渠道无需填写，已跳过")
         print("   🏬 上传门店: ⏭️ 当前所选渠道无需填写，已跳过")
@@ -6330,6 +6381,21 @@ async def fill_step3(
         if has_community_submit_req:
             print("      ⚠️ 社群保存判定兜底：已捕获 addOrUpdate 提交请求，按提交成功处理")
             saved_ok = True
+    # 非社群页兜底：部分内网页面保存后会切到 about:blank，导致响应事件偶发丢失；
+    # 若已发出核心保存请求，则按提交成功处理，避免误报失败。
+    if (not saved_ok) and (not community_like):
+        has_batch_submit_req = any(
+            "/api/v1/precision/content-rights-setting/batch-create/v2" in (u or "")
+            for _, u in (save_req_candidates or [])
+        )
+        if has_batch_submit_req:
+            try:
+                curr_url = page.url or ""
+            except Exception:
+                curr_url = ""
+            if curr_url.startswith("about:blank"):
+                print("      ⚠️ 保存判定兜底：已捕获 batch-create 提交请求（当前URL=about:blank），按提交成功处理")
+                saved_ok = True
     try:
         page.remove_listener("response", _on_response)
     except Exception:
@@ -6575,9 +6641,14 @@ async def process_single_plan(
                 community_only = bool(selected_channels_for_plan) and all(c == "会员通-发送社群" for c in selected_channels_for_plan)
                 community_url = (create_url_override or plan.get("create_url", "") or current_base_url or "")
                 auto_skip_step2_for_community = community_only or ("addcommunityPlan" in community_url)
+                allow_manual_skip_step2 = bool(skip_step2_mode and community_only)
 
-                if skip_step2_mode or auto_skip_step2_for_community:
-                    if auto_skip_step2_for_community and not skip_step2_mode:
+                # 规则：--skip-step2 仅社群渠道可跳过；其他渠道不允许手动跳过。
+                if skip_step2_mode and (not community_only):
+                    print("   ⚠️ --skip-step2 仅社群渠道可用；当前渠道将执行第2步")
+
+                if allow_manual_skip_step2 or auto_skip_step2_for_community:
+                    if auto_skip_step2_for_community and (not allow_manual_skip_step2):
                         print("   ⏭️  社群渠道模式：自动跳过第2步，直接进入第3步")
                     field_results.update(await fill_step1(page, plan, auto_next=True))
                     field_results.update(await skip_step2(page, plan))
