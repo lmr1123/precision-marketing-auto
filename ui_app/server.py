@@ -1535,6 +1535,19 @@ UI_HTML = """
     .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding-top:6px}
     .subcard{border:none;background:linear-gradient(180deg,#fefeff,#faf9ff);border-radius:12px;padding:12px;margin-top:8px;box-shadow:inset 0 0 0 1px rgba(120,110,190,.08)}
     .adv-toggle{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 14px;border-radius:999px;background:var(--brand-soft);color:#312b84;border:1px solid #dbd4ff;cursor:pointer;font-weight:600}
+    .adv-toggle.text-link{
+      height:auto;
+      padding:0;
+      border:none;
+      background:transparent;
+      color:#4b46a3;
+      border-radius:0;
+      box-shadow:none;
+      font-weight:500;
+      text-decoration:underline;
+      text-underline-offset:3px;
+    }
+    .adv-toggle.text-link:hover{background:transparent;color:#312b84}
     .adv-panel{display:none;border:none;background:#faf8ff;border-radius:12px;padding:12px;margin-top:8px;box-shadow:inset 0 0 0 1px rgba(120,110,190,.14)}
     .adv-panel.open{display:block}
     .tiny{font-size:12px;color:var(--hint);line-height:1.55}
@@ -1569,10 +1582,9 @@ UI_HTML = """
       max-width:560px !important;
       min-width:560px !important;
     }
-    .channel-grid{display:grid;grid-template-columns:1fr;gap:10px}
-    .channel-block{border:none;border-radius:12px;background:rgba(255,255,255,.86);padding:10px;transition:all .16s ease;box-shadow:inset 0 0 0 1px rgba(120,110,190,.10)}
-    .channel-block:hover{background:#faf8ff;box-shadow:inset 0 0 0 1px rgba(120,110,190,.18)}
-    .channel-item{display:flex;align-items:center;gap:8px;padding:2px 0}
+    .channel-grid{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:8px 14px}
+    .channel-block{border:none;border-radius:0;background:transparent;padding:0;box-shadow:none}
+    .channel-item{display:flex;align-items:center;gap:8px;padding:4px 0}
     .channel-item input{margin-top:2px}
     .channel-icon{font-size:16px}
     .channel-main{font-size:13px;color:#111827;font-weight:600;line-height:1.35}
@@ -1621,6 +1633,7 @@ UI_HTML = """
       max-width:none;
       min-width:260px;
     }
+    .upload-actions{display:flex;gap:14px;align-items:center;margin-top:6px;padding-left:112px}
     .primary-actions button{height:44px;padding:0 20px;font-size:14px;font-weight:700}
     .log-modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;align-items:center;justify-content:center;z-index:9999}
     .log-modal.open{display:flex}
@@ -1657,8 +1670,10 @@ UI_HTML = """
             <div class="field full upload-line file-hero">
               <span class="label">任务文件</span>
               <input id="files" class="file-uniform" type="file" multiple accept=".csv,.xlsx"/>
+            </div>
+            <div class="field full upload-actions">
               <button onclick="upload()">上传任务</button>
-              <button id="advToggleBtn" type="button" class="adv-toggle" onclick="toggleAdvancedConfig()">高级配置（展开）</button>
+              <button id="advToggleBtn" type="button" class="adv-toggle text-link" onclick="toggleAdvancedConfig()">高级配置（展开）</button>
             </div>
             <div class="field full">
               <span class="label">模板下载</span>
@@ -1706,39 +1721,37 @@ UI_HTML = """
 
         <div class="step-box">
           <div class="section-title"><span class="step-no">2</span>第2步：选中发送渠道（可多选）</div>
-          <div class="subcard">
-            <div class="channel-grid">
-              <div class="channel-block">
-                <label class="channel-item">
-                  <input class="step3_channel" type="checkbox" value="短信"/>
-                  <span class="channel-icon">💬</span>
-                  <span><div class="channel-main">短信</div></span>
-                </label>
-              </div>
-              <div class="channel-block">
-                <label class="channel-item">
-                  <input class="step3_channel" type="checkbox" value="会员通-发客户消息"/>
-                  <span class="channel-icon">👥</span>
-                  <span><div class="channel-main">会员通-发客户消息</div></span>
-                </label>
-              </div>
-              <div class="channel-block">
-                <label class="channel-item">
-                  <input class="step3_channel" type="checkbox" value="会员通-发送社群"/>
-                  <span class="channel-icon">👥</span>
-                  <span><div class="channel-main">会员通-发送社群</div></span>
-                </label>
-              </div>
-              <div class="channel-block">
-                <label class="channel-item">
-                  <input class="step3_channel" type="checkbox" value="会员通-发客户朋友圈"/>
-                  <span class="channel-icon">🖼️</span>
-                  <span><div class="channel-main">会员通-发客户朋友圈</div></span>
-                </label>
-              </div>
+          <div class="channel-grid">
+            <div class="channel-block">
+              <label class="channel-item">
+                <input class="step3_channel" type="checkbox" value="短信"/>
+                <span class="channel-icon">💬</span>
+                <span><div class="channel-main">短信</div></span>
+              </label>
             </div>
-            <div class="step-caption">素材配置请在任务列表中按计划点击“添加素材”进行设置。</div>
+            <div class="channel-block">
+              <label class="channel-item">
+                <input class="step3_channel" type="checkbox" value="会员通-发客户消息"/>
+                <span class="channel-icon">👥</span>
+                <span><div class="channel-main">会员通-发客户消息</div></span>
+              </label>
+            </div>
+            <div class="channel-block">
+              <label class="channel-item">
+                <input class="step3_channel" type="checkbox" value="会员通-发送社群"/>
+                <span class="channel-icon">👥</span>
+                <span><div class="channel-main">会员通-发送社群</div></span>
+              </label>
+            </div>
+            <div class="channel-block">
+              <label class="channel-item">
+                <input class="step3_channel" type="checkbox" value="会员通-发客户朋友圈"/>
+                <span class="channel-icon">🖼️</span>
+                <span><div class="channel-main">会员通-发客户朋友圈</div></span>
+              </label>
+            </div>
           </div>
+          <div class="step-caption">素材配置请在任务列表中按计划点击“添加素材”进行设置。</div>
         </div>
 
         <div class="section-title">执行动作</div>
