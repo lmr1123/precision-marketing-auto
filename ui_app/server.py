@@ -88,7 +88,6 @@ CHANNEL_ALIAS_TO_NAME: Dict[str, str] = {
 }
 TEMPLATE_HIDE_FIELDS = {
     "group_name",
-    "channels",
     "moments_add_images",
     "moments_image_paths",
     "upload_stores",
@@ -234,7 +233,7 @@ def write_community_template_xlsx(path: Path) -> None:
     headers = [
         "计划名称", "计划区域", "营销主题", "场景类型", "计划类型",
         "计划开始时间", "计划结束时间", "发送时间", "第3步结束时间",
-        "分配方式", "执行员工", "下发群名", "发送内容", "第3步渠道(可多选)", "创建链接",
+        "分配方式", "执行员工", "下发群名", "发送内容", "发送渠道", "创建链接",
         "1对1-小程序名称", "1对1-小程序标题", "1对1-小程序链接",
     ]
     ws.append(headers)
