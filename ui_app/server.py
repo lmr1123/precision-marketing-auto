@@ -1677,11 +1677,6 @@ UI_HTML = """
                   <span class="channel-icon">👥</span>
                   <span><div class="channel-main">会员通-发客户消息</div></span>
                 </label>
-                <div id="materialMiniProgram" class="field vertical hidden material-panel channel-inline-config">
-                  <label class="inline-check"><input id="msg_add_mini_program" type="checkbox"/> 添加小程序卡片</label>
-                  <label><input id="mini_program_cover" type="file" accept=".jpg,.jpeg,.png"/></label>
-                  <span class="tiny">仅保留封面上传；名称/标题/链接请在任务文件中通过字段“1对1-小程序名称/标题/链接”维护。</span>
-                </div>
               </div>
               <div class="channel-block">
                 <label class="channel-item">
@@ -1689,16 +1684,6 @@ UI_HTML = """
                   <span class="channel-icon">👥</span>
                   <span><div class="channel-main">会员通-发送社群</div></span>
                 </label>
-                <div id="materialMiniProgramCommunity" class="field vertical hidden material-panel channel-inline-config">
-                  <label class="inline-check"><input id="msg_add_mini_program_community" type="checkbox"/> 添加小程序卡片</label>
-                  <label><input id="mini_program_cover_community" type="file" accept=".jpg,.jpeg,.png"/></label>
-                  <span class="tiny">社群渠道可选：添加小程序卡片。</span>
-                </div>
-                <div id="materialMomentsCommunity" class="field vertical hidden material-panel channel-inline-config">
-                  <label class="inline-check"><input id="moments_add_images_community" type="checkbox"/> 启用图片上传（最多9张）</label>
-                  <input id="moments_images_community" type="file" multiple accept=".jpg,.jpeg,.png"/>
-                  <span class="tiny">社群渠道可选：添加图片（按上传顺序）。</span>
-                </div>
               </div>
               <div class="channel-block">
                 <label class="channel-item">
@@ -1706,14 +1691,9 @@ UI_HTML = """
                   <span class="channel-icon">🖼️</span>
                   <span><div class="channel-main">会员通-发客户朋友圈</div></span>
                 </label>
-                <div id="materialMoments" class="field vertical hidden material-panel channel-inline-config">
-                  <label class="inline-check"><input id="moments_add_images" type="checkbox"/> 启用图片上传（最多9张）</label>
-                  <input id="moments_images" type="file" multiple accept=".jpg,.jpeg,.png"/>
-                  <span class="tiny">仅当选择“会员通-发客户朋友圈”时展示。支持 jpg/png，单张小于10MB，按上传顺序提交。</span>
-                </div>
               </div>
             </div>
-            <div id="materialEmptyTip" class="step-caption">当前仅需选择渠道，无需额外素材配置。</div>
+            <div class="step-caption">素材配置请在任务列表中按计划点击“添加素材”进行设置。</div>
           </div>
         </div>
 
@@ -1886,22 +1866,13 @@ async function upload(){
   if(!channels.length){ alert('请至少选择一个发送渠道'); return; }
   fd.append('step3_channels', channels.join(','));
   fd.append('executor_include_franchise', document.getElementById('executor_include_franchise').checked ? 'true' : 'false');
-  const momentsChecked = !!(document.getElementById('moments_add_images')?.checked || document.getElementById('moments_add_images_community')?.checked);
-  fd.append('moments_add_images', momentsChecked ? 'true' : 'false');
-  let momentImgs = document.getElementById('moments_images')?.files;
-  if(!momentImgs || !momentImgs.length){
-    momentImgs = document.getElementById('moments_images_community')?.files;
-  }
+  // 素材已迁移至任务列表“添加素材”，这里默认不携带全局素材
+  fd.append('moments_add_images', 'false');
+  const momentImgs = [];
   for(const img of momentImgs){ fd.append('moments_images', img); }
   const uploadStoreEnabled = !!document.getElementById('executor_store_upload')?.checked;
   fd.append('upload_stores', uploadStoreEnabled ? 'true' : 'false');
-  const miniProgramChecked = !!(document.getElementById('msg_add_mini_program')?.checked || document.getElementById('msg_add_mini_program_community')?.checked);
-  fd.append('msg_add_mini_program', miniProgramChecked ? 'true' : 'false');
-  let miniCover = document.getElementById('mini_program_cover')?.files?.[0];
-  if(!miniCover){
-    miniCover = document.getElementById('mini_program_cover_community')?.files?.[0];
-  }
-  if(miniCover){ fd.append('mini_program_cover', miniCover); }
+  fd.append('msg_add_mini_program', 'false');
   saveUiPrefs();
   const r = await fetch('/api/tasks/upload', {method:'POST', body:fd});
   if(!r.ok){ alert(await r.text()); return; }
