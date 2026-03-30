@@ -8,6 +8,8 @@ import re
 import shutil
 import sys
 import uuid
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,6 +29,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "precision-auto-playwright-batch.py"
 UPLOAD_DIR = ROOT / "ui_uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+HISTORY_DIR = UPLOAD_DIR / "task_history"
+HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_DATA_CSV = ROOT / "data" / "plans.csv"
 
 
@@ -116,6 +120,68 @@ TEMPLATE_HIDE_FIELDS = {
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _task_history_path(task_id: str) -> Path:
+    return HISTORY_DIR / f"{task_id}.json"
+
+
+def _task_history_log_path(task_id: str) -> Path:
+    return HISTORY_DIR / f"{task_id}.log"
+
+
+def _task_failure_index_path() -> Path:
+    return HISTORY_DIR / "failed_tasks.ndjson"
+
+
+def _safe_tail(lines: List[str], size: int = 60) -> List[str]:
+    if not lines:
+        return []
+    return lines[-size:]
+
+
+def _extract_error_summary(task: "Task") -> str:
+    # Prefer explicit "错误:" line from runtime logs.
+    for ln in reversed(task.logs):
+        s = (ln or "").strip()
+        if "错误:" in s:
+            return s
+        if s.startswith("Error:") or s.startswith("Exception:"):
+            return s
+    return task.error or "任务失败，详情见日志"
+
+
+def _persist_task_history(task: "Task") -> None:
+    try:
+        payload = task.to_dict()
+        payload["logs"] = task.logs
+        _task_history_path(task.id).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _task_history_log_path(task.id).write_text("\n".join(task.logs), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _append_failure_index(task: "Task") -> None:
+    try:
+        rec = {
+            "id": task.id,
+            "filename": task.filename,
+            "plan_name": task.plan_name_display,
+            "channels": task.channel_display,
+            "status": task.status,
+            "error_summary": _extract_error_summary(task),
+            "started_at": task.started_at,
+            "ended_at": task.ended_at,
+            "history_json": str(_task_history_path(task.id)),
+            "history_log": str(_task_history_log_path(task.id)),
+        }
+        with _task_failure_index_path().open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def parse_int(val: str, default: int = 0) -> int:
@@ -995,6 +1061,7 @@ class TaskOptions:
     step3_channels: str = ""
     create_url: str = ""
     executor_include_franchise: bool = False
+    notify_webhook: str = ""
 
 
 @dataclass
@@ -1069,6 +1136,7 @@ class Task:
                 "step3_channels": self.options.step3_channels,
                 "create_url": self.options.create_url,
                 "executor_include_franchise": self.options.executor_include_franchise,
+                "notify_webhook": self.options.notify_webhook,
             },
         }
 
@@ -1436,6 +1504,41 @@ class TaskRunner:
         eta = datetime.now() + timedelta(seconds=(remaining / max(speed, 1e-6)))
         task.eta = eta.isoformat(timespec="seconds")
 
+    async def _notify_failure_if_needed(self, task: Task) -> None:
+        webhook = (task.options.notify_webhook or "").strip()
+        if not webhook:
+            return
+        summary = _extract_error_summary(task)
+        tail = "\\n".join(_safe_tail(task.logs, 25))
+        content = (
+            f"【精准营销自动化】失败任务通知\\n"
+            f"- 任务ID: {task.id}\\n"
+            f"- 文件: {task.filename}\\n"
+            f"- 计划: {task.plan_name_display or '-'}\\n"
+            f"- 渠道: {task.channel_display or '-'}\\n"
+            f"- 状态: {task.status}\\n"
+            f"- 错误: {summary}\\n"
+            f"- 开始: {task.started_at or '-'}\\n"
+            f"- 结束: {task.ended_at or '-'}\\n"
+            f"- 日志文件: {_task_history_log_path(task.id)}\\n"
+            f"- 日志尾部:\\n{tail or '(空)'}"
+        )
+        data = json.dumps({"msg_type": "text", "content": {"text": content}}, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            webhook,
+            data=data,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        def _post() -> None:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                _ = resp.read()
+        try:
+            await asyncio.to_thread(_post)
+            await self.append_log(task, "[notify] 飞书失败通知已发送")
+        except Exception as e:
+            await self.append_log(task, f"[notify] 飞书通知发送失败: {e}")
+
     async def _worker_loop(self, worker_id: int) -> None:
         while True:
             task_id = await self.queue.get()
@@ -1525,6 +1628,11 @@ class TaskRunner:
             task.status = "failed"
             task.error = f"exit_code={rc}"
         await self.append_log(task, f"[worker-{worker_id}] task finished with status={task.status}")
+        _persist_task_history(task)
+        if task.status == "failed":
+            _append_failure_index(task)
+            await self._notify_failure_if_needed(task)
+            _persist_task_history(task)
 
 
 app = FastAPI(title="Precision Marketing Automation UI")
@@ -1544,6 +1652,40 @@ async def index() -> str:
 @app.get("/api/tasks")
 async def list_tasks() -> JSONResponse:
     return JSONResponse({"tasks": await runner.list_tasks()})
+
+
+@app.get("/api/history/failed")
+async def list_failed_history(limit: int = 100) -> JSONResponse:
+    p = _task_failure_index_path()
+    if not p.exists():
+        return JSONResponse({"items": []})
+    items: List[dict] = []
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+        for ln in reversed(lines):
+            if not ln.strip():
+                continue
+            try:
+                items.append(json.loads(ln))
+            except Exception:
+                continue
+            if len(items) >= max(1, min(limit, 500)):
+                break
+    except Exception:
+        items = []
+    return JSONResponse({"items": items})
+
+
+@app.get("/api/history/task/{task_id}")
+async def get_task_history(task_id: str) -> JSONResponse:
+    p = _task_history_path(task_id)
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="Task history not found")
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Task history parse failed")
+    return JSONResponse(data)
 
 
 @app.get("/api/tasks/{task_id}")
@@ -1692,6 +1834,7 @@ async def upload_tasks(
     start: str = Form(""),
     end: str = Form(""),
     hold_seconds: int = Form(2),
+    notify_webhook: str = Form(""),
     step3_channels: str = Form(""),
     create_url: str = Form(""),
     executor_include_franchise: bool = Form(False),
@@ -1713,6 +1856,7 @@ async def upload_tasks(
         start=parse_int(start, 0) or None,
         end=parse_int(end, 0) or None,
         hold_seconds=max(0, hold_seconds),
+        notify_webhook=notify_webhook.strip(),
         step3_channels=step3_channels.strip(),
         create_url=create_url.strip(),
         executor_include_franchise=executor_include_franchise,
@@ -3370,6 +3514,10 @@ UI_HTML = """
                 <span class="tiny">作用：任务结束后页面停留时间，便于人工复核。</span>
               </div>
               <div class="field vertical full">
+                <label><span class="label">失败通知 Webhook（飞书机器人）</span><input id="notify_webhook" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." style="width:min(760px,95%)"/></label>
+                <span class="tiny">作用：任务失败时自动推送摘要和日志尾部，便于你与地区同事协同排查。</span>
+              </div>
+              <div class="field vertical full">
                 <label class="inline-check channel-strong"><input id="executor_include_franchise" type="checkbox" checked/> 执行员工包含加盟区域（自动同步勾选“xx加盟”节点）</label>
                 <span class="tiny wrap">示例：执行员工=广佛省区，自动追加广佛省区加盟；执行员工=大郑州营运区，自动追加大郑州营运区加盟。</span>
               </div>
@@ -3605,6 +3753,7 @@ async function upload(){
   fd.append('start', '');
   fd.append('end', '');
   fd.append('hold_seconds', document.getElementById('hold_seconds').value || '2');
+  fd.append('notify_webhook', document.getElementById('notify_webhook')?.value || '');
   const channels = selectedChannels();
   // 允许不勾选页面渠道：优先使用任务文件内“第3步渠道(可多选)”字段
   fd.append('step3_channels', channels.join(','));
@@ -4005,6 +4154,7 @@ function saveUiPrefs(){
     cdp_endpoint: document.getElementById('cdp_endpoint')?.value || '',
     concurrent: document.getElementById('concurrent')?.value || '1',
     hold_seconds: document.getElementById('hold_seconds')?.value || '2',
+    notify_webhook: document.getElementById('notify_webhook')?.value || '',
     channels: selectedChannels(),
     executor_include_franchise: !!document.getElementById('executor_include_franchise')?.checked,
     moments_add_images: momentsChecked,
@@ -4020,6 +4170,7 @@ function restoreUiFromCache(){
     if(document.getElementById('cdp_endpoint')) document.getElementById('cdp_endpoint').value = prefs.cdp_endpoint || 'http://127.0.0.1:18800';
     if(document.getElementById('concurrent')) document.getElementById('concurrent').value = prefs.concurrent || '1';
     if(document.getElementById('hold_seconds')) document.getElementById('hold_seconds').value = prefs.hold_seconds || '2';
+    if(document.getElementById('notify_webhook')) document.getElementById('notify_webhook').value = prefs.notify_webhook || '';
     const channels = new Set(prefs.channels || []);
     document.querySelectorAll('.step3_channel').forEach(el => { el.checked = channels.has(el.value); });
     if(document.getElementById('executor_include_franchise')) document.getElementById('executor_include_franchise').checked = !!prefs.executor_include_franchise;
@@ -4082,7 +4233,7 @@ if(uploadZoneEl && filesEl){
     });
   });
 }
-['cdp_endpoint','concurrent','hold_seconds','executor_include_franchise','moments_add_images','msg_add_mini_program']
+['cdp_endpoint','concurrent','hold_seconds','notify_webhook','executor_include_franchise','moments_add_images','msg_add_mini_program']
   .forEach(id => {
     const el = document.getElementById(id);
     if(el){ el.addEventListener('change', saveUiPrefs); el.addEventListener('input', saveUiPrefs); }

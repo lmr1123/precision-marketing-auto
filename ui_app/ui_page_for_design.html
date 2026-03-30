@@ -1452,6 +1452,10 @@
                 <span class="tiny">作用：任务结束后页面停留时间，便于人工复核。</span>
               </div>
               <div class="field vertical full">
+                <label><span class="label">失败通知 Webhook（飞书机器人）</span><input id="notify_webhook" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." style="width:min(760px,95%)"/></label>
+                <span class="tiny">作用：任务失败时自动推送摘要和日志尾部，便于你与地区同事协同排查。</span>
+              </div>
+              <div class="field vertical full">
                 <label class="inline-check channel-strong"><input id="executor_include_franchise" type="checkbox" checked/> 执行员工包含加盟区域（自动同步勾选“xx加盟”节点）</label>
                 <span class="tiny wrap">示例：执行员工=广佛省区，自动追加广佛省区加盟；执行员工=大郑州营运区，自动追加大郑州营运区加盟。</span>
               </div>
@@ -1687,6 +1691,7 @@ async function upload(){
   fd.append('start', '');
   fd.append('end', '');
   fd.append('hold_seconds', document.getElementById('hold_seconds').value || '2');
+  fd.append('notify_webhook', document.getElementById('notify_webhook')?.value || '');
   const channels = selectedChannels();
   // 允许不勾选页面渠道：优先使用任务文件内“第3步渠道(可多选)”字段
   fd.append('step3_channels', channels.join(','));
@@ -2087,6 +2092,7 @@ function saveUiPrefs(){
     cdp_endpoint: document.getElementById('cdp_endpoint')?.value || '',
     concurrent: document.getElementById('concurrent')?.value || '1',
     hold_seconds: document.getElementById('hold_seconds')?.value || '2',
+    notify_webhook: document.getElementById('notify_webhook')?.value || '',
     channels: selectedChannels(),
     executor_include_franchise: !!document.getElementById('executor_include_franchise')?.checked,
     moments_add_images: momentsChecked,
@@ -2102,6 +2108,7 @@ function restoreUiFromCache(){
     if(document.getElementById('cdp_endpoint')) document.getElementById('cdp_endpoint').value = prefs.cdp_endpoint || 'http://127.0.0.1:18800';
     if(document.getElementById('concurrent')) document.getElementById('concurrent').value = prefs.concurrent || '1';
     if(document.getElementById('hold_seconds')) document.getElementById('hold_seconds').value = prefs.hold_seconds || '2';
+    if(document.getElementById('notify_webhook')) document.getElementById('notify_webhook').value = prefs.notify_webhook || '';
     const channels = new Set(prefs.channels || []);
     document.querySelectorAll('.step3_channel').forEach(el => { el.checked = channels.has(el.value); });
     if(document.getElementById('executor_include_franchise')) document.getElementById('executor_include_franchise').checked = !!prefs.executor_include_franchise;
@@ -2164,7 +2171,7 @@ if(uploadZoneEl && filesEl){
     });
   });
 }
-['cdp_endpoint','concurrent','hold_seconds','executor_include_franchise','moments_add_images','msg_add_mini_program']
+['cdp_endpoint','concurrent','hold_seconds','notify_webhook','executor_include_franchise','moments_add_images','msg_add_mini_program']
   .forEach(id => {
     const el = document.getElementById(id);
     if(el){ el.addEventListener('change', saveUiPrefs); el.addEventListener('input', saveUiPrefs); }
