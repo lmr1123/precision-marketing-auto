@@ -485,6 +485,32 @@ def _collect_sheet_first_col_values(values: List[List[str]]) -> List[str]:
     return out
 
 
+def _norm_col_text(v: str) -> str:
+    return re.sub(r"\s+", "", str(v or "")).strip().lower()
+
+
+def _ensure_sheet_has_key_header(
+    values: List[List[str]],
+    aliases: List[str],
+    row_no: int,
+    sheet_title: str,
+    field_desc: str,
+) -> None:
+    """
+    书名号引用的 sheet 必须包含关键列名，否则直接阻断，避免后续误识别。
+    """
+    if not values or not values[0]:
+        raise HTTPException(status_code=400, detail=f"第{row_no}行：sheet《{sheet_title}》为空，缺少{field_desc}关键列")
+    header = [_norm_col_text(x) for x in values[0]]
+    alias_norm = {_norm_col_text(a) for a in aliases if str(a or "").strip()}
+    if not any(h in alias_norm for h in header):
+        alias_text = " / ".join(aliases)
+        raise HTTPException(
+            status_code=400,
+            detail=f"第{row_no}行：sheet《{sheet_title}》缺少关键列（{alias_text}）",
+        )
+
+
 def apply_unified_field_mapping_and_refs(
     dst_csv: Path,
     task_id: str,
@@ -540,13 +566,27 @@ def apply_unified_field_mapping_and_refs(
         asset = sheet_assets.get(_norm_sheet_name(sheet_title))
         if not asset:
             raise HTTPException(status_code=400, detail=f"第{row_no}行：未找到sheet《{sheet_title}》")
+        _ensure_sheet_has_key_header(
+            asset.get("rows", []),
+            aliases=["门店编码", "门店code", "storecode"],
+            row_no=row_no,
+            sheet_title=sheet_title,
+            field_desc="目标门店",
+        )
         return save_uploaded_store_file(f"{task_id}_r{row_no}", (asset["filename"], asset["bytes"]))
 
     def _save_sheet_blob_for_step2_product(sheet_title: str, row_no: int) -> str:
         asset = sheet_assets.get(_norm_sheet_name(sheet_title))
         if not asset:
             raise HTTPException(status_code=400, detail=f"第{row_no}行：未找到sheet《{sheet_title}》")
-        return save_uploaded_main_store_file(f"{task_id}_r{row_no}", (asset["filename"], asset["bytes"]))
+        _ensure_sheet_has_key_header(
+            asset.get("rows", []),
+            aliases=["商品编码", "商品code", "productcode"],
+            row_no=row_no,
+            sheet_title=sheet_title,
+            field_desc="目标商品",
+        )
+        return save_uploaded_step2_product_file(f"{task_id}_r{row_no}", (asset["filename"], asset["bytes"]))
 
     normalized_rows: List[Dict[str, str]] = []
     for row in rows:
@@ -613,6 +653,13 @@ def apply_unified_field_mapping_and_refs(
             asset = sheet_assets.get(_norm_sheet_name(coupon_ref))
             if not asset:
                 raise HTTPException(status_code=400, detail=f"第{idx}行：未找到sheet《{coupon_ref}》")
+            _ensure_sheet_has_key_header(
+                asset.get("rows", []),
+                aliases=["券规则id", "券规则ID", "ruleid", "couponid"],
+                row_no=idx,
+                sheet_title=coupon_ref,
+                field_desc="券规则ID",
+            )
             values = _collect_sheet_first_col_values(asset.get("rows", []))
             if not values:
                 raise HTTPException(status_code=400, detail=f"第{idx}行：sheet《{coupon_ref}》未找到有效券规则ID")
@@ -819,6 +866,21 @@ def save_uploaded_main_store_file(task_id: str, store_file: tuple[str, bytes]) -
         raise HTTPException(status_code=400, detail=f"主消费门店文件格式仅支持 xlsx/xls: {name}")
     safe = re.sub(r"[^0-9A-Za-z._-]+", "_", Path(name).name)
     dst = out_dir / f"step2_main_store_{safe}"
+    with dst.open("wb") as f:
+        f.write(data)
+    return str(dst.resolve())
+
+
+def save_uploaded_step2_product_file(task_id: str, product_file: tuple[str, bytes]) -> str:
+    """保存第2步商品编码上传文件，返回本地绝对路径（与门店文件分目录，避免覆盖）。"""
+    name, data = product_file
+    out_dir = UPLOAD_DIR / f"{task_id}_step2_product"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(name).suffix.lower()
+    if ext not in {".xlsx", ".xls"}:
+        raise HTTPException(status_code=400, detail=f"第2步商品文件格式仅支持 xlsx/xls: {name}")
+    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", Path(name).name)
+    dst = out_dir / f"step2_product_{safe}"
     with dst.open("wb") as f:
         f.write(data)
     return str(dst.resolve())
@@ -1060,7 +1122,7 @@ class TaskOptions:
     hold_seconds: int = 2
     step3_channels: str = ""
     create_url: str = ""
-    executor_include_franchise: bool = False
+    executor_include_franchise: bool = True
     notify_webhook: str = ""
 
 
@@ -1550,9 +1612,24 @@ class TaskRunner:
                 if task.paused or task.status != "pending":
                     task.queued = False
                     continue
+                # CDP 共享同一浏览器上下文时必须串行，避免多个任务互相抢页导致随机失败。
+                if await self._has_other_running_cdp_task(task_id):
+                    task.queued = True
+                    await asyncio.sleep(1.0)
+                    await self.queue.put(task_id)
+                    continue
                 await self._run_task(task, worker_id)
             finally:
                 self.queue.task_done()
+
+    async def _has_other_running_cdp_task(self, task_id: str) -> bool:
+        async with self.lock:
+            for tid, t in self.tasks.items():
+                if tid == task_id or t.deleted:
+                    continue
+                if t.status == "running" and t.options.connect_cdp:
+                    return True
+        return False
 
     async def _run_task(self, task: Task, worker_id: int) -> None:
         task.status = "running"
@@ -1837,7 +1914,7 @@ async def upload_tasks(
     notify_webhook: str = Form(""),
     step3_channels: str = Form(""),
     create_url: str = Form(""),
-    executor_include_franchise: bool = Form(False),
+    executor_include_franchise: bool = Form(True),
     moments_add_images: bool = Form(False),
     upload_stores: bool = Form(False),
     msg_add_mini_program: bool = Form(False),
@@ -1957,7 +2034,7 @@ async def upload_tasks(
             inject_step2_main_store_file_to_csv(dst, step2_store_path)
         resolved_step2_product_blob = step2_product_blob or file_step2_product_blob
         if resolved_step2_product_blob:
-            step2_product_path = save_uploaded_main_store_file(tid, resolved_step2_product_blob)
+            step2_product_path = save_uploaded_step2_product_file(tid, resolved_step2_product_blob)
             inject_step2_product_file_to_csv(dst, step2_product_path)
         # 关键：一个上传文件内若有多条计划，拆成多条任务记录（每条计划一条任务）
         split_files = split_csv_to_single_plan_files(dst, stem)
@@ -1967,6 +2044,8 @@ async def upload_tasks(
             # 自动策略：仅社群渠道时，默认关闭严格第2步并启用跳过第2步（免人工配置）。
             # 优先使用任务文件中的渠道；若文件为空则回退到页面勾选渠道。
             community_only = _is_community_only_channels(channel_display or options.step3_channels)
+            # 任务级优先使用文件内渠道；仅当文件没有渠道时才回退到页面全局渠道
+            per_task_step3_channels = ("" if channel_display else options.step3_channels)
             file_options = TaskOptions(
                 connect_cdp=options.connect_cdp,
                 cdp_endpoint=options.cdp_endpoint,
@@ -1976,7 +2055,7 @@ async def upload_tasks(
                 start=options.start,
                 end=options.end,
                 hold_seconds=options.hold_seconds,
-                step3_channels=options.step3_channels,
+                step3_channels=per_task_step3_channels,
                 create_url=options.create_url,
                 executor_include_franchise=options.executor_include_franchise,
             )
@@ -3754,9 +3833,8 @@ async function upload(){
   fd.append('end', '');
   fd.append('hold_seconds', document.getElementById('hold_seconds').value || '2');
   fd.append('notify_webhook', document.getElementById('notify_webhook')?.value || '');
-  const channels = selectedChannels();
-  // 允许不勾选页面渠道：优先使用任务文件内“第3步渠道(可多选)”字段
-  fd.append('step3_channels', channels.join(','));
+  // 渠道统一以任务文件每行“发送渠道”为准，避免全局覆盖导致跨渠道必填串扰
+  fd.append('step3_channels', '');
   fd.append('executor_include_franchise', document.getElementById('executor_include_franchise').checked ? 'true' : 'false');
   // 素材已迁移至任务列表“添加素材”，这里默认不携带全局素材
   fd.append('moments_add_images', 'false');

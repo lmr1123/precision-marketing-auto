@@ -116,6 +116,17 @@ DEBUG_DROPDOWN_OPTIONS = os.getenv("PM_DEBUG_DROPDOWN_OPTIONS", "0").strip() in 
 
 def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> list:
     """从 CSV 加载计划数据"""
+    def _parse_dt(raw: str) -> datetime:
+        text = (raw or "").strip().replace("T", " ").replace("/", "-")
+        if not text:
+            raise ValueError("为空")
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(text, fmt)
+            except Exception:
+                pass
+        raise ValueError(f"不支持的时间格式: {raw}")
+
     plans = []
     with open(csv_path, 'r', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
@@ -178,6 +189,33 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                     # 未指定渠道时兜底：两个都写，交给后续渠道判定使用。
                     plan["sms_content"] = push_content
                     plan["send_content"] = push_content
+
+            # 前置业务校验（避免跑到页面保存阶段才失败）
+            try:
+                st = _parse_dt(plan.get("start_time", ""))
+                et = _parse_dt(plan.get("end_time", ""))
+                if et < st:
+                    raise ValueError(f"第{i}行：计划结束时间早于开始时间")
+                if (et - st).total_seconds() > 14 * 24 * 3600:
+                    raise ValueError(f"第{i}行：计划时间起止不能超过14天")
+            except Exception as e:
+                if isinstance(e, ValueError) and str(e).startswith(f"第{i}行："):
+                    raise
+                raise ValueError(f"第{i}行：计划时间格式错误（start_time/end_time）: {e}")
+
+            try:
+                send_dt = _parse_dt(plan.get("send_time", ""))
+                now_dt = datetime.now()
+                if send_dt < now_dt:
+                    raise ValueError(
+                        f"第{i}行：发送时间不能小于当前时间（send_time={send_dt.strftime('%Y-%m-%d %H:%M:%S')}，"
+                        f"now={now_dt.strftime('%Y-%m-%d %H:%M:%S')}）"
+                    )
+            except Exception as e:
+                if isinstance(e, ValueError) and str(e).startswith(f"第{i}行："):
+                    raise
+                raise ValueError(f"第{i}行：发送时间格式错误（send_time）: {e}")
+
             plans.append(plan)
     return plans
 
@@ -1023,6 +1061,13 @@ def parse_step3_channels(raw: str) -> list:
         seen.add(v)
     return out
 
+def resolve_channels_for_plan(plan: dict, step3_channels_override: str = "") -> list:
+    """解析当前计划生效渠道：优先使用计划行 channels；为空才使用全局覆盖。"""
+    plan_channels = parse_step3_channels(str(plan.get("channels", "") or ""))
+    if plan_channels:
+        return plan_channels
+    return parse_step3_channels(step3_channels_override)
+
 
 def resolve_base_url_by_channel(
     plan: dict,
@@ -1046,7 +1091,7 @@ def resolve_base_url_by_channel(
     if csv_url:
         return csv_url, "CSV创建链接"
 
-    channels = parse_step3_channels(step3_channels_override) or parse_step3_channels(plan.get("channels", ""))
+    channels = resolve_channels_for_plan(plan, step3_channels_override)
     if not channels:
         return BASE_URL, ""
 
@@ -2675,9 +2720,18 @@ async def ensure_step3_saved(page, save_resp_task=None, before_url: str = "") ->
         try:
             resp = await asyncio.wait_for(save_resp_task, timeout=12)
             if resp is not None:
-                body = await resp.text()
+                status = 0
+                try:
+                    status = int(resp.status or 0)
+                except Exception:
+                    status = 0
+                body = ""
+                try:
+                    body = await resp.text()
+                except Exception:
+                    body = ""
                 api_body = body or ""
-                code, msg = extract_api_code_message(api_body)
+                code, msg = extract_api_code_message(api_body) if api_body else ("", "")
                 post_data = ""
                 try:
                     post_data = resp.request.post_data or ""
@@ -2689,10 +2743,10 @@ async def ensure_step3_saved(page, save_resp_task=None, before_url: str = "") ->
                 post_excerpt = (post_data or "").replace("\n", " ").replace("\r", " ")
                 if len(post_excerpt) > 220:
                     post_excerpt = post_excerpt[:220] + "..."
-                api_diag = f"url={resp.url}, status={resp.status}, code={code}, msg={msg}, reqLen={len(post_data or '')}, req={post_excerpt}"
+                api_diag = f"url={resp.url}, status={status}, code={code}, msg={msg}, reqLen={len(post_data or '')}, req={post_excerpt}"
                 print(f"      🧪 保存接口响应: {api_diag}")
                 # 仅作辅助：HTTP成功且未明确业务失败码，记为弱成功信号
-                if 200 <= int(resp.status) < 300:
+                if 200 <= status < 300:
                     code_norm = str(code or "").strip().lower()
                     msg_norm = str(msg or "").strip().lower()
                     fail_hint = any(k in msg_norm for k in ["失败", "错误", "非法", "不能为空", "未通过", "重复"])
@@ -3408,23 +3462,16 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
     """第3步执行员工：按级联面板（全国->大区->省区/门店）多选。"""
     targets = [normalize_area_alias(x) for x in split_multi_values(raw_values)]
     if include_franchise:
-        extended = []
+        ext = []
         for t in targets:
-            tt = (t or "").strip()
+            tt = (t or '').strip()
             if not tt:
                 continue
-            extended.append(tt)
-            if "加盟" not in tt:
-                extended.append(normalize_area_alias(f"{tt}加盟"))
-        # 去重保序
-        dedup = []
+            ext.append(tt)
+            if '加盟' not in tt:
+                ext.append(normalize_area_alias(f'{tt}加盟'))
         seen = set()
-        for t in extended:
-            if t in seen:
-                continue
-            dedup.append(t)
-            seen.add(t)
-        targets = dedup
+        targets = [x for x in ext if not (x in seen or seen.add(x))]
     if not targets:
         return True
 
@@ -3445,12 +3492,6 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
         pass
 
     opened = await page.evaluate("""() => {
-        const isVisible = (el) => {
-            if (!el) return false;
-            const style = window.getComputedStyle(el);
-            const rect = el.getBoundingClientRect();
-            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-        };
         const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
         for (const label of labels) {
             const txt = (label.textContent || '').replace(/\\s+/g, '');
@@ -3463,12 +3504,6 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
                 return true;
             }
         }
-        const fallback = Array.from(document.querySelectorAll('.el-cascader input.el-input__inner, input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"]'))
-            .find(isVisible);
-        if (fallback) {
-            fallback.click();
-            return true;
-        }
         return false;
     }""")
     if not opened:
@@ -3477,12 +3512,6 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
 
     # 先清空字段内已有标签，避免营销模板默认区域残留
     await page.evaluate("""() => {
-        const isVisible = (el) => {
-            if (!el) return false;
-            const s = window.getComputedStyle(el);
-            const r = el.getBoundingClientRect();
-            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-        };
         const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
         for (const label of labels) {
             const txt = (label.textContent || '').replace(/\\s+/g, '');
@@ -3495,22 +3524,11 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             if (input) input.click();
             return;
         }
-        const visibleTags = Array.from(document.querySelectorAll('.el-tag__close')).filter(isVisible);
-        for (const c of visibleTags) c.click();
-        const fallback = Array.from(document.querySelectorAll('.el-cascader input.el-input__inner, input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"]'))
-            .find(isVisible);
-        if (fallback) fallback.click();
     }""")
     await asyncio.sleep(0.25)
 
     async def reopen_executor_panel():
         await page.evaluate("""() => {
-            const isVisible = (el) => {
-                if (!el) return false;
-                const s = window.getComputedStyle(el);
-                const r = el.getBoundingClientRect();
-                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-            };
             const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
             for (const label of labels) {
                 const txt = (label.textContent || '').replace(/\\s+/g, '');
@@ -3523,9 +3541,6 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
                     return;
                 }
             }
-            const fallback = Array.from(document.querySelectorAll('.el-cascader input.el-input__inner, input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"]'))
-                .find(isVisible);
-            if (fallback) fallback.click();
         }""")
         await page.locator(".el-cascader-panel:visible").last.wait_for(timeout=5000)
         await asyncio.sleep(0.15)
@@ -3542,40 +3557,12 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             txt = ((await label.text_content()) or "").strip()
             if txt != target and target not in txt:
                 continue
+            await node.scroll_into_view_if_needed()
             postfix = node.locator(".el-cascader-node__postfix").first
-            clicked = False
             if await postfix.count() > 0:
-                try:
-                    await postfix.click(force=True, timeout=1200)
-                    clicked = True
-                except Exception:
-                    try:
-                        await postfix.evaluate("""(el) => {
-                            ['pointerdown','mousedown','mouseup','click'].forEach(t => {
-                                el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
-                            });
-                            if (typeof el.click === 'function') el.click();
-                        }""")
-                        clicked = True
-                    except Exception:
-                        clicked = False
-            if not clicked:
-                try:
-                    await label.click(force=True, timeout=1200)
-                    clicked = True
-                except Exception:
-                    try:
-                        await label.evaluate("""(el) => {
-                            ['pointerdown','mousedown','mouseup','click'].forEach(t => {
-                                el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
-                            });
-                            if (typeof el.click === 'function') el.click();
-                        }""")
-                        clicked = True
-                    except Exception:
-                        clicked = False
-            if not clicked:
-                continue
+                await postfix.click(force=True)
+            else:
+                await label.click(force=True)
             await asyncio.sleep(0.2)
             return True
         return False
@@ -3618,23 +3605,8 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             cb = node.locator(".el-checkbox__input").first
             if await cb.count() == 0:
                 return False
-            clicked = False
-            try:
-                await cb.click(force=True, timeout=1200)
-                clicked = True
-            except Exception:
-                try:
-                    await cb.evaluate("""(el) => {
-                        ['pointerdown','mousedown','mouseup','click'].forEach(t => {
-                            el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
-                        });
-                        if (typeof el.click === 'function') el.click();
-                    }""")
-                    clicked = True
-                except Exception:
-                    clicked = False
-            if not clicked:
-                continue
+            await cb.scroll_into_view_if_needed()
+            await cb.click(force=True)
             await asyncio.sleep(0.2)
             return True
         return False
@@ -3654,90 +3626,22 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             checkbox = node.locator(".el-checkbox__input").first
             if await checkbox.count() == 0:
                 continue
+            await checkbox.scroll_into_view_if_needed()
             node_cls = (await node.get_attribute("class")) or ""
             cb_cls = (await checkbox.get_attribute("class")) or ""
             if ("in-checked-path" not in node_cls) and ("is-checked" not in cb_cls):
-                clicked = False
-                try:
-                    await checkbox.click(force=True, timeout=1200)
-                    clicked = True
-                except Exception:
-                    try:
-                        await checkbox.evaluate("""(el) => {
-                            ['pointerdown','mousedown','mouseup','click'].forEach(t => {
-                                el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
-                            });
-                            if (typeof el.click === 'function') el.click();
-                        }""")
-                        clicked = True
-                    except Exception:
-                        clicked = False
-                if not clicked:
-                    continue
+                await checkbox.click(force=True)
                 await asyncio.sleep(0.15)
             return True
         return False
 
-    area_path_hints = {
-        "广佛省区": ["华南大区", "广佛省区"],
-        "广佛省区加盟": ["华南大区加盟", "广佛省区加盟"],
-        "黑龙江省区": ["北方大区", "黑龙江省区"],
-        "黑龙江省区加盟": ["北方大区加盟", "黑龙江省区加盟"],
-        "武汉营运区": ["华中大区", "湖北省区", "武汉营运区"],
-        "武汉营运区加盟": ["华中大区加盟", "湖北省区加盟", "武汉营运区加盟"],
-        "大郑州营运区": ["西北大区", "河南省区", "大郑州营运区"],
-        "大郑州营运区加盟": ["西北大区加盟", "河南省区加盟", "大郑州营运区加盟"],
-        "郑州": ["西北大区", "河南省区", "大郑州营运区"],
-        "郑州加盟": ["西北大区加盟", "河南省区加盟", "大郑州营运区加盟"],
-    }
-
-    async def select_target_with_hints(target: str) -> bool:
-        target = normalize_area_alias(target)
-        # 先尝试在各层直接勾选
-        for idx in (1, 2, 3, 4):
-            if await check_in_menu(idx, target):
-                return True
-
-        path = area_path_hints.get(target, [])
-        # 按路径逐层处理：中间层只展开，不勾选；仅末级做勾选。
-        # 例如 大郑州营运区：展开 西北大区 -> 河南省区，最后仅勾选 大郑州营运区，
-        # 避免误勾整层“河南省区”。
-        if path:
-            last_idx = len(path) - 1
-            for i, seg in enumerate(path):
-                menu_idx = i + 1
-                if i < last_idx:
-                    await expand_in_menu(menu_idx, seg)
-                else:
-                    await check_in_menu(menu_idx, seg)
-
-        # 再次在各层兜底勾选
-        for idx in (1, 2, 3, 4):
-            if await check_in_menu(idx, target):
-                return True
-        return False
-
     # 先按业务规则双击“全国”：第一次全选，第二次清空。
-    # 但仅在面板稳定可读时执行；并在每次点击后重开面板，避免被弹层自动收起。
     await reopen_executor_panel()
     nation_before = await get_menu_checked_state(0, "全国")
-    first_ok = False
-    second_ok = False
-    nation_after_first = nation_before
-    nation_after_second = nation_before
-    if nation_before in ("checked", "unchecked"):
-        first_ok = await toggle_in_menu(0, "全国")
-        try:
-            await reopen_executor_panel()
-        except Exception:
-            pass
-        nation_after_first = await get_menu_checked_state(0, "全国")
-        second_ok = await toggle_in_menu(0, "全国")
-        try:
-            await reopen_executor_panel()
-        except Exception:
-            pass
-        nation_after_second = await get_menu_checked_state(0, "全国")
+    first_ok = await toggle_in_menu(0, "全国")
+    nation_after_first = await get_menu_checked_state(0, "全国")
+    second_ok = await toggle_in_menu(0, "全国")
+    nation_after_second = await get_menu_checked_state(0, "全国")
     print(
         "      🧪 全国双击清空: "
         f"before={nation_before}, firstClick={first_ok}, afterFirst={nation_after_first}, "
@@ -3748,14 +3652,31 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
     await expand_in_menu(0, "全国")
 
     selected = {t: False for t in targets}
+    region_targets = [t for t in targets if "大区" in t]
+    province_targets = [t for t in targets if "省区" in t or "营运区" in t or "店" in t]
 
-    # 逐个目标命中（先按路径提示，再走深层兜底）
-    for t in targets:
-        ok = await select_target_with_hints(t)
-        if ok:
-            selected[t] = True
+    # 先选大区目标（例如西北大区）
+    for rt in region_targets:
+        selected[rt] = await check_in_menu(1, rt)
 
-    # 深层兜底：遍历大区后，再次尝试未命中目标（覆盖视口/延迟渲染场景）
+    # 再跨大区选省区目标（例如湖北省区）
+    region_nodes = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(1).locator(".el-cascader-node .el-cascader-node__label")
+    region_count = await region_nodes.count()
+    region_names = []
+    for i in range(region_count):
+        txt = ((await region_nodes.nth(i).text_content()) or "").strip()
+        if txt.endswith("大区"):
+            region_names.append(txt)
+
+    for region in region_names:
+        await expand_in_menu(1, region)
+        for pt in province_targets:
+            if selected.get(pt):
+                continue
+            if await check_in_menu(2, pt):
+                selected[pt] = True
+
+    # 深层兜底1：按历史稳定逻辑遍历大区后再次尝试未命中目标（覆盖视口/延迟渲染）
     unresolved = [k for k, v in selected.items() if not v]
     if unresolved:
         region_nodes = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(1).locator(".el-cascader-node .el-cascader-node__label")
@@ -3777,6 +3698,32 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             unresolved = [k for k, v in selected.items() if not v]
             if not unresolved:
                 break
+
+    # 深层兜底2：按路径提示展开后再勾选（如 湖北省区 -> 武汉营运区）
+    area_path_hints = {
+        "黑龙江省区": ["北方大区", "黑龙江省区"],
+        "黑龙江省区加盟": ["北方大区加盟", "黑龙江省区加盟"],
+        "武汉营运区": ["华中大区", "湖北省区", "武汉营运区"],
+        "武汉营运区加盟": ["华中大区加盟", "湖北省区加盟", "武汉营运区加盟"],
+        "广佛省区": ["华南大区", "广佛省区"],
+        "广佛省区加盟": ["华南大区加盟", "广佛省区加盟"],
+        "大郑州营运区": ["西北大区", "河南省区", "大郑州营运区"],
+        "大郑州营运区加盟": ["西北大区加盟", "河南省区加盟", "大郑州营运区加盟"],
+    }
+    unresolved = [k for k, v in selected.items() if not v]
+    for t in unresolved:
+        path = area_path_hints.get(t)
+        if not path:
+            continue
+        for i, seg in enumerate(path):
+            menu_idx = i + 1
+            if i < len(path) - 1:
+                await expand_in_menu(menu_idx, seg)
+            else:
+                for idx in (menu_idx, 2, 3, 4):
+                    if await check_in_menu(idx, seg):
+                        selected[t] = True
+                        break
 
     selected_labels = await page.evaluate("""() => {
         const isVisible = (el) => {
@@ -3801,12 +3748,6 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
 
     # 回读校验：限定在“执行员工”字段容器内。
     readback = await page.evaluate("""() => {
-        const isVisible = (el) => {
-            if (!el) return false;
-            const s = window.getComputedStyle(el);
-            const r = el.getBoundingClientRect();
-            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-        };
         const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
         for (const label of labels) {
             const txt = (label.textContent || '').replace(/\\s+/g, '');
@@ -3819,11 +3760,7 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
                 .filter(Boolean);
             return [input ? (input.value || '').trim() : '', ...tags].join(' ');
         }
-        const tags = Array.from(document.querySelectorAll('.el-cascader__tags span, .el-tag span'))
-            .filter(isVisible)
-            .map(n => (n.textContent || '').trim())
-            .filter(Boolean);
-        return tags.join(' ');
+        return '';
     }""")
     for t in targets:
         if t in readback:
@@ -3831,7 +3768,6 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
 
     print(f"      🧪 执行员工回读文本: {readback}")
     return all(selected.values())
-
 
 async def fill_step3_executor_by_condition(page, raw_values: str, include_franchise: bool = False) -> bool:
     """第3步执行员工（按条件筛选客户）：选择员工弹窗 -> 树节点 -> 添加全部 -> 确定。"""
@@ -6005,7 +5941,7 @@ async def fill_step3(
     await page.screenshot(path='/Users/liminrong/.openclaw/workspace/memory/step3-before.png')
     
     results = {}
-    selected_channels = parse_step3_channels(step3_channels_override) or parse_step3_channels(data.get("channels", ""))
+    selected_channels = resolve_channels_for_plan(data, step3_channels_override)
     if selected_channels:
         print(f"   📡 渠道选择: {'、'.join(selected_channels)}")
     else:
@@ -6067,6 +6003,7 @@ async def fill_step3(
     # 会员通-发客户消息 / 会员通-发客户朋友圈 共用字段
     step3_end_time = data.get("step3_end_time") or data.get("end_time")
     executor_vals = data.get("executor_employees", "")
+    # 优先使用网页勾选项；未勾选时再按任务文件字段判断（默认关闭）。
     executor_include_franchise = executor_include_franchise_override or parse_bool_flag(
         data.get("executor_include_franchise", "否"), default=False
     )
@@ -6316,6 +6253,13 @@ async def fill_step3(
     save_resp_candidates = []
     save_req_candidates = []
 
+    def _is_core_save_api(url: str) -> bool:
+        u = (url or "").lower()
+        return (
+            "/api/v1/precision/content-rights-setting/batch-create/v2" in u
+            or "/api/v1/precision/community-admin/activity/addorupdate" in u
+        )
+
     def _on_response(r):
         try:
             url_l = (r.url or "").lower()
@@ -6323,12 +6267,7 @@ async def fill_step3(
                 save_resp_candidates.append((r.request.method, r.url))
             matched = (
                 r.request.method in ("POST", "PUT", "PATCH")
-                and (
-                    ("precision.dslyy.com" in url_l)
-                    or "marketingtemplate" in url_l
-                    or "template" in url_l
-                    or "save" in url_l
-                )
+                and _is_core_save_api(url_l)
             )
             if matched and (not save_resp_task.done()):
                 save_resp_task.set_result(r)
@@ -6371,31 +6310,9 @@ async def fill_step3(
         print(f"      🧪 保存阶段POST候选: {[u for _, u in save_resp_candidates[:8]]}")
     saved_ok = await ensure_step3_saved(page, save_resp_task=save_resp_task, before_url=save_start_url)
     community_like = "addcommunityPlan" in (save_start_url or "")
-    # 社群页专用放行：页面偶发跳到 about:blank 导致响应/跳转信号丢失，
-    # 但若已发出 addOrUpdate 提交请求，且未命中前端校验错误，则按提交成功处理。
-    if (not saved_ok) and community_like:
-        has_community_submit_req = any(
-            "/api/v1/precision/community-admin/activity/addOrUpdate" in (u or "")
-            for _, u in (save_req_candidates or [])
-        )
-        if has_community_submit_req:
-            print("      ⚠️ 社群保存判定兜底：已捕获 addOrUpdate 提交请求，按提交成功处理")
-            saved_ok = True
-    # 非社群页兜底：部分内网页面保存后会切到 about:blank，导致响应事件偶发丢失；
-    # 若已发出核心保存请求，则按提交成功处理，避免误报失败。
-    if (not saved_ok) and (not community_like):
-        has_batch_submit_req = any(
-            "/api/v1/precision/content-rights-setting/batch-create/v2" in (u or "")
-            for _, u in (save_req_candidates or [])
-        )
-        if has_batch_submit_req:
-            try:
-                curr_url = page.url or ""
-            except Exception:
-                curr_url = ""
-            if curr_url.startswith("about:blank"):
-                print("      ⚠️ 保存判定兜底：已捕获 batch-create 提交请求（当前URL=about:blank），按提交成功处理")
-                saved_ok = True
+    # 严格模式：不再仅凭“请求已发出”就判成功，避免后台无记录的假成功。
+    if (not saved_ok) and save_req_candidates:
+        print("      ⚠️ 已捕获保存请求，但未拿到可确认的成功响应，按失败处理以避免假成功")
     try:
         page.remove_listener("response", _on_response)
     except Exception:
@@ -6499,7 +6416,8 @@ async def dump_executor_debug(page):
                 .map(n => ({
                     text: (n.querySelector('.el-cascader-node__label')?.textContent || '').trim(),
                     id: n.id || '',
-                    cls: n.className || ''
+                    cls: n.className || '',
+                    cbCls: (n.querySelector('.el-checkbox__input')?.className || '')
                 }))
             : [];
 
@@ -6523,8 +6441,18 @@ def detect_executor_overlap_conflict(debug_data: dict, targets: list) -> str:
         return ""
     checked = debug_data.get("checked", []) or []
     tags = debug_data.get("tags", []) or []
-    checked_texts = [str(n.get("text", "")).strip() for n in checked if isinstance(n, dict)]
-    has_country_checked = any(t == "全国" for t in checked_texts)
+    has_country_checked = False
+    for n in checked:
+        if not isinstance(n, dict):
+            continue
+        txt = str(n.get("text", "")).strip()
+        cb_cls = str(n.get("cbCls", "")).strip()
+        if txt != "全国":
+            continue
+        # 仅把“全国全选”视为冲突；半选(is-indeterminate)不算冲突
+        if ("is-checked" in cb_cls) and ("is-indeterminate" not in cb_cls):
+            has_country_checked = True
+            break
     # tags 里出现“全国 / xxx”代表选择了全国下的子层级路径
     has_child_path = any("全国 /" in str(t) for t in tags)
     targets = targets or []
@@ -6637,7 +6565,9 @@ async def process_single_plan(
                 await page.goto(current_base_url)
                 await wait_and_log(page, 2, "页面加载中...")
 
-                selected_channels_for_plan = parse_step3_channels(step3_channels_override) or parse_step3_channels(plan.get("channels", ""))
+                selected_channels_for_plan = resolve_channels_for_plan(plan, step3_channels_override)
+                if parse_step3_channels(step3_channels_override) and parse_step3_channels(plan.get("channels", "")):
+                    print("   🧪 渠道来源: 使用任务文件 channels（忽略全局 --step3-channels 覆盖）")
                 community_only = bool(selected_channels_for_plan) and all(c == "会员通-发送社群" for c in selected_channels_for_plan)
                 community_url = (create_url_override or plan.get("create_url", "") or current_base_url or "")
                 auto_skip_step2_for_community = community_only or ("addcommunityPlan" in community_url)

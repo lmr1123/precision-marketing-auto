@@ -46,6 +46,14 @@ def main() -> int:
         "scripts/windows/create_desktop_shortcut.ps1",
         "scripts/windows/build_windows_exe.bat",
         "scripts/windows/windows_ui_starter.py",
+        "docs/字段逻辑说明.md",
+        "docs/业务安装包与页面操作手册.md",
+        "docs/screenshots/ui-home-light.png",
+        "docs/screenshots/ui-advanced-light.png",
+        "docs/screenshots/ui-advanced-dark.png",
+        "docs/screenshots/ui-tasklist-light.png",
+        "docs/screenshots/ui-material-modal-dark.png",
+        "docs/screenshots/ui-log-modal-dark.png",
     ]
 
     for rel in files_to_copy:

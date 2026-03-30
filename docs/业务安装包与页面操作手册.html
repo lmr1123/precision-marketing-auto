@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>精准营销自动化（业务版）安装与页面操作手册</title>
+  <style>
+    :root{--bg:#f6f8fc;--card:#fff;--text:#1f2937;--muted:#6b7280;--line:#e5e7eb;--brand:#5b3df5}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;line-height:1.7}
+    .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+    .hero{background:linear-gradient(135deg,#6c4bff,#4f46e5);color:#fff;border-radius:16px;padding:24px}
+    .hero h1{margin:0 0 6px;font-size:30px}
+    .hero p{margin:0;opacity:.95}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-top:14px}
+    h2{font-size:22px;margin:0 0 10px}
+    h3{font-size:18px;margin:14px 0 8px}
+    ul,ol{margin:8px 0 8px 22px}
+    code{background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px;padding:2px 6px}
+    table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden}
+    th,td{border:1px solid var(--line);padding:10px;vertical-align:top;font-size:14px}
+    th{background:#f9fafb}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    .shot{background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px}
+    .shot img{width:100%;height:auto;border-radius:8px;display:block}
+    .shot .cap{font-size:13px;color:var(--muted);margin-top:6px}
+    .muted{color:var(--muted)}
+    .tag{display:inline-block;background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;border-radius:999px;padding:2px 10px;font-size:12px}
+    @media (max-width: 900px){.grid{grid-template-columns:1fr}.hero h1{font-size:24px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>精准营销自动化（业务版）安装与页面操作手册</h1>
+      <p>版本日期：2026-03-30 · 面向业务执行同事 · 图文说明</p>
+    </section>
+
+    <section class="card">
+      <h2>一、安装包说明</h2>
+      <ul>
+        <li>安装包文件：<code>precision-marketing-auto-windows-oneclick.zip</code></li>
+        <li>使用对象：业务执行同事（Windows）</li>
+        <li>启动入口：<code>scripts\\windows\\windows_start_ui.bat</code></li>
+      </ul>
+      <span class="tag">建议先在测试账号验证 1 条任务</span>
+    </section>
+
+    <section class="card">
+      <h2>二、Windows 安装/更新</h2>
+      <ol>
+        <li>解压安装包到本地目录（例如 <code>D:\\precision-marketing-auto-windows</code>）。</li>
+        <li>双击运行：<code>scripts\\windows\\windows_start_ui.bat</code>。</li>
+        <li>浏览器打开：<code>http://127.0.0.1:8790</code>。</li>
+        <li>后续更新：用新 zip 覆盖原目录后，继续双击 <code>windows_start_ui.bat</code>。</li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <h2>三、页面总览（图示）</h2>
+      <div class="grid">
+        <div class="shot">
+          <img src="./screenshots/ui-home-light.png" alt="首页浅色" />
+          <div class="cap">图1：首页（浅色）</div>
+        </div>
+        <div class="shot">
+          <img src="./screenshots/ui-advanced-light.png" alt="高级配置浅色" />
+          <div class="cap">图2：高级配置（浅色）</div>
+        </div>
+        <div class="shot">
+          <img src="./screenshots/ui-advanced-dark.png" alt="高级配置深色" />
+          <div class="cap">图3：高级配置（深色）</div>
+        </div>
+        <div class="shot">
+          <img src="./screenshots/ui-tasklist-light.png" alt="任务列表浅色" />
+          <div class="cap">图4：任务列表（浅色）</div>
+        </div>
+        <div class="shot">
+          <img src="./screenshots/ui-material-modal-dark.png" alt="人工修复弹窗" />
+          <div class="cap">图5：失败任务人工修复助手弹窗</div>
+        </div>
+        <div class="shot">
+          <img src="./screenshots/ui-log-modal-dark.png" alt="日志弹窗" />
+          <div class="cap">图6：任务日志弹窗</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>四、标准操作流程（业务）</h2>
+      <ol>
+        <li>点击上传区域，上传 <code>CSV/XLSX</code> 任务文件。</li>
+        <li>系统自动拆分为任务列表多条记录。</li>
+        <li>如需补充素材：在任务行点击 <code>人工修复</code>。</li>
+        <li>点击 <code>开始执行</code>。</li>
+        <li>如有失败：点击 <code>重试失败项</code> 或任务行 <code>重试</code>。</li>
+        <li>在任务行点 <code>日志</code> 查看执行明细。</li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <h2>五、人工修复助手怎么用</h2>
+      <ul>
+        <li>入口：任务列表 -> <code>人工修复</code></li>
+        <li>可配置：小程序封面（按计划行）、朋友圈图片（按计划行）</li>
+        <li>点击 <code>保存修复配置</code> 后，素材会回写该任务 CSV，重试即生效。</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>六、高级配置说明</h2>
+      <ul>
+        <li>浏览器调试地址：默认 <code>http://127.0.0.1:18800</code></li>
+        <li>并发任务数：建议先 <code>1</code></li>
+        <li>保留浏览器(秒)：便于人工复核</li>
+        <li>执行员工包含加盟区域：勾选后自动追加 <code>xx加盟</code> 节点</li>
+        <li>失败通知 Webhook（飞书机器人）：失败自动推送结果摘要与日志尾部</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>七、失败协同排查（推荐）</h2>
+      <ul>
+        <li>页面内看：任务行 <code>日志</code></li>
+        <li>本地看：<code>ui_uploads/task_history</code></li>
+        <li>飞书看：Webhook 通知中的错误摘要和日志尾部</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>八、常见问题</h2>
+      <h3>1) 页面打不开</h3>
+      <ul>
+        <li>确认 <code>windows_start_ui.bat</code> 是否运行中</li>
+        <li>检查端口占用：<code>8790</code></li>
+      </ul>
+      <h3>2) CDP 连接失败</h3>
+      <ul>
+        <li>错误：<code>connect ECONNREFUSED 127.0.0.1:18800</code></li>
+        <li>处理：先启动 Chrome 调试端口，再执行任务</li>
+      </ul>
+      <h3>3) 任务显示成功但后台没记录</h3>
+      <ul>
+        <li>先看日志是否出现保存成功提示</li>
+        <li>检查是否有页面校验拦截（结束时间、分配方式、素材必填）</li>
+      </ul>
+      <h3>4) 图片上传失败</h3>
+      <ul>
+        <li>检查格式：<code>jpg/png</code></li>
+        <li>检查大小：<code>&lt;10MB</code></li>
+        <li>检查分辨率是否符合业务系统限制</li>
+      </ul>
+      <p class="muted">文档位置：/Users/liminrong/precision-marketing-auto/docs/业务安装包与页面操作手册.html</p>
+    </section>
+  </div>
+</body>
+</html>
