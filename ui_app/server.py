@@ -3569,6 +3569,7 @@ UI_HTML = """
               <input id="files" class="file-uniform hidden" type="file" multiple accept=".csv,.xlsx"/>
             </div>
           </div>
+          <div id="uploadHint" class="tiny" style="margin-top:8px;min-height:20px;opacity:.9;"></div>
           <div class="config-foot">
             <div class="left">
               <button id="advToggleBtn" type="button" class="adv-toggle text-link" onclick="toggleAdvancedConfig()">高级配置（展开）</button>
@@ -3809,6 +3810,17 @@ function esc(s){
   }[m]));
 }
 
+function setUploadHint(msg, isOk=true){
+  const el = document.getElementById('uploadHint');
+  if(!el) return;
+  el.textContent = msg || '';
+  if(!msg){
+    el.style.color = '';
+    return;
+  }
+  el.style.color = isOk ? '#22c55e' : '#ef4444';
+}
+
 async function upload(){
   if(uploading) return;
   const fileInput = document.getElementById('files');
@@ -3818,6 +3830,7 @@ async function upload(){
     fileInput.click();
     return;
   }
+  setUploadHint(`正在上传 ${files.length} 个文件并生成任务...`, true);
   uploading = true;
   fileInput.disabled = true;
   const fd = new FormData();
@@ -3847,9 +3860,12 @@ async function upload(){
   try{
     const r = await fetch('/api/tasks/upload', {method:'POST', body:fd});
     if(!r.ok){
-      alert(await r.text());
+      const errText = await r.text();
+      setUploadHint(`上传失败：${errText}`, false);
+      alert(errText);
     } else {
       await refreshTasks();
+      setUploadHint('上传文件成功，已加入任务列表。', true);
     }
   } finally {
     fileInput.value = '';

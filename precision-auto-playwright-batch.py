@@ -554,7 +554,7 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
         ).first
         await field.click(force=True)
         try:
-            await page.locator('.el-select-dropdown:visible, .ant-select-dropdown:visible').first.wait_for(timeout=2000)
+            await page.locator('.el-select-dropdown:visible, .ant-select-dropdown:visible').first.wait_for(timeout=1200)
             return
         except Exception:
             pass
@@ -565,7 +565,7 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
         if await arrow.count() > 0:
             await arrow.click(force=True)
         try:
-            await page.locator('.el-select-dropdown:visible, .ant-select-dropdown:visible').first.wait_for(timeout=1800)
+            await page.locator('.el-select-dropdown:visible, .ant-select-dropdown:visible').first.wait_for(timeout=900)
             return
         except Exception:
             pass
@@ -584,7 +584,7 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
             )
         except Exception:
             pass
-        await page.locator('.el-select-dropdown:visible, .ant-select-dropdown:visible').first.wait_for(timeout=2500)
+        await page.locator('.el-select-dropdown:visible, .ant-select-dropdown:visible').first.wait_for(timeout=1200)
 
     async def read_selected_text(item_locator) -> str:
         try:
@@ -809,6 +809,18 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
 
     item = await get_form_item_by_label(page, label)
     if item:
+        # 已是目标值时快速放行（尤其是“计划区域”在模板里常有默认值，避免无意义重试导致长停顿）
+        if (not is_multi) and targets:
+            try:
+                selected_text = await read_selected_text(item)
+                target0 = (targets[0] or "").strip()
+                if selected_text and target0 and (selected_text == target0 or target0 in selected_text):
+                    print(f"      ✅ 已选择: {target0}")
+                    print(f"      🧪 当前已选: {selected_text}")
+                    return True
+            except Exception:
+                pass
+
         if is_multi and strict_label:
             # 仅取消非目标项，避免“全清空→重选”导致反复反选
             removed_by_tag = await clear_tags_except_targets(item, targets)
@@ -6332,6 +6344,10 @@ async def fill_step3(
         mode_norm = distribution_mode.replace(" ", "")
         community_condition_mode = community_required and ("按条件筛选客户" in mode_norm or "按条件筛选客户群" in mode_norm)
         community_import_mode = community_required and ("导入门店" in mode_norm or "选中门店" in mode_norm)
+        # 社群“按条件筛选客户群”默认同步加盟区域，避免 Windows 端遗漏导致与 Mac 行为不一致
+        if community_condition_mode and not executor_include_franchise:
+            executor_include_franchise = True
+            print("   🧩 社群按条件筛选：已自动开启“包含加盟区域”")
 
         need_executor = customer_msg_required or moments_required or community_condition_mode
         if need_executor or community_required:
