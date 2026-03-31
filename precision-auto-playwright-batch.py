@@ -34,6 +34,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import List
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 # Windows 控制台默认 gbk，遇到 emoji 日志会抛 UnicodeEncodeError。
