@@ -131,51 +131,71 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
     with open(csv_path, 'r', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
         for i, row in enumerate(reader, 1):
+            # 容错读取：兼容中文表头、带空格/括号/下划线差异。
+            normalized_row = {}
+            for rk, rv in (row or {}).items():
+                key_raw = str(rk or "")
+                key_norm = re.sub(r"[\s_()（）]+", "", key_raw).strip().lower()
+                normalized_row[key_norm] = rv
+
+            def _gv(*keys: str) -> str:
+                for k in keys:
+                    if k in row:
+                        v = str(row.get(k, "") or "").strip()
+                        if v:
+                            return v
+                for k in keys:
+                    key_norm = re.sub(r"[\s_()（）]+", "", str(k or "")).strip().lower()
+                    v = str(normalized_row.get(key_norm, "") or "").strip()
+                    if v:
+                        return v
+                return ""
+
             if start and i < start:
                 continue
             if end and i > end:
                 break
             plan = {
-                "name": row.get("name", "").strip(),
-                "region": row.get("region", "").strip(),
-                "theme": row.get("theme", "").strip(),
-                "scene_type": row.get("scene_type", "").strip(),
-                "plan_type": row.get("plan_type", "").strip(),
-                "use_recommend": row.get("use_recommend", "").strip(),
-                "push_content": (row.get("push_content", "") or row.get("推送内容", "")).strip(),
-                "start_time": row.get("start_time", "").strip(),
-                "end_time": row.get("end_time", "").strip(),
-                "trigger_type": row.get("trigger_type", "").strip(),
-                "send_time": row.get("send_time", "").strip(),
-                "global_limit": row.get("global_limit", "").strip(),
-                "set_target": row.get("set_target", "").strip(),
-                "group_name": row.get("group_name", "").strip(),
-                "update_type": row.get("update_type", "").strip(),
-                "main_operating_area": row.get("main_operating_area", "").strip(),
-                "main_store_file_path": row.get("main_store_file_path", "").strip(),
-                "step2_store_file_path": row.get("step2_store_file_path", "").strip(),
-                "step2_product_file_path": row.get("step2_product_file_path", "").strip(),
-                "purchase_target_product_code": (row.get("purchase_target_product_code", "") or row.get("购买目标商品编码", "")).strip(),
-                "coupon_ids": row.get("coupon_ids", "").strip(),
-                "coupon_ids_sheet_ref": (row.get("coupon_ids_sheet_ref", "") or row.get("已领或已使用券规则ID", "")).strip(),
-                "sms_content": row.get("sms_content", "").strip(),
-                "step3_end_time": (row.get("step3_end_time", "") or row.get("员工任务结束时间", "")).strip(),
-                "executor_employees": row.get("executor_employees", "").strip(),
-                "distribution_mode": (row.get("distribution_mode", "") or row.get("社群任务分配方式", "")).strip(),
-                "group_send_name": (row.get("group_send_name", "") or row.get("delivery_group_name", "") or row.get("下发群名", "")).strip(),
-                "executor_include_franchise": row.get("executor_include_franchise", "").strip(),
-                "send_content": row.get("send_content", "").strip(),
-                "channels": row.get("channels", "").strip(),
-                "create_url": row.get("create_url", "").strip(),
-                "moments_add_images": row.get("moments_add_images", "").strip(),
-                "moments_image_paths": row.get("moments_image_paths", "").strip(),
-                "upload_stores": row.get("upload_stores", "").strip(),
-                "store_file_path": row.get("store_file_path", "").strip(),
-                "msg_add_mini_program": row.get("msg_add_mini_program", "").strip(),
-                "msg_mini_program_name": row.get("msg_mini_program_name", "").strip(),
-                "msg_mini_program_title": row.get("msg_mini_program_title", "").strip(),
-                "msg_mini_program_cover_path": row.get("msg_mini_program_cover_path", "").strip(),
-                "msg_mini_program_page_path": row.get("msg_mini_program_page_path", "").strip(),
+                "name": _gv("name", "计划名称"),
+                "region": _gv("region", "计划区域"),
+                "theme": _gv("theme", "营销主题"),
+                "scene_type": _gv("scene_type", "场景类型"),
+                "plan_type": _gv("plan_type", "计划类型"),
+                "use_recommend": _gv("use_recommend", "推荐算法"),
+                "push_content": _gv("push_content", "推送内容"),
+                "start_time": _gv("start_time", "计划开始时间"),
+                "end_time": _gv("end_time", "计划结束时间"),
+                "trigger_type": _gv("trigger_type", "触发方式"),
+                "send_time": _gv("send_time", "发送时间"),
+                "global_limit": _gv("global_limit", "全局触达限制"),
+                "set_target": _gv("set_target", "是否设置目标"),
+                "group_name": _gv("group_name", "分群名称"),
+                "update_type": _gv("update_type", "更新方式"),
+                "main_operating_area": _gv("main_operating_area", "主消费营运区", "主消费运营区"),
+                "main_store_file_path": _gv("main_store_file_path", "主消费门店文件路径"),
+                "step2_store_file_path": _gv("step2_store_file_path", "第2步门店信息文件路径"),
+                "step2_product_file_path": _gv("step2_product_file_path", "第2步商品编码文件路径"),
+                "purchase_target_product_code": _gv("purchase_target_product_code", "购买目标商品编码"),
+                "coupon_ids": _gv("coupon_ids", "券规则ID"),
+                "coupon_ids_sheet_ref": _gv("coupon_ids_sheet_ref", "已领或已使用券规则ID"),
+                "sms_content": _gv("sms_content", "短信内容"),
+                "step3_end_time": _gv("step3_end_time", "员工任务结束时间", "第3步结束时间"),
+                "executor_employees": _gv("executor_employees", "执行员工"),
+                "distribution_mode": _gv("distribution_mode", "社群任务分配方式", "分配方式"),
+                "group_send_name": _gv("group_send_name", "delivery_group_name", "下发群名"),
+                "executor_include_franchise": _gv("executor_include_franchise", "执行员工包含加盟区域"),
+                "send_content": _gv("send_content", "发送内容"),
+                "channels": _gv("channels", "发送渠道"),
+                "create_url": _gv("create_url", "创建链接"),
+                "moments_add_images": _gv("moments_add_images", "朋友圈是否上传图片"),
+                "moments_image_paths": _gv("moments_image_paths", "朋友圈图片路径", "朋友圈图片路径(用|分隔)"),
+                "upload_stores": _gv("upload_stores", "是否上传门店"),
+                "store_file_path": _gv("store_file_path", "门店文件路径"),
+                "msg_add_mini_program": _gv("msg_add_mini_program", "会员通消息是否添加小程序"),
+                "msg_mini_program_name": _gv("msg_mini_program_name", "1对1-小程序名称"),
+                "msg_mini_program_title": _gv("msg_mini_program_title", "1对1-小程序标题"),
+                "msg_mini_program_cover_path": _gv("msg_mini_program_cover_path", "小程序封面路径"),
+                "msg_mini_program_page_path": _gv("msg_mini_program_page_path", "1对1-小程序链接"),
             }
             # 统一模板：推送内容按渠道路由到短信/发送内容。
             push_content = plan.get("push_content", "")
@@ -255,16 +275,27 @@ async def get_form_item_by_label(page, label: str):
     """按 label 匹配表单项，兼容 Element/Ant。"""
     form_items = page.locator('.el-form-item, .ant-form-item')
     count = await form_items.count()
+    visible_fuzzy_hit = None
     for i in range(count):
         item = form_items.nth(i)
         label_el = item.locator('.el-form-item__label, .ant-form-item-label label').first
         try:
+            visible = await item.evaluate("""(el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            }""")
+            if not visible:
+                continue
             text = (await label_el.text_content() or "").strip().replace("：", "").replace(":", "")
-            if text == label or label in text:
+            if text == label:
                 return item
+            if label in text:
+                visible_fuzzy_hit = item
         except:
             continue
-    return None
+    return visible_fuzzy_hit
 
 async def fill_with_retry(input_locator, value: str):
     """统一输入策略：先 fill，失败后 click+快捷键清空再 type。"""
@@ -298,6 +329,8 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
         targets = [x.strip() for x in re.split(r"[、，,|;\\n]+", str(value or "")) if x.strip()]
         if not targets:
             targets = [str(value or "").strip()]
+    # 去重保序，避免同一项重复点击触发“选中/取消”来回反选
+    targets = list(dict.fromkeys([t for t in targets if str(t).strip()]))
     label_name = label.strip()
     strict_label = (label_name == "营销主题")
     strict_exact = strict_label or (label_name in {"场景类型", "计划类型", "计划区域"})
@@ -319,6 +352,37 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
                 return n;
             }""")
             return int(cleared or 0)
+        except Exception:
+            return 0
+
+    async def clear_tags_except_targets(item_locator, keep_targets: List[str]) -> int:
+        """直接在标签区删除非目标项（不依赖下拉是否可展开）。"""
+        try:
+            removed = await item_locator.evaluate(
+                """(root, payload) => {
+                    const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+                    const keep = new Set((payload.keep || []).map(norm));
+                    let n = 0;
+                    const tags = Array.from(root.querySelectorAll('.el-tag, .ant-select-selection-item'));
+                    tags.forEach(tag => {
+                        const txtNode = tag.querySelector('.el-select__tags-text, .el-tag__content, .ant-select-selection-item-content') || tag;
+                        const txt = norm(txtNode.textContent || '');
+                        if (!txt || /^\\+\\s*\\d+$/.test(txt)) return;
+                        if (keep.has(txt)) return;
+                        const closeBtn = tag.querySelector('.el-tag__close, .ant-select-selection-item-remove');
+                        if (!closeBtn) return;
+                        try {
+                            closeBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                            closeBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                            closeBtn.click();
+                            n++;
+                        } catch (e) {}
+                    });
+                    return n;
+                }""",
+                {"keep": keep_targets},
+            )
+            return int(removed or 0)
         except Exception:
             return 0
 
@@ -424,6 +488,55 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
             return vals or []
         except Exception:
             return []
+
+    async def unselect_extra_options(item_locator, keep_targets: List[str]) -> int:
+        """仅取消当前已选中的“非目标项”，避免全清空后重选引发误触发。"""
+        try:
+            await click_field(item_locator)
+        except Exception:
+            return 0
+        try:
+            removed = await page.evaluate(
+                """(payload) => {
+                    const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+                    const keep = new Set((payload.keep || []).map(norm));
+                    const dd = document.querySelector('.el-select-dropdown:not([style*="display: none"]), .ant-select-dropdown:not([style*="display: none"])');
+                    if (!dd) return 0;
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const s = window.getComputedStyle(el);
+                        const r = el.getBoundingClientRect();
+                        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                    };
+                    const selected = Array.from(dd.querySelectorAll('.el-select-dropdown__item.selected, .ant-select-item-option-selected'))
+                        .filter(isVisible);
+                    let n = 0;
+                    selected.forEach(el => {
+                        const txt = norm(el.textContent);
+                        if (keep.has(txt)) return;
+                        try {
+                            el.scrollIntoView({ block: 'center' });
+                            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                            el.click();
+                            n++;
+                        } catch (e) {}
+                    });
+                    return n;
+                }""",
+                {"keep": keep_targets},
+            )
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return int(removed or 0)
+        except Exception:
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return 0
 
     async def click_field(item_locator):
         # 先尝试收起旧下拉，避免串到上一个字段面板
@@ -696,15 +809,17 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
     item = await get_form_item_by_label(page, label)
     if item:
         if is_multi and strict_label:
-            clicked_clear = await clear_multi_via_clear_icon(item)
-            await asyncio.sleep(0.12)
-            cleared_n = await clear_multi_selected_tags(item)
-            cleared_n += await clear_multi_by_dropdown_selection(item)
-            if cleared_n > 0:
+            # 仅取消非目标项，避免“全清空→重选”导致反复反选
+            removed_by_tag = await clear_tags_except_targets(item, targets)
+            selected_opts = await read_selected_options_from_dropdown(item)
+            extras = [x for x in selected_opts if x not in targets]
+            cleared_n = 0
+            if extras:
+                cleared_n = await unselect_extra_options(item, targets)
+            total_cleared = (removed_by_tag or 0) + (cleared_n or 0)
+            if total_cleared > 0:
                 await asyncio.sleep(0.15)
-                print(f"      🧪 已清空历史已选主题: {cleared_n}项")
-            elif clicked_clear:
-                print("      🧪 已触发一键清空历史主题")
+                print(f"      🧪 已清理非目标主题: {total_cleared}项")
         ok_count = 0
         selected_text = await read_selected_text(item)
         for t in targets:
@@ -743,14 +858,12 @@ async def select_option(page, label: str, value: str, is_multi: bool = False):
             selected_opts = await read_selected_options_from_dropdown(item)
             missing = [t for t in targets if t not in selected_opts]
             if missing:
-                # 再做一轮“清空+重选”兜底
-                _ = await clear_multi_via_clear_icon(item)
-                await asyncio.sleep(0.1)
-                _ = await clear_multi_selected_tags(item)
-                _ = await clear_multi_by_dropdown_selection(item)
+                # 再做一轮“只清非目标+补选缺失”兜底，避免重复反选
+                _ = await unselect_extra_options(item, targets)
                 await asyncio.sleep(0.1)
                 for t in targets:
-                    _ = await pick_one(t, item)
+                    if t not in selected_opts:
+                        _ = await pick_one(t, item)
                     await asyncio.sleep(0.08)
                 selected_opts = await read_selected_options_from_dropdown(item)
                 missing = [t for t in targets if t not in selected_opts]
@@ -810,6 +923,44 @@ async def fill_input(page, label: str, value: str):
             pass
 
     print(f"      ⚠️ 未找到字段: {label}")
+
+async def read_select_state_and_value(page, label: str):
+    """读取下拉控件状态与当前值：用于禁用字段快速跳过。"""
+    item = await get_form_item_by_label(page, label)
+    if not item:
+        return {"found": False, "locked": False, "value": "", "full_text": ""}
+    try:
+        state = await item.evaluate("""(root) => {
+            const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+            const lockedByClass = !!root.querySelector(
+                '.el-select.is-disabled, .el-input.is-disabled, .ant-select-disabled, .el-date-editor.is-disabled'
+            );
+            const lockedByInput = !!Array.from(root.querySelectorAll('input, textarea, select'))
+                .find(el => el.disabled || el.readOnly);
+            const locked = lockedByClass || lockedByInput;
+            const cands = [
+                '.el-select__tags-text',
+                '.el-input__inner',
+                '.ant-select-selection-item',
+                '.el-select .el-input__inner',
+            ];
+            let val = '';
+            for (const sel of cands) {
+                const nodes = Array.from(root.querySelectorAll(sel));
+                for (const n of nodes) {
+                    const v = norm((n.value || n.textContent || ''));
+                    if (!v) continue;
+                    if (/^\\+\\s*\\d+$/.test(v)) continue;
+                    if (!val) val = v;
+                }
+                if (val) break;
+            }
+            const fullText = norm(root.textContent || '');
+            return { found: true, locked, value: val, full_text: fullText };
+        }""")
+        return state or {"found": True, "locked": False, "value": "", "full_text": ""}
+    except Exception:
+        return {"found": True, "locked": False, "value": "", "full_text": ""}
 
 async def select_radio(page, label: str, value: str):
     """选择单选项"""
@@ -3778,9 +3929,9 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
             tt = (t or "").strip()
             if not tt:
                 continue
-            ext.append(tt)
-            if "加盟" not in tt:
-                ext.append(normalize_area_alias(f"{tt}加盟"))
+            base = normalize_area_alias(tt.replace("加盟", ""))
+            ext.append(base)
+            ext.append(normalize_area_alias(f"{base}加盟"))
         seen = set()
         targets = [x for x in ext if not (x in seen or seen.add(x))]
     if not targets:
@@ -4105,6 +4256,8 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
         "武汉营运区加盟": ["华中大区加盟", "湖北省区加盟", "武汉营运区加盟"],
         "武汉": ["华中大区", "湖北省区", "武汉营运区"],
         "武汉加盟": ["华中大区加盟", "湖北省区加盟", "武汉营运区加盟"],
+        "江西省区": ["华中大区", "江西省区"],
+        "江西省区加盟": ["华中大区加盟", "江西省区加盟"],
     }
 
     picked_any = False
@@ -4367,7 +4520,9 @@ async def fill_step1(page, data: dict, auto_next: bool = True):
         raise RuntimeError("第1步失败：计划区域未选择成功")
     results["第1步-计划区域"] = True
     theme_val = data.get("theme", "其他")
-    theme_is_multi = bool(re.search(r"[、，,|;\\n]", str(theme_val or "")))
+    # 营销主题在页面是多选组件：即便仅传一个值，也按多选逻辑处理，
+    # 这样可先清理默认“其他”等历史脏值，再精确保留目标主题。
+    theme_is_multi = True
     theme_ok = await select_option(page, "营销主题", theme_val, is_multi=theme_is_multi)
     if not theme_ok:
         await asyncio.sleep(0.5)
@@ -4376,17 +4531,48 @@ async def fill_step1(page, data: dict, auto_next: bool = True):
         raise RuntimeError("第1步失败：营销主题未选择成功")
     results["第1步-营销主题"] = True
     
+    def _is_effective_config_value(v: str) -> bool:
+        s = str(v or "").strip()
+        if not s:
+            return False
+        # 兼容业务文件中“空值占位”写法：这些都按未配置处理（即跳过）
+        return s.lower() not in {"-", "--", "无", "空", "null", "none", "nan", "n/a", "na"}
+
     scene_type = (data.get("scene_type", "") or "").strip()
     plan_type = (data.get("plan_type", "") or "").strip()
-    if scene_type:
+    if _is_effective_config_value(scene_type):
+        # 先尝试真实选择（社群页有时看起来像禁用态，实际可选）
         scene_ok = await select_option(page, "场景类型", scene_type)
+        if not scene_ok:
+            scene_state = await read_select_state_and_value(page, "场景类型")
+            if scene_state.get("found") and scene_state.get("locked"):
+                curr = (scene_state.get("value") or "").strip()
+                full_txt = (scene_state.get("full_text") or "").strip()
+                if curr and (scene_type in curr or curr in scene_type):
+                    scene_ok = True
+                    print(f"   ✅ 场景类型: 禁用态且已匹配（{curr}），快速跳过")
+                elif full_txt and (scene_type in full_txt):
+                    scene_ok = True
+                    print(f"   ✅ 场景类型: 禁用态文本命中（{scene_type}），快速跳过")
         print(f"   {'✅' if scene_ok else '⚠️'} 场景类型: {scene_type if scene_ok else '未匹配，已跳过'}")
         if not scene_ok:
             raise RuntimeError(f"第1步失败：场景类型未选择成功（期望={scene_type}）")
     else:
         print("   ⏭️  场景类型: 未配置，跳过")
-    if plan_type:
+    if _is_effective_config_value(plan_type):
+        # 先尝试真实选择（社群页有时看起来像禁用态，实际可选）
         plan_ok = await select_option(page, "计划类型", plan_type)
+        if not plan_ok:
+            plan_state = await read_select_state_and_value(page, "计划类型")
+            if plan_state.get("found") and plan_state.get("locked"):
+                curr = (plan_state.get("value") or "").strip()
+                full_txt = (plan_state.get("full_text") or "").strip()
+                if curr and (plan_type in curr or curr in plan_type):
+                    plan_ok = True
+                    print(f"   ✅ 计划类型: 禁用态且已匹配（{curr}），快速跳过")
+                elif full_txt and (plan_type in full_txt):
+                    plan_ok = True
+                    print(f"   ✅ 计划类型: 禁用态文本命中（{plan_type}），快速跳过")
         print(f"   {'✅' if plan_ok else '⚠️'} 计划类型: {plan_type if plan_ok else '未匹配，已跳过'}")
         if not plan_ok:
             raise RuntimeError(f"第1步失败：计划类型未选择成功（期望={plan_type}）")
@@ -4577,8 +4763,45 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
             if frame_handle:
                 frame = await frame_handle.content_frame()
                 if frame:
+                    async def _frame_eval_with_refetch(js_code: str, arg=None, retries: int = 3):
+                        nonlocal frame, frame_handle, iframe_info, visible_iframes
+                        last_err = None
+                        for i in range(retries):
+                            try:
+                                if arg is None:
+                                    return await frame.evaluate(js_code)
+                                return await frame.evaluate(js_code, arg)
+                            except Exception as e:
+                                last_err = e
+                                if "Frame was detached" not in str(e):
+                                    raise
+                                if i >= retries - 1:
+                                    break
+                                print(f"      ⚠️ iframe 已分离，重抓 frame 并重试 ({i + 1}/{retries - 1})")
+                                try:
+                                    await click_edit_once()
+                                except Exception:
+                                    pass
+                                await asyncio.sleep(1.0)
+                                iframe_info = await read_iframe_info()
+                                visible_iframes = [x for x in iframe_info if x.get("visible")]
+                                if not visible_iframes:
+                                    await asyncio.sleep(0.6)
+                                    iframe_info = await read_iframe_info()
+                                    visible_iframes = [x for x in iframe_info if x.get("visible")]
+                                frame_handle = None
+                                for idx, it in enumerate(iframe_info):
+                                    if it.get("visible"):
+                                        candidate = page.locator("iframe").nth(idx)
+                                        if await candidate.count() > 0:
+                                            frame_handle = await candidate.element_handle()
+                                            break
+                                if frame_handle:
+                                    frame = await frame_handle.content_frame()
+                        raise last_err
+
                     # 内网/代理异常时常见现象：iframe 空白或加载失败，提前抛错避免“假成功”。
-                    frame_diag = await frame.evaluate("""() => {
+                    frame_diag = await _frame_eval_with_refetch("""() => {
                         const bodyText = (document.body && document.body.innerText ? document.body.innerText : '').trim();
                         return {
                             href: location.href || '',
@@ -4588,8 +4811,58 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                         };
                     }""")
                     print(f"      iframe诊断: href={frame_diag.get('href','')}, title={frame_diag.get('title','')}, textLen={frame_diag.get('textLen',0)}")
-                    if frame_diag.get("textLen", 0) == 0 or frame_diag.get("hasErrKeyword"):
-                        raise RuntimeError("第2步 iframe 内容为空或疑似网络/代理异常，请检查 VPN/代理并重试")
+                    # 兼容偶发：iframe 首次进入 chrome-error://chromewebdata 或临时空白，重开一次编辑弹窗后重抓 frame。
+                    chrome_error_like = (
+                        str(frame_diag.get("href", "")).startswith("chrome-error://")
+                        or frame_diag.get("textLen", 0) == 0
+                        or frame_diag.get("hasErrKeyword")
+                    )
+                    if chrome_error_like:
+                        recovered = False
+                        for retry_idx in range(2):
+                            print(f"      ⚠️ iframe 加载异常，尝试重开弹窗并重抓 frame ({retry_idx + 1}/2)")
+                            await click_edit_once()
+                            await asyncio.sleep(1.2)
+                            iframe_info = await read_iframe_info()
+                            visible_iframes = [x for x in iframe_info if x.get("visible")]
+                            if not visible_iframes:
+                                await asyncio.sleep(0.8)
+                                iframe_info = await read_iframe_info()
+                                visible_iframes = [x for x in iframe_info if x.get("visible")]
+                            if not visible_iframes:
+                                continue
+                            frame_handle = None
+                            for idx, it in enumerate(iframe_info):
+                                if it.get("visible"):
+                                    candidate = page.locator("iframe").nth(idx)
+                                    if await candidate.count() > 0:
+                                        frame_handle = await candidate.element_handle()
+                                        break
+                            if not frame_handle:
+                                continue
+                            frame = await frame_handle.content_frame()
+                            if not frame:
+                                continue
+                            frame_diag = await _frame_eval_with_refetch("""() => {
+                                const bodyText = (document.body && document.body.innerText ? document.body.innerText : '').trim();
+                                return {
+                                    href: location.href || '',
+                                    title: document.title || '',
+                                    textLen: bodyText.length,
+                                    hasErrKeyword: /ERR_|无法访问|无法连接|network|proxy|超时/i.test(bodyText + ' ' + (document.title || ''))
+                                };
+                            }""")
+                            print(f"      🧪 iframe 重抓诊断: href={frame_diag.get('href','')}, title={frame_diag.get('title','')}, textLen={frame_diag.get('textLen',0)}")
+                            still_bad = (
+                                str(frame_diag.get("href", "")).startswith("chrome-error://")
+                                or frame_diag.get("textLen", 0) == 0
+                                or frame_diag.get("hasErrKeyword")
+                            )
+                            if not still_bad:
+                                recovered = True
+                                break
+                        if not recovered:
+                            raise RuntimeError("第2步 iframe 内容为空或疑似网络/代理异常，请检查 VPN/代理并重试")
 
                     # 关键控件就绪等待：避免 iframe 刚打开时 textLen 很低、控件尚未挂载导致后续字段全 miss。
                     ready = await frame.evaluate("""() => {
@@ -6098,7 +6371,7 @@ async def fill_step3(
                     moments_gate_ok = False
                     moments_gate_errors.append("执行员工")
             else:
-                if "按条件筛选客户" in distribution_mode:
+                if ("按条件筛选客户" in mode_norm) or ("按条件筛选客户群" in mode_norm):
                     exec_ok = await fill_step3_executor_by_condition(
                         page, executor_vals, include_franchise=executor_include_franchise
                     )
@@ -6310,9 +6583,35 @@ async def fill_step3(
         print(f"      🧪 保存阶段POST候选: {[u for _, u in save_resp_candidates[:8]]}")
     saved_ok = await ensure_step3_saved(page, save_resp_task=save_resp_task, before_url=save_start_url)
     community_like = "addcommunityPlan" in (save_start_url or "")
-    # 严格模式：不再仅凭“请求已发出”就判成功，避免后台无记录的假成功。
-    if (not saved_ok) and save_req_candidates:
-        print("      ⚠️ 已捕获保存请求，但未拿到可确认的成功响应，按失败处理以避免假成功")
+    # 非社群页兜底：若已命中核心保存接口请求，但页面偶发切到 about:blank/新标签导致响应捕获丢失，
+    # 且页面未出现可见错误提示，则按“弱成功”放行，避免误判失败。
+    if (not saved_ok) and (not community_like) and save_req_candidates:
+        core_req_hit = any(_is_core_save_api(u) for _, u in save_req_candidates)
+        if core_req_hit:
+            has_visible_error = False
+            try:
+                has_visible_error = await page.evaluate("""() => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const s = window.getComputedStyle(el);
+                        const r = el.getBoundingClientRect();
+                        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                    };
+                    const bad = /(失败|错误|非法|不能为空|未通过|重复|不能选择历史时间|目标不可重复)/;
+                    const nodes = Array.from(document.querySelectorAll(
+                        '.el-form-item__error, .ant-form-item-explain-error, .el-message__content, .ant-message-custom-content, .el-message-box__message, .ant-notification-notice-message, [role="alert"]'
+                    )).filter(isVisible);
+                    return nodes.some(n => bad.test((n.textContent || '').trim()));
+                }""")
+            except Exception:
+                has_visible_error = False
+            if not has_visible_error:
+                print("      ⚠️ 已命中核心保存请求，且未检测到可见错误提示：按弱成功放行（防止CDP标签页切换导致误判）")
+                saved_ok = True
+            else:
+                print("      ⚠️ 已捕获保存请求，但页面存在错误提示，仍按失败处理")
+        else:
+            print("      ⚠️ 已捕获保存请求，但未命中核心保存接口，按失败处理")
     try:
         page.remove_listener("response", _on_response)
     except Exception:

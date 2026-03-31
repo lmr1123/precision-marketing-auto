@@ -3628,7 +3628,7 @@ UI_HTML = """
       <div class="card task-section-spacer">
         <div class="task-card-head">
           <h3 class="card-title" style="margin-bottom:0">任务列表</h3>
-          <div class="task-meta">失败后点击“人工修复”，补充素材并重试任务</div>
+          <div class="task-meta">按任务点击“添加素材”，补充素材后可直接执行或重试</div>
         </div>
         <div class="task-table-wrap">
           <table>
@@ -3655,13 +3655,13 @@ UI_HTML = """
 <div id="materialModal" class="material-modal" onclick="closeMaterialModal(event)">
   <div class="material-panel" onclick="event.stopPropagation()">
     <div class="log-head">
-      <div id="materialTitle">失败任务人工修复助手</div>
+      <div id="materialTitle">按任务添加素材</div>
       <div class="row">
         <button class="secondary" onclick="closeMaterialModal()">关闭</button>
         <button onclick="saveTaskMaterials()">保存修复配置</button>
       </div>
     </div>
-    <div class="material-note"><b>说明：</b>用于失败任务人工修复；可按计划补充/覆盖素材，保存后回写任务CSV，再点“重试”即可按最新素材重跑。</div>
+    <div class="material-note"><b>说明：</b>可按计划补充/覆盖素材，保存后回写任务CSV；执行/重试时按最新素材运行。</div>
     <div id="materialRows"></div>
   </div>
 </div>
@@ -3987,7 +3987,7 @@ function renderTasks(rows){
       <td>${t.duration_sec ? t.duration_sec.toFixed(1) : '-'}</td>
       <td>
         <button onclick="openLogModal('${t.id}')">日志</button>
-        <button class="secondary" onclick="openMaterialModal('${t.id}')">人工修复</button>
+        <button class="secondary" onclick="openMaterialModal('${t.id}')">添加素材</button>
         ${t.status === 'running' ? '' : (t.paused && t.status === 'pending' ? `<button class="secondary" onclick="resumeTask('${t.id}')">恢复</button>` : `<button class="secondary" onclick="pauseTask('${t.id}')">暂停</button>`)}
         ${t.status === 'running' ? '' : `<button class="secondary" onclick="deleteTask('${t.id}')">删除</button>`}
         ${t.status === 'failed' ? `<button class="secondary" onclick="retryTask('${t.id}')">重试</button>` : ''}
@@ -4155,7 +4155,7 @@ async function openMaterialModal(id){
     cover_token: '',
     moment_tokens: []
   }));
-  document.getElementById('materialTitle').textContent = `失败任务人工修复助手（任务 ${id.slice(0,8)}）`;
+  document.getElementById('materialTitle').textContent = `按任务添加素材（任务 ${id.slice(0,8)}）`;
   renderMaterialRows();
   const m = document.getElementById('materialModal');
   if(m) m.classList.add('open');
