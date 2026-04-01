@@ -3949,6 +3949,7 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
         targets = [x for x in ext if not (x in seen or seen.add(x))]
     if not targets:
         return True
+    print(f"      🧪 按条件筛选客户-目标节点: {targets}")
 
     async def open_picker() -> bool:
         ok = await page.evaluate("""() => {
@@ -4026,16 +4027,22 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
                 return true;
             };
             let hit = null;
+            let bestScore = -1;
+            const isJoin = tgt.includes('加盟');
             for (const row of rows) {
                 const label = row.querySelector('.el-tree-node__label');
                 const txt = norm(label ? label.textContent : row.textContent || '');
                 if (!txt) continue;
-                if (txt === tgt || txt.includes(tgt) || tgt.includes(txt)) {
+                let score = -1;
+                if (txt === tgt) score = 3; // 精准命中最高优先
+                else if (txt.includes(tgt)) score = 2; // 文本包含目标
+                else if (!isJoin && !txt.includes('加盟') && tgt.includes(txt)) score = 1; // 仅非加盟目标允许反向包含
+                if (score > bestScore) {
+                    bestScore = score;
                     hit = row;
-                    break;
                 }
             }
-            if (!hit) return false;
+            if (!hit || bestScore < 0) return false;
             hit.scrollIntoView({ block: 'center' });
             const exp = hit.querySelector('.el-tree-node__expand-icon');
             if (exp) {
@@ -4137,6 +4144,15 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
                 return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
             });
             if (!modal) return false;
+            // 1) 首选 footer 内主按钮（最稳定）
+            const footerPrimary = Array.from(modal.querySelectorAll(
+                '.el-dialog__footer button.el-button--primary, .ant-modal-footer .ant-btn-primary'
+            )).find(isVisible);
+            if (footerPrimary) {
+                footerPrimary.click();
+                return true;
+            }
+            // 2) 次选固定 class + 文本
             let btn = Array.from(modal.querySelectorAll('button.el-button.el-button--primary.el-button--small')).find(b => {
                 if (!isVisible(b)) return false;
                 const t = (b.textContent || '').replace(/\\s+/g, '');
@@ -4154,11 +4170,56 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
                     return true;
                 }
             }
+            // 3) 最后兜底：选最靠右主按钮
+            const allPrimary = Array.from(modal.querySelectorAll('button.el-button--primary, .ant-btn-primary'))
+                .filter(isVisible)
+                .sort((a,b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right);
+            if (allPrimary.length) {
+                allPrimary[0].click();
+                return true;
+            }
             return false;
         }""")
         if ok:
             await asyncio.sleep(0.5)
         return bool(ok)
+
+    async def read_modal_current_tree_label() -> str:
+        """读取弹窗树当前激活节点文本（用于确认确实切到了目标节点）。"""
+        try:
+            return (await page.evaluate("""() => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                };
+                const norm = (s) => (s || '').replace(/\\s+/g, '');
+                const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
+                    if (!isVisible(d)) return false;
+                    const txt = norm(d.textContent || '');
+                    return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+                });
+                if (!modal) return '';
+                const cand = modal.querySelector('.el-tree-node.is-current .el-tree-node__label')
+                    || modal.querySelector('.el-tree-node__content.is-current .el-tree-node__label')
+                    || modal.querySelector('.el-tree-node.is-current .el-tree-node__content .el-tree-node__label');
+                if (!cand) return '';
+                return norm(cand.textContent || '');
+            }""") or "").strip()
+        except Exception:
+            return ""
+
+    async def ensure_modal_target_active(target: str) -> bool:
+        """确保树里当前激活节点就是目标，避免只展开未切到目标。"""
+        tgt = normalize_area_alias(target)
+        for _ in range(4):
+            _ = await modal_pick_area(tgt, expand_only=False)
+            await asyncio.sleep(0.2)
+            curr = await read_modal_current_tree_label()
+            if curr and (curr == tgt or tgt in curr):
+                return True
+        return False
 
     async def read_selected_count() -> int:
         try:
@@ -4204,11 +4265,24 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
                 const txt = norm(modal.textContent || '');
                 const m = txt.match(/已选员工共(\\d+)条/);
                 if (m) return Number(m[1] || 0);
-                // 兜底：部分页面不带“已选员工”前缀，仅出现多个“共X条”，取最大值作为已选规模。
+                // 优先：按“按区域移除”后的右侧区域提取“共X条”
+                if (txt.includes('按区域移除')) {
+                    const part = txt.split('按区域移除').pop() || '';
+                    const arr = Array.from(part.matchAll(/共(\\d+)条/g)).map(x => Number(x[1] || 0));
+                    if (arr.length) return arr[arr.length - 1];
+                }
+                // 次优：按“移除全部/移除所选”后的区域提取
+                if (txt.includes('移除全部')) {
+                    const part2 = txt.split('移除全部').pop() || '';
+                    const arr2 = Array.from(part2.matchAll(/共(\\d+)条/g)).map(x => Number(x[1] || 0));
+                    if (arr2.length) return arr2[arr2.length - 1];
+                }
+                // 兜底：全弹窗出现多个“共X条”时取最大值（通常右侧已选 > 左侧候选）
                 const all = Array.from(txt.matchAll(/共(\\d+)条/g)).map(x => Number(x[1] || 0));
                 if (all.length) return Math.max(...all);
+                // 未命中任何人数文本
                 if (txt.includes('暂无已选员工')) return 0;
-                return 0;
+                return -1;
             }""") or 0)
         except Exception:
             return 0
@@ -4297,6 +4371,12 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
                 await asyncio.sleep(0.15)
         if not target_hit:
             continue
+        active_ok = await ensure_modal_target_active(t)
+        curr_label = await read_modal_current_tree_label()
+        print(f"      🧪 目标节点激活校验: target={t}, active={curr_label or 'none'}, ok={active_ok}")
+        if not active_ok:
+            print(f"      ⚠️ 未成功激活目标节点，跳过本轮添加: {t}")
+            continue
         # 选中区域后，等待左侧列表加载（共X条从0变大）
         left_before = await read_modal_left_count()
         left_after = left_before
@@ -4310,12 +4390,24 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
         if add_ok:
             await asyncio.sleep(0.25)
             modal_added_now = await read_modal_added_count()
+            # 强校验：必须看到右侧“已选员工共X条”真实增长；否则重试一次选择+添加。
+            if modal_added_now < 0 or modal_added_now <= modal_added_before:
+                _ = await ensure_modal_target_active(t)
+                await asyncio.sleep(0.2)
+                _ = await modal_click_add_all()
+                for _ in range(20):  # 最多约6秒等待右侧已选增长
+                    await asyncio.sleep(0.3)
+                    modal_added_now = await read_modal_added_count()
+                    if modal_added_now > modal_added_before:
+                        break
             selected_now = await read_selected_count()
             print(f"      🧪 添加全部后右侧已选条数: before={modal_added_before}, after={modal_added_now}, target={t}")
-            # 兼容：部分页面“已选条数”回读存在延迟或口径差异，按钮成功点击即视为本轮已执行添加动作。
-            picked_any = True
-            modal_added_before = max(modal_added_before, modal_added_now)
-            selected_before = max(selected_before, selected_now)
+            if modal_added_now > modal_added_before:
+                picked_any = True
+                modal_added_before = modal_added_now
+                selected_before = max(selected_before, selected_now)
+            else:
+                print(f"      ⚠️ 添加全部后右侧已选条数未增长，判定未生效: {t}")
         await asyncio.sleep(0.2)
 
     if not picked_any:
@@ -6390,7 +6482,9 @@ async def fill_step3(
             else:
                 if ("按条件筛选客户" in mode_norm) or ("按条件筛选客户群" in mode_norm):
                     exec_ok = await fill_step3_executor_by_condition(
-                        page, executor_vals, include_franchise=executor_include_franchise
+                        page,
+                        executor_vals,
+                        include_franchise=(True if community_condition_mode else executor_include_franchise),
                     )
                 else:
                     exec_ok = await fill_step3_executor(
@@ -6600,34 +6694,40 @@ async def fill_step3(
         print(f"      🧪 保存阶段POST候选: {[u for _, u in save_resp_candidates[:8]]}")
     saved_ok = await ensure_step3_saved(page, save_resp_task=save_resp_task, before_url=save_start_url)
     community_like = "addcommunityPlan" in (save_start_url or "")
-    # 非社群页兜底：若已命中核心保存接口请求，但页面偶发切到 about:blank/新标签导致响应捕获丢失，
-    # 且页面未出现可见错误提示，则按“弱成功”放行，避免误判失败。
-    if (not saved_ok) and (not community_like) and save_req_candidates:
+
+    async def _has_visible_save_error() -> bool:
+        try:
+            return bool(await page.evaluate("""() => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                };
+                const bad = /(失败|错误|非法|不能为空|未通过|重复|不能选择历史时间|目标不可重复)/;
+                const nodes = Array.from(document.querySelectorAll(
+                    '.el-form-item__error, .ant-form-item-explain-error, .el-message__content, .ant-message-custom-content, .el-message-box__message, .ant-notification-notice-message, [role="alert"]'
+                )).filter(isVisible);
+                return nodes.some(n => bad.test((n.textContent || '').trim()));
+            }"""))
+        except Exception:
+            return False
+
+    # 保存判定兜底：若已命中核心保存接口请求，但页面偶发切到 about:blank/新标签导致响应捕获丢失，
+    # 且页面无可见错误提示，则按弱成功放行，避免误判失败。
+    if (not saved_ok) and save_req_candidates:
         core_req_hit = any(_is_core_save_api(u) for _, u in save_req_candidates)
         if core_req_hit:
-            has_visible_error = False
-            try:
-                has_visible_error = await page.evaluate("""() => {
-                    const isVisible = (el) => {
-                        if (!el) return false;
-                        const s = window.getComputedStyle(el);
-                        const r = el.getBoundingClientRect();
-                        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-                    };
-                    const bad = /(失败|错误|非法|不能为空|未通过|重复|不能选择历史时间|目标不可重复)/;
-                    const nodes = Array.from(document.querySelectorAll(
-                        '.el-form-item__error, .ant-form-item-explain-error, .el-message__content, .ant-message-custom-content, .el-message-box__message, .ant-notification-notice-message, [role="alert"]'
-                    )).filter(isVisible);
-                    return nodes.some(n => bad.test((n.textContent || '').trim()));
-                }""")
-            except Exception:
-                has_visible_error = False
+            has_visible_error = await _has_visible_save_error()
             if not has_visible_error:
-                print("      ⚠️ 已命中核心保存请求，且未检测到可见错误提示：按弱成功放行（防止CDP标签页切换导致误判）")
+                if community_like:
+                    print("      ⚠️ 社群页已命中核心保存请求，且未检测到可见错误提示：按弱成功放行（防止about:blank误判）")
+                else:
+                    print("      ⚠️ 已命中核心保存请求，且未检测到可见错误提示：按弱成功放行（防止CDP标签页切换导致误判）")
                 saved_ok = True
             else:
                 print("      ⚠️ 已捕获保存请求，但页面存在错误提示，仍按失败处理")
-        else:
+        elif not community_like:
             print("      ⚠️ 已捕获保存请求，但未命中核心保存接口，按失败处理")
     try:
         page.remove_listener("response", _on_response)
