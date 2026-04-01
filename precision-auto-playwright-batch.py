@@ -1845,8 +1845,11 @@ async def upload_step3_moments_images(page, raw_paths: str):
                     root.querySelectorAll('.el-upload-list__item').length ||
                     root.querySelectorAll('[class*="upload-list"] [class*="item"]').length ||
                     root.querySelectorAll('.name').length;
+                const uploadingCount =
+                    root.querySelectorAll('.el-upload-list__item.is-uploading, .el-upload-list__item .el-icon-loading').length ||
+                    root.querySelectorAll('[class*="upload-list"] [class*="uploading"], [class*="upload-list"] .loading').length;
                 const hasName = fn ? txt.includes((fn || '').replace(/\\s+/g, '')) : false;
-                return { listCount, hasName };
+                return { listCount, hasName, uploadingCount };
             }""",
             file_name or "",
         )
@@ -1859,6 +1862,23 @@ async def upload_step3_moments_images(page, raw_paths: str):
                 return True, st
             await asyncio.sleep(0.4)
         st = await _read_upload_state(file_name)
+        return False, st
+
+    async def _wait_upload_quiet(expected_count: int):
+        rounds = max(4, int(MOMENTS_UPLOAD_WAIT_SECONDS / 0.4))
+        stable_hits = 0
+        for _ in range(rounds):
+            st = await _read_upload_state("")
+            list_ok = int(st.get("listCount", 0)) >= int(expected_count)
+            uploading = int(st.get("uploadingCount", 0))
+            if list_ok and uploading == 0:
+                stable_hits += 1
+                if stable_hits >= 3:
+                    return True, st
+            else:
+                stable_hits = 0
+            await asyncio.sleep(0.4)
+        st = await _read_upload_state("")
         return False, st
 
     async def _all_names_present(paths: list[str]) -> bool:
@@ -1894,6 +1914,9 @@ async def upload_step3_moments_images(page, raw_paths: str):
 
             ok, st = await _wait_uploaded("", before.get("listCount", 0))
             if ok:
+                quiet_ok, quiet_st = await _wait_upload_quiet(min(len(resolved), 9))
+                if not quiet_ok:
+                    print(f"      ⚠️ 批量上传稳态等待未完成，继续按文件名校验: {quiet_st}")
                 batch_ok = True
                 print(f"      ✅ 批量上传图片成功: {len(resolved)}张")
             else:
@@ -1937,6 +1960,10 @@ async def upload_step3_moments_images(page, raw_paths: str):
             if idx >= 7:
                 extra_wait = 0.8
             await asyncio.sleep(max(0.8, MOMENTS_UPLOAD_DELAY_SECONDS) + extra_wait)
+
+        quiet_ok, quiet_st = await _wait_upload_quiet(min(len(resolved), 9))
+        if not quiet_ok:
+            print(f"      ⚠️ 慢速上传后稳态等待未完全命中: {quiet_st}")
 
         if weak_pass == len(resolved):
             return True, f"已提交上传{len(resolved)}张（回读弱校验）"
@@ -6924,37 +6951,46 @@ async def fill_step3(
     except Exception:
         pass
     if (not saved_ok) and (not community_like):
-        # 兜底：补点一次“主保存”后再次判定，规避首次点击命中错误按钮或点击未生效
-        if image_upload_enabled:
-            print(f"      ⚠️ 图片上传强校验：上传后先等待{MOMENTS_UPLOAD_WAIT_SECONDS:.1f}s，再重试一次保存...")
-            await wait_and_log(page, MOMENTS_UPLOAD_WAIT_SECONDS, "图片上传后等待稳定...")
-        print("      ⚠️ 首次保存未确认成功，补点一次主保存后重试判定...")
-        retry_task = asyncio.get_running_loop().create_future()
-        def _on_response_retry(r):
-            try:
-                url_l = (r.url or "").lower()
-                matched = (
-                    r.request.method in ("POST", "PUT", "PATCH")
-                    and (
-                        ("precision.dslyy.com" in url_l)
-                        or "marketingtemplate" in url_l
-                        or "template" in url_l
-                        or "save" in url_l
+        # 兜底：补点“主保存”并重试判定。图片上传场景增加多轮重试，降低接口并发限流导致的假失败。
+        retry_rounds = 3 if image_upload_enabled else 1
+        for attempt in range(1, retry_rounds + 1):
+            if image_upload_enabled:
+                wait_s = MOMENTS_UPLOAD_WAIT_SECONDS + (attempt - 1) * 2.0
+                print(f"      ⚠️ 图片上传强校验：第{attempt}/{retry_rounds}次重试前等待{wait_s:.1f}s...")
+                await wait_and_log(page, wait_s, "图片上传后等待稳定...")
+            elif attempt == 1:
+                print("      ⚠️ 首次保存未确认成功，补点一次主保存后重试判定...")
+
+            retry_task = asyncio.get_running_loop().create_future()
+            def _on_response_retry(r):
+                try:
+                    url_l = (r.url or "").lower()
+                    matched = (
+                        r.request.method in ("POST", "PUT", "PATCH")
+                        and (
+                            ("precision.dslyy.com" in url_l)
+                            or "marketingtemplate" in url_l
+                            or "template" in url_l
+                            or "save" in url_l
+                        )
                     )
-                )
-                if matched and (not retry_task.done()):
-                    retry_task.set_result(r)
-            except Exception:
-                pass
-        page.on("response", _on_response_retry)
-        clicked_retry = await click_step3_save_button(page)
-        if clicked_retry:
-            await wait_and_log(page, 1.6, "补点保存中...")
-            saved_ok = await ensure_step3_saved(page, save_resp_task=retry_task, before_url=save_start_url)
-        try:
-            page.remove_listener("response", _on_response_retry)
-        except Exception:
-            pass
+                    if matched and (not retry_task.done()):
+                        retry_task.set_result(r)
+                except Exception:
+                    pass
+            page.on("response", _on_response_retry)
+            try:
+                clicked_retry = await click_step3_save_button(page)
+                if clicked_retry:
+                    await wait_and_log(page, 1.6, f"补点保存中(第{attempt}次)...")
+                    saved_ok = await ensure_step3_saved(page, save_resp_task=retry_task, before_url=save_start_url)
+                if saved_ok:
+                    break
+            finally:
+                try:
+                    page.remove_listener("response", _on_response_retry)
+                except Exception:
+                    pass
     elif (not saved_ok) and community_like:
         # 社群页保护性二次提交：仅在当前仍停留正常社群编辑页时重试一次。
         curr = page.url or ""

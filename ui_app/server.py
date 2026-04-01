@@ -33,6 +33,8 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_DIR = UPLOAD_DIR / "task_history"
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_DATA_CSV = ROOT / "data" / "plans.csv"
+# 网页“Excel模板”下载优先使用用户指定模板文件
+CUSTOM_EXPORT_TEMPLATE_XLSX = Path("/Users/liminrong/Downloads/精准营销任务模板（导入模板）.xlsx")
 
 
 HEADER_EN_TO_CN: Dict[str, str] = {
@@ -83,6 +85,7 @@ HEADER_CN_TO_EN.update({
     "主消费运营区": "main_operating_area",
     "计划图片id": "plan_image_id",
     "计划图片Id": "plan_image_id",
+    "1对1-小程序功能页面": "msg_mini_program_page_path",
 })
 
 CHANNEL_CODE_TO_NAME: Dict[str, str] = {
@@ -119,6 +122,21 @@ TEMPLATE_HIDE_FIELDS = {
     "sms_content",
     "send_content",
     "group_name",
+    "region",
+    "trigger_type",
+    "group_send_name",
+    "scene_type",
+    "plan_type",
+}
+
+DEFAULT_CREATE_URL_BY_CHANNEL: Dict[str, str] = {
+    "短信": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702746907561984",
+    "会员通-发客户消息": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=594094287227023360",
+    "会员通-发客户朋友圈": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702926159527936",
+    "会员通-发送社群": "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add",
+}
+DEFAULT_CREATE_URL_COMBO: Dict[str, str] = {
+    "短信|会员通-发客户消息": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=600035736992907264",
 }
 
 
@@ -198,6 +216,7 @@ def parse_int(val: str, default: int = 0) -> int:
 def _default_headers() -> List[str]:
     return [
         "name",
+        "channels",
         "region",
         "theme",
         "scene_type",
@@ -222,7 +241,6 @@ def _default_headers() -> List[str]:
         "executor_employees",
         "group_send_name",
         "send_content",
-        "channels",
         "plan_image_id",
         "moments_add_images",
         "moments_image_paths",
@@ -265,16 +283,22 @@ def _filter_template_fields(headers: List[str], sample: List[str]) -> tuple[List
     keep = [idx for idx, h in enumerate(headers) if h not in TEMPLATE_HIDE_FIELDS]
     out_headers = [headers[idx] for idx in keep]
     out_sample = [sample[idx] if idx < len(sample) else "" for idx in keep]
+    if "create_url" in out_headers:
+        i = out_headers.index("create_url")
+        h = out_headers.pop(i)
+        v = out_sample.pop(i)
+        out_headers.append(h)
+        out_sample.append(v)
     # 业务引导示例：第1步营销主题支持多选填写
     if "theme" in out_headers:
         idx = out_headers.index("theme")
         out_sample[idx] = "其他、26年3月积分换券"
     if "channels" in out_headers:
         idx = out_headers.index("channels")
-        out_sample[idx] = "短信、会员通-发客户消息"
+        out_sample[idx] = "会员通-发客户消息"
     if "create_url" in out_headers:
         idx = out_headers.index("create_url")
-        out_sample[idx] = "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=600035736992907264"
+        out_sample[idx] = "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=594094287227023360"
     if "push_content" in out_headers:
         idx = out_headers.index("push_content")
         out_sample[idx] = "示例推送内容（按发送渠道自动映射到短信内容或发送内容）"
@@ -291,6 +315,14 @@ def _filter_template_fields(headers: List[str], sample: List[str]) -> tuple[List
     if "coupon_ids_sheet_ref" in out_headers:
         idx = out_headers.index("coupon_ids_sheet_ref")
         out_sample[idx] = "《券规则 ID 1》"
+    if "msg_mini_program_name" in out_headers:
+        out_sample[out_headers.index("msg_mini_program_name")] = "大参林健康"
+    if "start_time" in out_headers:
+        out_sample[out_headers.index("start_time")] = "2026-04-01"
+    if "end_time" in out_headers:
+        out_sample[out_headers.index("end_time")] = "2026-04-10"
+    if "step3_end_time" in out_headers:
+        out_sample[out_headers.index("step3_end_time")] = "2026-04-10"
     return out_headers, out_sample
 
 
@@ -315,45 +347,79 @@ def write_template_xlsx(path: Path) -> None:
     ws.title = "任务文件"
     ws.append(cn_headers)
     ws.append(sample)
+
+    def _row_from_headers(hs: List[str], vals: Dict[str, str]) -> List[str]:
+        return [vals.get(h, "") for h in hs]
+
     # 业务示例：用于给非技术同事直接参考填写（不参与程序逻辑判断）
     ws_example = wb.create_sheet("任务文件（示例）")
     ws_example.append(cn_headers)
-    ws_example.append([
-        "测试1-社群", "营运区", "其他、会员生日礼", "会员营销", "会员权益",
-        "测试1-社群", "2026-03-16 08:00:00", "2026-03-30 08:00:00",
-        "定时-单次任务", "2026-03-28 08:00:00", "限制",
-        "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add",
-        "辽宁省区、九江、南昌、广州二", "《目标商品 1》", "",
-        "2026-03-30 08:00:00", "导入门店", "《目标门店1》", "福利",
-        "会员通-发送社群", "1", "大参林健康", "测试1-卡片",
-        "apps/member/integralMall/pages/home/index",
-    ])
-    ws_example.append([
-        "测试2-企微1对1", "省区", "其他、26年3月积分换券", "", "",
-        "测试2-企微1对1", "2026-03-16 08:00:00", "2026-03-30 08:00:00",
-        "定时-单次任务", "2026-03-28 08:00:00", "限制",
-        "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=594094287227023360",
-        "《目标门店1》", "", "《券规则ID1》",
-        "2026-03-30 08:00:00", "", "西北大区、湖北省区", "",
-        "会员通-发客户消息", "2", "大参林健康", "测试1-卡片",
-        "apps/member/integralMall/pages/home/index",
-    ])
-    ws_example.append([
-        "测试3-朋友圈", "省区", "其他、26年3月积分换券", "", "",
-        "测试3-朋友圈", "2026-03-16 08:00:00", "2026-03-30 08:00:00",
-        "定时-单次任务", "2026-03-28 08:00:00", "限制",
-        "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702926159527936",
-        "华南大区", "", "《券规则ID1》",
-        "2026-03-30 08:00:00", "", "黑龙江省区、武汉营运区", "",
-        "会员通-发客户朋友圈", "3", "", "", "",
-    ])
-    ws_example.append([
-        "测试4-短信", "省区", "其他、26年3月积分换券", "", "",
-        "测试4-短信", "2026-03-16 08:00:00", "2026-03-30 08:00:00",
-        "定时-单次任务", "2026-03-28 08:00:00", "限制",
-        "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702746907561984",
-        "来宾、华中大区", "《目标商品 1》", "《券规则ID1》",
-        "", "", "", "", "短信", "4", "", "", "",
+    ws_example.append(_row_from_headers(cn_headers, {
+        "计划名称": "测试2-企微1对1",
+        "发送渠道": "会员通-发客户消息",
+        "营销主题": "其他、26年3月积分换券",
+        "推送内容": "测试2-企微1对1",
+        "计划开始时间": "2026-04-01",
+        "计划结束时间": "2026-04-10",
+        "发送时间": "2026-04-08 08:00:00",
+        "全局触达限制": "限制",
+        "创建链接": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=594094287227023360",
+        "主消费营运区": "《目标门店 1》",
+        "购买目标商品编码": "《目标商品 1》",
+        "已领或已使用券规则ID": "《券规则 ID 1》",
+        "员工任务结束时间": "2026-04-10",
+        "执行员工": "西北大区、湖北省区",
+        "计划图片ID": "2",
+        "1对1-小程序名称": "大参林健康",
+        "1对1-小程序标题": "测试1-卡片",
+        "1对1-小程序链接": "apps/member/integralMall/pages/home/index",
+    }))
+    ws_example.append(_row_from_headers(cn_headers, {
+        "计划名称": "测试3-朋友圈",
+        "发送渠道": "会员通-发客户朋友圈",
+        "营销主题": "其他、26年3月积分换券",
+        "推送内容": "测试3-朋友圈",
+        "计划开始时间": "2026-04-01",
+        "计划结束时间": "2026-04-10",
+        "发送时间": "2026-04-08 08:00:00",
+        "全局触达限制": "不限制",
+        "创建链接": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702926159527936",
+        "主消费营运区": "华南大区",
+        "已领或已使用券规则ID": "《券规则 ID 1》",
+        "员工任务结束时间": "2026-04-10",
+        "执行员工": "黑龙江省区、武汉营运区",
+        "计划图片ID": "3",
+    }))
+    ws_example.append(_row_from_headers(cn_headers, {
+        "计划名称": "测试4-短信",
+        "发送渠道": "短信",
+        "营销主题": "其他、26年3月积分换券",
+        "推送内容": "测试4-短信",
+        "计划开始时间": "2026-04-01",
+        "计划结束时间": "2026-04-10",
+        "发送时间": "2026-04-08 08:00:00",
+        "全局触达限制": "限制",
+        "创建链接": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702746907561984",
+        "主消费营运区": "来宾、华中大区",
+        "购买目标商品编码": "《目标商品 1》",
+        "已领或已使用券规则ID": "《券规则 ID 1》",
+        "计划图片ID": "4",
+    }))
+
+    # 社群任务：独立sheet读取（发送渠道=会员通-发送社群）
+    community_headers = [
+        "计划名称", "发送渠道", "营销主题", "场景类型", "计划类型",
+        "推送内容", "计划开始时间", "计划结束时间", "发送时间",
+        "员工任务结束时间", "社群任务分配方式", "执行员工",
+        "计划图片ID", "1对1-小程序名称", "1对1-小程序标题", "1对1-小程序链接",
+    ]
+    ws_community = wb.create_sheet("社群任务")
+    ws_community.append(community_headers)
+    ws_community.append([
+        "测试1-社群", "会员通-发送社群", "其他、会员生日礼", "会员营销", "会员权益",
+        "测试1-社群", "2026-04-01", "2026-04-10", "2026-04-08 08:00:00",
+        "2026-04-10", "导入门店", "《目标门店 1》",
+        "1", "大参林健康", "社群小程序示例", "pages/index/index",
     ])
     ws_store_1 = wb.create_sheet("目标门店 1")
     ws_store_1.append(["门店编码"])
@@ -379,17 +445,16 @@ def write_community_template_xlsx(path: Path) -> None:
     ws = wb.active
     ws.title = "任务文件"
     headers = [
-        "计划名称", "计划区域", "营销主题", "场景类型", "计划类型",
-        "计划开始时间", "计划结束时间", "发送时间", "第3步结束时间",
-        "分配方式", "执行员工", "下发群名", "发送内容", "发送渠道", "创建链接",
+        "计划名称", "发送渠道", "营销主题", "场景类型", "计划类型",
+        "计划开始时间", "计划结束时间", "发送时间", "员工任务结束时间",
+        "社群任务分配方式", "执行员工", "推送内容",
         "1对1-小程序名称", "1对1-小程序标题", "1对1-小程序链接",
     ]
     ws.append(headers)
     ws.append([
-        "专属社群测试模板（自动化）", "营运区", "其他、会员生日礼", "会员营销", "会员权益",
-        "2026-03-20 00:00:00", "2026-03-31 23:59:59", "2026-03-22 08:00:00",
-        "2026-03-31 23:59:59", "按条件筛选客户群", "黑龙江省区、武汉营运区", "福利", "社群自动化测试内容",
-        "会员通-发送社群", "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add",
+        "专属社群测试模板（自动化）", "会员通-发送社群", "其他、会员生日礼", "会员营销", "会员权益",
+        "2026-03-20", "2026-03-31", "2026-03-22 08:00:00",
+        "2026-03-31", "按条件筛选客户群", "黑龙江省区、武汉营运区", "社群自动化测试内容",
         "大参林健康", "社群小程序示例", "pages/index/index",
     ])
     ws_store = wb.create_sheet("目标门店 1")
@@ -652,6 +717,19 @@ def apply_unified_field_mapping_and_refs(
     ui_channels = _normalize_channel_text(step3_channels or "")
     community_default = "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add"
 
+    def _default_create_url_for_parts(parts: List[str]) -> str:
+        uniq = []
+        for p in parts:
+            if p not in uniq:
+                uniq.append(p)
+        combo_key = "|".join(sorted(uniq))
+        if combo_key in DEFAULT_CREATE_URL_COMBO:
+            return DEFAULT_CREATE_URL_COMBO[combo_key]
+        for p in uniq:
+            if p in DEFAULT_CREATE_URL_BY_CHANNEL:
+                return DEFAULT_CREATE_URL_BY_CHANNEL[p]
+        return ""
+
     def _pick_default_mini_cover() -> str:
         patterns = ("cover_*.JPG", "cover_*.jpg", "cover_*.jpeg", "cover_*.png")
         files: List[Path] = []
@@ -700,18 +778,55 @@ def apply_unified_field_mapping_and_refs(
         channel_scope = row_channels or ui_channels
         parts = [p.strip() for p in re.split(r"[|,，、/]+", channel_scope) if p.strip()]
         is_community = "会员通-发送社群" in parts
+        is_moments = "会员通-发客户朋友圈" in parts
+
+        # 默认值补齐（模板已简化，避免缺列后脚本失败）
+        if not str(row.get("region", "") or "").strip():
+            row["region"] = "省区"
+        if not str(row.get("trigger_type", "") or "").strip():
+            row["trigger_type"] = "定时-单次任务"
+        if not str(row.get("group_send_name", "") or "").strip():
+            row["group_send_name"] = "福利"
+        if is_community or is_moments:
+            row["global_limit"] = "不限制"
+
+        # 日期字段自动补时分秒
+        def _norm_dt_text(raw: str, *, end_of_day_for_date_only: bool) -> str:
+            s = str(raw or "").strip()
+            if not s:
+                return ""
+            dt = _parse_dt_for_upload(s, end_of_day_for_date_only=end_of_day_for_date_only)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        for key, eod in (
+            ("start_time", False),
+            ("end_time", True),
+            ("step3_end_time", True),
+        ):
+            val = str(row.get(key, "") or "").strip()
+            if val:
+                try:
+                    row[key] = _norm_dt_text(val, end_of_day_for_date_only=eod)
+                except Exception as e:
+                    label = HEADER_EN_TO_CN.get(key, key)
+                    raise HTTPException(status_code=400, detail=f"第{idx}行：{label}格式错误: {e}")
 
         # 发送渠道严格校验
         if not parts:
             raise HTTPException(status_code=400, detail=f"第{idx}行：发送渠道不能为空")
+        row["channels"] = "、".join(parts)
 
-        # 创建链接规则：社群可默认；其他渠道必须填写
-        create_url = str(row.get("create_url", "") or "").strip()
-        has_non_community = any(p != "会员通-发送社群" for p in parts)
-        if has_non_community and (not create_url):
-            raise HTTPException(status_code=400, detail=f"第{idx}行：非社群渠道必须填写“创建链接”")
-        if is_community and (not create_url):
-            row["create_url"] = community_default
+        # 社群任务：场景类型、计划类型必填（仅社群要求）
+        if is_community:
+            if not str(row.get("scene_type", "") or "").strip():
+                raise HTTPException(status_code=400, detail=f"第{idx}行：社群任务“场景类型”不能为空")
+            if not str(row.get("plan_type", "") or "").strip():
+                raise HTTPException(status_code=400, detail=f"第{idx}行：社群任务“计划类型”不能为空")
+
+        # 创建链接规则：任务文件中不允许手填，统一按渠道自动赋值
+        auto_url = _default_create_url_for_parts(parts) or community_default
+        # 强制覆盖，避免误链路
+        row["create_url"] = auto_url
 
         # 推送内容路由
         push_content = str(row.get("push_content", "") or "").strip()
@@ -772,6 +887,8 @@ def apply_unified_field_mapping_and_refs(
         mp_link = str(row.get("msg_mini_program_page_path", "") or "").strip()
         if mp_name or mp_title or mp_link:
             row["msg_add_mini_program"] = "是"
+            if not mp_name:
+                row["msg_mini_program_name"] = "大参林健康"
             if not str(row.get("msg_mini_program_cover_path", "") or "").strip():
                 default_cover = _pick_default_mini_cover()
                 if default_cover:
@@ -818,6 +935,25 @@ def _write_sheet_to_csv(ws, dst_csv: Path) -> None:
             writer.writerow(["" if v is None else str(v) for v in row])
 
 
+def _sheet_rows(ws) -> List[List[str]]:
+    return [["" if v is None else str(v) for v in row] for row in ws.iter_rows(values_only=True)]
+
+
+def _rows_to_dicts_with_norm_headers(rows: List[List[str]]) -> Tuple[List[str], List[Dict[str, str]]]:
+    if not rows:
+        return [], []
+    raw_headers = [str(x or "").strip() for x in rows[0]]
+    headers = [HEADER_CN_TO_EN.get(h, h) for h in raw_headers]
+    out_rows: List[Dict[str, str]] = []
+    for r in rows[1:]:
+        d: Dict[str, str] = {}
+        for i, h in enumerate(headers):
+            d[h] = (str(r[i]).strip() if i < len(r) else "")
+        if any(str(v or "").strip() for v in d.values()):
+            out_rows.append(d)
+    return headers, out_rows
+
+
 def _sheet_to_xlsx_blob(ws_title: str, ws) -> Tuple[str, bytes]:
     if Workbook is None:
         raise HTTPException(status_code=500, detail="Server missing openpyxl. Please install requirements-ui.txt")
@@ -837,7 +973,8 @@ def convert_uploaded_xlsx_multi_sheet_from_bytes(
 ) -> Tuple[Optional[Tuple[str, bytes]], Optional[Tuple[str, bytes]], Dict[str, dict]]:
     """
     一个Excel多sheet模式：
-    - 任务文件sheet -> 转CSV
+    - 任务文件sheet -> 转CSV（非社群）
+    - 社群任务sheet -> 追加转CSV（发送渠道=会员通-发送社群）
     - 目标门店sheet -> 返回xlsx blob
     - 目标商品sheet -> 返回xlsx blob
     """
@@ -851,10 +988,38 @@ def convert_uploaded_xlsx_multi_sheet_from_bytes(
         candidates=["任务文件", "任务", "plans", "plan", "计划"],
         fallback_keywords=["任务", "plan", "plans", "计划"],
     ) or (names[0] if names else None)
+    community_task_sheet = _pick_sheet_name(
+        names,
+        candidates=["社群任务", "社群任务文件", "community", "community_tasks"],
+        fallback_keywords=["社群任务", "community"],
+    )
+    if community_task_sheet and task_sheet and (_norm_sheet_name(community_task_sheet) == _norm_sheet_name(task_sheet)):
+        community_task_sheet = None
     if not task_sheet:
         wb.close()
-        raise HTTPException(status_code=400, detail=f"Excel未找到可用sheet: {upload.filename}")
-    _write_sheet_to_csv(wb[task_sheet], dst_csv)
+        raise HTTPException(status_code=400, detail="Excel未找到可用sheet：任务文件")
+
+    # 合并 任务文件 + 社群任务 到一个CSV
+    task_headers, task_rows = _rows_to_dicts_with_norm_headers(_sheet_rows(wb[task_sheet]))
+    community_rows: List[Dict[str, str]] = []
+    community_headers: List[str] = []
+    if community_task_sheet:
+        community_headers, community_rows = _rows_to_dicts_with_norm_headers(_sheet_rows(wb[community_task_sheet]))
+        for row in community_rows:
+            if not str(row.get("channels", "") or "").strip():
+                row["channels"] = "会员通-发送社群"
+
+    final_headers = list(_default_headers())
+    merged_rows = task_rows + community_rows
+    for r in merged_rows:
+        for k in r.keys():
+            if k and (k not in final_headers):
+                final_headers.append(k)
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as out:
+        writer = csv.DictWriter(out, fieldnames=final_headers)
+        writer.writeheader()
+        for r in merged_rows:
+            writer.writerow({k: r.get(k, "") for k in final_headers})
 
     store_sheet = _pick_sheet_name(
         names,
@@ -2147,6 +2312,13 @@ async def download_template_csv():
 
 @app.get("/api/template/xlsx")
 async def download_template_xlsx():
+    if CUSTOM_EXPORT_TEMPLATE_XLSX.exists():
+        return FileResponse(
+            path=str(CUSTOM_EXPORT_TEMPLATE_XLSX),
+            filename="精准营销任务模板（导入模板）.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
     p = UPLOAD_DIR / "精准营销任务模板.xlsx"
     try:
         write_template_xlsx(p)
@@ -2154,7 +2326,7 @@ async def download_template_xlsx():
         raise HTTPException(status_code=500, detail=str(e))
     return FileResponse(
         path=str(p),
-        filename="精准营销任务模板（统一模板）.xlsx",
+        filename="精准营销任务模板（导入模板）.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
