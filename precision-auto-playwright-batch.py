@@ -112,6 +112,9 @@ MAX_CONCURRENT = 3
 FEISHU_USER_ID = "ou_ed20f9990c63fa5448a0f2cd613ecf30"
 DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:9222"
 DEBUG_DROPDOWN_OPTIONS = os.getenv("PM_DEBUG_DROPDOWN_OPTIONS", "0").strip() in ("1", "true", "yes", "on")
+MOMENTS_UPLOAD_MODE = os.getenv("PM_MOMENTS_UPLOAD_MODE", "batch_then_slow").strip().lower()
+MOMENTS_UPLOAD_DELAY_SECONDS = float(os.getenv("PM_MOMENTS_UPLOAD_DELAY", "1.2") or 1.2)
+MOMENTS_UPLOAD_WAIT_SECONDS = float(os.getenv("PM_MOMENTS_UPLOAD_WAIT", "8") or 8)
 
 # ============ 工具函数 ============
 
@@ -1727,7 +1730,7 @@ async def fill_step3_sms_content(page, content: str) -> bool:
 
 
 async def upload_step3_moments_images(page, raw_paths: str):
-    """第3步朋友圈图片：按顺序逐张上传（最多9张，jpg/png且<10MB）。"""
+    """第3步朋友圈图片上传（稳态）：优先批量上传，失败后慢速逐张上传。"""
     img_paths_raw = parse_file_list(raw_paths)
     if not img_paths_raw:
         return False, "未提供图片路径"
@@ -1750,7 +1753,7 @@ async def upload_step3_moments_images(page, raw_paths: str):
             return False, f"图片超10MB: {path.name}"
         resolved.append(str(path))
 
-    # 定位朋友圈“添加图片”按钮（优先精准命中 .upload-btn + .text1=添加图片）
+    # 定位朋友圈“添加图片”区域（只做静默 set_input_files，避免弹系统文件夹）
     locate_info = await page.evaluate("""() => {
         const isVisible = (el) => {
             if (!el) return false;
@@ -1759,6 +1762,16 @@ async def upload_step3_moments_images(page, raw_paths: str):
             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
         };
         const normalize = (s) => (s || '').replace(/\\s+/g, '');
+
+        const markInputNear = (node) => {
+            const uploadWrap = node?.closest('.el-upload, .upload-btn, .avatar-uploader, .item, .el-form-item') || node;
+            if (!uploadWrap) return false;
+            let input = uploadWrap.querySelector('input[type="file"]');
+            if (!input && uploadWrap.parentElement) input = uploadWrap.parentElement.querySelector('input[type="file"]');
+            if (!input) return false;
+            input.setAttribute('data-step3-image-input', '1');
+            return true;
+        };
 
         // 路径1：精准命中 upload-btn 内 text1=添加图片
         const uploadBtns = Array.from(document.querySelectorAll('.upload-btn')).filter(isVisible);
@@ -1769,7 +1782,8 @@ async def upload_step3_moments_images(page, raw_paths: str):
             btn.setAttribute('data-step3-image-trigger', '1');
             const root = btn.closest('.item, .el-form-item, .ant-form-item, .channel, .module, .card') || btn.parentElement || btn;
             if (root) root.setAttribute('data-step3-image-root', '1');
-            return { ok: true, mode: 'upload-btn' };
+            const hasInput = markInputNear(btn);
+            return { ok: true, mode: 'upload-btn', hasInput };
         }
 
         // 路径2：全局文本命中“添加图片”，回溯到可点击容器
@@ -1781,61 +1795,131 @@ async def upload_step3_moments_images(page, raw_paths: str):
             clickable.setAttribute('data-step3-image-trigger', '1');
             const root = clickable.closest('.item, .el-form-item, .ant-form-item, .channel, .module, .card') || clickable.parentElement || clickable;
             if (root) root.setAttribute('data-step3-image-root', '1');
-            return { ok: true, mode: 'text-fallback' };
+            const hasInput = markInputNear(clickable);
+            return { ok: true, mode: 'text-fallback', hasInput };
         }
         return { ok: false, mode: 'not-found' };
     }""")
     if not locate_info or (not locate_info.get("ok")):
         return False, f"未找到“添加图片”上传入口（mode={locate_info.get('mode','unknown') if locate_info else 'unknown'}）"
 
-    trigger = page.locator('[data-step3-image-trigger="1"]').first
-    if await trigger.count() == 0:
-        return False, "上传入口不可用"
     print(f"      🧪 图片入口定位: {locate_info.get('mode', 'unknown')}")
 
-    for idx, file_path in enumerate(resolved, 1):
-        try:
-            await trigger.scroll_into_view_if_needed()
-        except Exception:
-            pass
+    async def _locate_image_input():
+        marked_input = page.locator('input[type="file"][data-step3-image-input="1"]').last
+        if await marked_input.count() > 0:
+            return marked_input
+        scoped_input = page.locator('[data-step3-image-root="1"] input[type="file"]').last
+        if await scoped_input.count() > 0:
+            return scoped_input
+        img_accept_input = page.locator('input[type="file"][accept*="image"], input[type="file"][accept*=".jpg"], input[type="file"][accept*=".png"]').last
+        if await img_accept_input.count() > 0:
+            return img_accept_input
+        file_input = page.locator('input[type="file"]').last
+        if await file_input.count() > 0:
+            return file_input
+        return None
 
-        uploaded = False
-        # 优先走 filechooser 触发链路（最接近真实用户）
-        try:
-            async with page.expect_file_chooser(timeout=3500) as fc_info:
-                try:
-                    await trigger.click(force=True)
-                except Exception:
-                    await page.evaluate("""() => {
-                        const t = document.querySelector('[data-step3-image-trigger="1"]');
-                        if (t) t.click();
-                    }""")
-            chooser = await fc_info.value
-            await chooser.set_files(file_path)
-            uploaded = True
-        except Exception:
-            uploaded = False
+    async def _read_upload_state(file_name: str = ""):
+        return await page.evaluate(
+            """(fn) => {
+                const root = document.querySelector('[data-step3-image-root="1"]') || document;
+                const txt = (root.textContent || '').replace(/\\s+/g, '');
+                const listCount =
+                    root.querySelectorAll('.el-upload-list__item').length ||
+                    root.querySelectorAll('[class*="upload-list"] [class*="item"]').length ||
+                    root.querySelectorAll('.name').length;
+                const hasName = fn ? txt.includes((fn || '').replace(/\\s+/g, '')) : false;
+                return { listCount, hasName };
+            }""",
+            file_name or "",
+        )
 
-        # 兜底：优先使用当前图片模块内 file input，再使用全局最后一个
-        if not uploaded:
-            try:
-                scoped_input = page.locator('[data-step3-image-root="1"] input[type="file"]').last
-                if await scoped_input.count() > 0:
-                    await scoped_input.set_input_files(file_path)
-                    uploaded = True
+    async def _wait_uploaded(file_name: str, before_count: int):
+        rounds = max(1, int(MOMENTS_UPLOAD_WAIT_SECONDS / 0.4))
+        for _ in range(rounds):
+            st = await _read_upload_state(file_name)
+            if (st.get("listCount", 0) > before_count) or st.get("hasName"):
+                return True, st
+            await asyncio.sleep(0.4)
+        st = await _read_upload_state(file_name)
+        return False, st
+
+    async def _all_names_present(paths: list[str]) -> bool:
+        names = [Path(p).name for p in paths]
+        return await page.evaluate(
+            """(arr) => {
+                const txt = (document.body?.innerText || document.body?.textContent || '').replace(/\\s+/g, '');
+                return (arr || []).every(n => txt.includes((n || '').replace(/\\s+/g, '')));
+            }""",
+            names,
+        )
+
+    async def _name_present(path: str) -> bool:
+        name = Path(path).name
+        return await page.evaluate(
+            """(n) => {
+                const txt = (document.body?.innerText || document.body?.textContent || '').replace(/\\s+/g, '');
+                return txt.includes((n || '').replace(/\\s+/g, ''));
+            }""",
+            name,
+        )
+
+    # 方案A：批量上传（静默 set_input_files，不触发 filechooser）
+    batch_ok = False
+    if MOMENTS_UPLOAD_MODE in ("batch_then_slow", "batch", "auto"):
+        try:
+            before = await _read_upload_state("")
+            input_el = await _locate_image_input()
+            if input_el is not None:
+                await input_el.set_input_files(resolved)
+            else:
+                raise RuntimeError("未找到图片上传input")
+
+            ok, st = await _wait_uploaded("", before.get("listCount", 0))
+            if ok:
+                batch_ok = True
+                print(f"      ✅ 批量上传图片成功: {len(resolved)}张")
+            else:
+                # 回读不稳定时，再用“全页面文件名命中”做二次确认，避免重复上传超9张
+                by_name_ok = await _all_names_present(resolved)
+                if by_name_ok:
+                    batch_ok = True
+                    print(f"      ✅ 批量上传按文件名校验通过: {len(resolved)}张")
                 else:
-                    file_input = page.locator('input[type="file"]').last
-                    if await file_input.count() > 0:
-                        await file_input.set_input_files(file_path)
-                        uploaded = True
-            except Exception:
-                uploaded = False
+                    print(f"      ⚠️ 批量上传回读未确认，切换慢速逐张上传: {st}")
+        except Exception as e:
+            print(f"      ⚠️ 批量上传失败，切换慢速逐张上传: {e}")
 
-        if not uploaded:
-            return False, f"第{idx}张上传失败: {Path(file_path).name}"
+    if not batch_ok:
+        # 方案B：慢速逐张上传（默认节奏更慢，降低限流概率）
+        weak_pass = 0
+        for idx, file_path in enumerate(resolved, 1):
+            # 已存在则不重复上传，防止超过“最多9张”
+            if await _name_present(file_path):
+                print(f"      ⏭️ 第{idx}张已存在，跳过重复上传: {Path(file_path).name}")
+                await asyncio.sleep(0.2)
+                continue
+            before = await _read_upload_state(Path(file_path).name)
+            input_el = await _locate_image_input()
+            if input_el is None:
+                return False, f"第{idx}张上传失败: 未找到图片上传input"
+            try:
+                await input_el.set_input_files(file_path)
+            except Exception as e:
+                return False, f"第{idx}张上传失败: {Path(file_path).name} ({e})"
 
-        print(f"      ✅ 已上传图片({idx}/{len(resolved)}): {Path(file_path).name}")
-        await asyncio.sleep(0.35)
+            ok, st = await _wait_uploaded(Path(file_path).name, before.get("listCount", 0))
+            if not ok:
+                weak_pass += 1
+                print(f"      ⚠️ 第{idx}张上传回读弱校验未命中，按已提交继续: {Path(file_path).name} (state={st})")
+            else:
+                print(f"      ✅ 已上传图片({idx}/{len(resolved)}): {Path(file_path).name}")
+
+            await asyncio.sleep(max(0.6, MOMENTS_UPLOAD_DELAY_SECONDS))
+
+        if weak_pass == len(resolved):
+            return True, f"已提交上传{len(resolved)}张（回读弱校验）"
 
     return True, f"已上传{len(resolved)}张"
 
@@ -6442,6 +6526,8 @@ async def fill_step3(
             print("   🧩 社群按条件筛选：已自动开启“包含加盟区域”")
 
         need_executor = customer_msg_required or moments_required or community_condition_mode
+        # 分配方式强校验仅用于社群渠道；1对1/朋友圈页面若不存在该控件不阻断。
+        mode_ok = True
         if need_executor or community_required:
             mode_ok = await set_step3_distribution_mode(
                 page,
@@ -6449,7 +6535,7 @@ async def fill_step3(
                 section_hint=("社群群发" if community_required else ""),
             )
             print(f"   ⚙️ 社群任务分配方式: {distribution_mode if mode_ok else '未找到分配方式控件'}")
-            if not mode_ok:
+            if community_required and (not mode_ok):
                 moments_gate_ok = False
                 moments_gate_errors.append("分配方式")
 
@@ -6550,7 +6636,8 @@ async def fill_step3(
             print("   🧩 添加小程序: ⏭️ 当前所选渠道无需填写，已跳过")
             results["第3步-添加小程序"] = True
 
-        if moments_required or community_required:
+        image_upload_required = moments_required or community_required or customer_msg_required
+        if image_upload_required:
             print(f"   🖼️ 朋友圈图片: {'需要上传' if moments_add_images else '不上传'}")
             if moments_add_images:
                 img_ok, img_msg = await upload_step3_moments_images(page, moments_image_paths)
@@ -6715,18 +6802,22 @@ async def fill_step3(
 
     # 保存判定兜底：若已命中核心保存接口请求，但页面偶发切到 about:blank/新标签导致响应捕获丢失，
     # 且页面无可见错误提示，则按弱成功放行，避免误判失败。
+    # 注意：朋友圈图片上传场景必须强校验，不允许弱放行。
     if (not saved_ok) and save_req_candidates:
         core_req_hit = any(_is_core_save_api(u) for _, u in save_req_candidates)
         if core_req_hit:
-            has_visible_error = await _has_visible_save_error()
-            if not has_visible_error:
-                if community_like:
-                    print("      ⚠️ 社群页已命中核心保存请求，且未检测到可见错误提示：按弱成功放行（防止about:blank误判）")
-                else:
-                    print("      ⚠️ 已命中核心保存请求，且未检测到可见错误提示：按弱成功放行（防止CDP标签页切换导致误判）")
-                saved_ok = True
+            if moments_required:
+                print("      ⚠️ 朋友圈图片场景启用强校验：已禁用弱成功放行")
             else:
-                print("      ⚠️ 已捕获保存请求，但页面存在错误提示，仍按失败处理")
+                has_visible_error = await _has_visible_save_error()
+                if not has_visible_error:
+                    if community_like:
+                        print("      ⚠️ 社群页已命中核心保存请求，且未检测到可见错误提示：按弱成功放行（防止about:blank误判）")
+                    else:
+                        print("      ⚠️ 已命中核心保存请求，且未检测到可见错误提示：按弱成功放行（防止CDP标签页切换导致误判）")
+                    saved_ok = True
+                else:
+                    print("      ⚠️ 已捕获保存请求，但页面存在错误提示，仍按失败处理")
         elif not community_like:
             print("      ⚠️ 已捕获保存请求，但未命中核心保存接口，按失败处理")
     try:
@@ -6739,6 +6830,9 @@ async def fill_step3(
         pass
     if (not saved_ok) and (not community_like):
         # 兜底：补点一次“主保存”后再次判定，规避首次点击命中错误按钮或点击未生效
+        if moments_required:
+            print(f"      ⚠️ 朋友圈图片强校验：上传后先等待{MOMENTS_UPLOAD_WAIT_SECONDS:.1f}s，再重试一次保存...")
+            await wait_and_log(page, MOMENTS_UPLOAD_WAIT_SECONDS, "图片上传后等待稳定...")
         print("      ⚠️ 首次保存未确认成功，补点一次主保存后重试判定...")
         retry_task = asyncio.get_running_loop().create_future()
         def _on_response_retry(r):

@@ -8,6 +8,7 @@ import re
 import shutil
 import sys
 import uuid
+import zipfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -62,6 +63,7 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "send_content": "发送内容",
     "group_send_name": "下发群名",
     "channels": "发送渠道",
+    "plan_image_id": "计划图片ID",
     "moments_add_images": "朋友圈是否上传图片",
     "moments_image_paths": "朋友圈图片路径(用|分隔)",
     "upload_stores": "是否上传门店",
@@ -79,6 +81,8 @@ HEADER_CN_TO_EN.update({
     "发送内容": "send_content",
     "短信内容": "sms_content",
     "主消费运营区": "main_operating_area",
+    "计划图片id": "plan_image_id",
+    "计划图片Id": "plan_image_id",
 })
 
 CHANNEL_CODE_TO_NAME: Dict[str, str] = {
@@ -219,6 +223,7 @@ def _default_headers() -> List[str]:
         "group_send_name",
         "send_content",
         "channels",
+        "plan_image_id",
         "moments_add_images",
         "moments_image_paths",
         "upload_stores",
@@ -320,7 +325,7 @@ def write_template_xlsx(path: Path) -> None:
         "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add",
         "辽宁省区、九江、南昌、广州二", "《目标商品 1》", "",
         "2026-03-30 08:00:00", "导入门店", "《目标门店1》", "福利",
-        "会员通-发送社群", "大参林健康", "测试1-卡片",
+        "会员通-发送社群", "1", "大参林健康", "测试1-卡片",
         "apps/member/integralMall/pages/home/index",
     ])
     ws_example.append([
@@ -330,7 +335,7 @@ def write_template_xlsx(path: Path) -> None:
         "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=594094287227023360",
         "《目标门店1》", "", "《券规则ID1》",
         "2026-03-30 08:00:00", "", "西北大区、湖北省区", "",
-        "会员通-发客户消息", "大参林健康", "测试1-卡片",
+        "会员通-发客户消息", "2", "大参林健康", "测试1-卡片",
         "apps/member/integralMall/pages/home/index",
     ])
     ws_example.append([
@@ -340,7 +345,7 @@ def write_template_xlsx(path: Path) -> None:
         "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702926159527936",
         "华南大区", "", "《券规则ID1》",
         "2026-03-30 08:00:00", "", "黑龙江省区、武汉营运区", "",
-        "会员通-发客户朋友圈", "", "", "",
+        "会员通-发客户朋友圈", "3", "", "", "",
     ])
     ws_example.append([
         "测试4-短信", "省区", "其他、26年3月积分换券", "", "",
@@ -348,7 +353,7 @@ def write_template_xlsx(path: Path) -> None:
         "定时-单次任务", "2026-03-28 08:00:00", "限制",
         "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702746907561984",
         "来宾、华中大区", "《目标商品 1》", "《券规则ID1》",
-        "", "", "", "", "短信", "", "", "",
+        "", "", "", "", "短信", "4", "", "", "",
     ])
     ws_store_1 = wb.create_sheet("目标门店 1")
     ws_store_1.append(["门店编码"])
@@ -457,6 +462,101 @@ def normalize_channels_in_csv(dst_csv: Path) -> None:
                 writer.writerow({k: row.get(k, "") for k in headers})
     except Exception:
         return
+
+
+def _parse_dt_for_upload(raw: str, *, end_of_day_for_date_only: bool = False) -> datetime:
+    s = str(raw or "").strip()
+    if not s:
+        raise ValueError("空值")
+    fmts = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+    )
+    for fmt in fmts:
+        try:
+            dt = datetime.strptime(s, fmt)
+            if fmt in ("%Y-%m-%d", "%Y/%m/%d") and end_of_day_for_date_only:
+                dt = dt.replace(hour=23, minute=59, second=59)
+            return dt
+        except Exception:
+            continue
+    raise ValueError(f"无法识别时间格式: {s}")
+
+
+def prevalidate_csv_time_fields(dst_csv: Path) -> None:
+    """
+    上传阶段前置校验，避免任务入列后才失败：
+    - 计划起止时间不能超过14天，且结束>=开始
+    - 发送时间不能小于当前时间
+    - 员工任务结束时间（若有）不能小于当前时间
+    """
+    with dst_csv.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not headers:
+        return
+
+    now_dt = datetime.now()
+    for i, row in enumerate(rows, start=1):
+        if not any(str(v or "").strip() for v in row.values()):
+            continue
+
+        start_s = str(row.get("start_time", "") or "").strip()
+        end_s = str(row.get("end_time", "") or "").strip()
+        send_s = str(row.get("send_time", "") or "").strip()
+        step3_end_s = str(row.get("step3_end_time", "") or "").strip()
+
+        if start_s and end_s:
+            try:
+                st = _parse_dt_for_upload(start_s)
+                et = _parse_dt_for_upload(end_s, end_of_day_for_date_only=True)
+                if et < st:
+                    raise HTTPException(status_code=400, detail=f"第{i}行：计划结束时间早于开始时间")
+                if (et - st).total_seconds() > 14 * 24 * 3600:
+                    raise HTTPException(status_code=400, detail=f"第{i}行：计划时间起止不能超过14天")
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"第{i}行：计划时间格式错误（计划开始时间/计划结束时间）: {e}")
+
+        if send_s:
+            try:
+                send_dt = _parse_dt_for_upload(send_s)
+                if send_dt < now_dt:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"第{i}行：发送时间不能小于当前时间"
+                            f"（send_time={send_dt.strftime('%Y-%m-%d %H:%M:%S')}，"
+                            f"now={now_dt.strftime('%Y-%m-%d %H:%M:%S')}）"
+                        ),
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"第{i}行：发送时间格式错误（发送时间）: {e}")
+
+        if step3_end_s:
+            try:
+                step3_dt = _parse_dt_for_upload(step3_end_s, end_of_day_for_date_only=True)
+                if step3_dt < now_dt:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"第{i}行：员工任务结束时间不能小于当前时间"
+                            f"（step3_end_time={step3_dt.strftime('%Y-%m-%d %H:%M:%S')}，"
+                            f"now={now_dt.strftime('%Y-%m-%d %H:%M:%S')}）"
+                        ),
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"第{i}行：员工任务结束时间格式错误: {e}")
 
 
 def _norm_sheet_name(name: str) -> str:
@@ -1245,6 +1345,7 @@ def parse_task_plans(csv_path: Path) -> List[dict]:
                         "index": idx,
                         "name": name,
                         "channels": channels,
+                        "plan_image_id": str(row.get("plan_image_id", "") or "").strip(),
                         "msg_add_mini_program": str(row.get("msg_add_mini_program", "") or "").strip() in {"是", "true", "True", "1"},
                         "moments_add_images": str(row.get("moments_add_images", "") or "").strip() in {"是", "true", "True", "1"},
                         "msg_mini_program_cover_path": str(row.get("msg_mini_program_cover_path", "") or "").strip(),
@@ -1355,6 +1456,154 @@ def apply_task_materials_to_csv(csv_path: Path, specs: List[dict]) -> int:
         for row in rows:
             writer.writerow({k: row.get(k, "") for k in headers})
     return touched
+
+
+def apply_plan_image_zip_to_csv(task_id: str, csv_path: Path, zip_bytes: bytes) -> Dict[str, int]:
+    """
+    批量图片包规则：
+    - CSV 字段 plan_image_id（计划图片ID）为数字
+    - zip 中子目录名需等于 plan_image_id，例如 1/2/3...
+    - 子目录内文件名包含“小卡” => 小程序封面（社群/1对1）
+    - 其余图片文件名按“文件名前缀数字”识别 1~9（如 1.jpg / 1-海报.jpg），按数字升序写入“添加图片”
+    """
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not headers:
+        raise HTTPException(status_code=400, detail="任务CSV无有效表头")
+
+    for col in (
+        "moments_add_images",
+        "moments_image_paths",
+        "plan_image_id",
+        "msg_add_mini_program",
+        "msg_mini_program_cover_path",
+    ):
+        if col not in headers:
+            headers.append(col)
+
+    group_moments: Dict[str, List[Tuple[int, str, bytes]]] = {}
+    group_mini: Dict[str, Tuple[str, bytes]] = {}
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except Exception:
+        raise HTTPException(status_code=400, detail="图片包格式错误，仅支持zip")
+
+    allowed_ext = {".jpg", ".jpeg", ".png"}
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        name = (info.filename or "").replace("\\", "/").strip("/")
+        if not name:
+            continue
+        if name.startswith("__MACOSX/"):
+            continue
+        if "/._" in name or name.startswith("._"):
+            continue
+        parts = name.split("/")
+        if len(parts) < 2:
+            continue
+        folder_raw = ""
+        m_pid = None
+        for seg in reversed(parts[:-1]):
+            seg = (seg or "").strip()
+            m = re.search(r"(\d+)", seg)
+            if m:
+                folder_raw = seg
+                m_pid = m
+                break
+        if not m_pid:
+            continue
+        folder = str(int(m_pid.group(1)))
+        base = Path(parts[-1]).stem.strip()
+        ext = Path(parts[-1]).suffix.lower()
+        if ext not in allowed_ext:
+            continue
+        blob = zf.read(info.filename)
+        if not blob:
+            continue
+        m_num = re.match(r"^(\d+)(?:$|[^0-9].*)", base)
+
+        # 小程序封面判定：
+        # 1) 文件名包含“小卡”
+        # 2) 或者文件名不以数字开头（兼容中文压缩包文件名编码异常导致“小卡”失真）
+        if ("小卡" in base) or (m_num is None):
+            # 同目录若有多个“小卡”，按文件名字典序取第一个，避免随机性
+            old = group_mini.get(folder)
+            if (old is None) or (parts[-1] < old[0]):
+                group_mini[folder] = (parts[-1], blob)
+            continue
+
+        # 其余按“前缀数字”识别顺序，支持 1.jpg / 1-xxx.jpg
+        n = int(m_num.group(1))
+        if n < 1 or n > 9:
+            continue
+        group_moments.setdefault(folder, []).append((n, parts[-1], blob))
+
+    matched = 0
+    updated = 0
+    updated_mini = 0
+    updated_moments = 0
+    for idx, row in enumerate(rows):
+        pid = str(row.get("plan_image_id", "") or "").strip()
+        if not pid:
+            continue
+        if not pid.isdigit():
+            raise HTTPException(status_code=400, detail=f"第{idx+1}行：计划图片ID必须为数字，当前={pid}")
+        imgs = group_moments.get(pid, [])
+        mini = group_mini.get(pid)
+        if (not imgs) and (not mini):
+            continue
+        matched += 1
+
+        channels = [p.strip() for p in re.split(r"[|,，、/]+", str(row.get("channels", "") or "")) if p.strip()]
+        channel_set = set(channels)
+        support_mini = bool({"会员通-发客户消息", "会员通-发送社群"} & channel_set)
+        support_moments = bool({"会员通-发客户消息", "会员通-发送社群", "会员通-发客户朋友圈"} & channel_set)
+
+        if mini and support_mini:
+            mini_name, mini_blob = mini
+            mini_path = save_uploaded_mini_program_cover(
+                f"{task_id}_pid{pid}_r{idx+1}",
+                (mini_name, mini_blob),
+            )
+            if mini_path:
+                row["msg_add_mini_program"] = "是"
+                row["msg_mini_program_cover_path"] = mini_path
+                updated = updated + 1
+                updated_mini = updated_mini + 1
+
+        if imgs and support_moments:
+            imgs.sort(key=lambda x: x[0])
+            nums = [n for n, _, _ in imgs]
+            uniq = []
+            for n in nums:
+                if n not in uniq:
+                    uniq.append(n)
+            if len(uniq) != len(nums):
+                raise HTTPException(status_code=400, detail=f"计划图片ID={pid} 子目录图片序号重复，请确保1~9唯一")
+            if uniq != list(range(1, len(uniq) + 1)):
+                raise HTTPException(status_code=400, detail=f"计划图片ID={pid} 子目录图片需按1开始连续命名（1,2,3...）")
+            blobs = [(fname, b) for _, fname, b in imgs]
+            out_paths = save_uploaded_moments_images(f"{task_id}_pid{pid}_r{idx+1}", blobs)
+            if out_paths:
+                row["moments_add_images"] = "是"
+                row["moments_image_paths"] = "|".join(out_paths)
+                updated = updated + 1
+                updated_moments = updated_moments + 1
+
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in headers})
+    return {
+        "matched": matched,
+        "updated": updated,
+        "updated_mini": updated_mini,
+        "updated_moments": updated_moments,
+    }
 
 
 def _parse_channel_list(raw: str) -> List[str]:
@@ -1860,6 +2109,35 @@ async def save_task_materials(
     return JSONResponse({"task_id": task_id, "updated_plans": touched})
 
 
+@app.post("/api/tasks/{task_id}/materials/image-pack")
+async def upload_task_image_pack(
+    task_id: str,
+    image_pack: UploadFile = File(...),
+) -> JSONResponse:
+    task = await runner.get_task(task_id)
+    csv_path = Path(task.file_path)
+    if not csv_path.exists():
+        raise HTTPException(status_code=404, detail="Task file not found")
+    if not image_pack.filename:
+        raise HTTPException(status_code=400, detail="未选择图片包文件")
+    if not image_pack.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="图片包仅支持 .zip")
+    data = await image_pack.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="图片包为空")
+
+    stat = apply_plan_image_zip_to_csv(task_id, csv_path, data)
+    return JSONResponse(
+        {
+            "task_id": task_id,
+            "matched_plans": stat.get("matched", 0),
+            "updated_plans": stat.get("updated", 0),
+            "updated_mini": stat.get("updated_mini", 0),
+            "updated_moments": stat.get("updated_moments", 0),
+        }
+    )
+
+
 @app.get("/api/template/csv")
 async def download_template_csv():
     p = UPLOAD_DIR / "精准营销任务模板_防乱码.csv"
@@ -2036,6 +2314,8 @@ async def upload_tasks(
         if resolved_step2_product_blob:
             step2_product_path = save_uploaded_step2_product_file(tid, resolved_step2_product_blob)
             inject_step2_product_file_to_csv(dst, step2_product_path)
+        # 上传阶段前置时间校验：提前拦截“结束时间/发送时间小于当前时间”等错误
+        prevalidate_csv_time_fields(dst)
         # 关键：一个上传文件内若有多条计划，拆成多条任务记录（每条计划一条任务）
         split_files = split_csv_to_single_plan_files(dst, stem)
         op = operator.strip() or os.getenv("USER") or getpass.getuser() or "unknown"
@@ -3663,6 +3943,11 @@ UI_HTML = """
       </div>
     </div>
     <div class="material-note"><b>说明：</b>可按计划补充/覆盖素材，保存后回写任务CSV；执行/重试时按最新素材运行。</div>
+    <div class="row" style="margin:8px 0 6px 0;gap:10px;align-items:center;flex-wrap:wrap">
+      <input id="imagePackFile" type="file" accept=".zip" class="file-uniform"/>
+      <button class="secondary" onclick="uploadImagePackForTask()">批量导入图片包（按计划图片ID）</button>
+      <span class="tiny">zip结构：计划图片ID/小卡.jpg（小程序封面）+ 1.jpg..9.jpg（添加图片，按序）</span>
+    </div>
     <div id="materialRows"></div>
   </div>
 </div>
@@ -4106,7 +4391,7 @@ function renderMaterialRows(){
     const chips = (p.moments_image_paths || '').split('|').filter(Boolean).map(x => `<span class="path-chip">${esc(x.split('/').pop())}</span>`).join('');
     return `
       <div class="material-row" data-idx="${idx}">
-        <h4>计划${idx + 1}：${esc(p.name)} <span class="tiny">（渠道：${esc(p.channels || '-')}）</span></h4>
+        <h4>计划${idx + 1}：${esc(p.name)} <span class="tiny">（渠道：${esc(p.channels || '-')}，计划图片ID：${esc(p.plan_image_id || '-')}）</span></h4>
         <div class="material-grid">
           <div class="material-upload-block ${mini ? '' : 'hidden'}">
             <div class="material-upload-title">小程序封面</div>
@@ -4164,6 +4449,7 @@ async function openMaterialModal(id){
     index: Number(p.index),
     name: p.name || '',
     channels: p.channels || '',
+    plan_image_id: p.plan_image_id || '',
     msg_add_mini_program: !!p.msg_add_mini_program,
     moments_add_images: !!p.moments_add_images,
     msg_mini_program_cover_path: p.msg_mini_program_cover_path || '',
@@ -4175,6 +4461,29 @@ async function openMaterialModal(id){
   renderMaterialRows();
   const m = document.getElementById('materialModal');
   if(m) m.classList.add('open');
+}
+
+async function uploadImagePackForTask(){
+  if(!materialTaskId){
+    alert('请先选择任务');
+    return;
+  }
+  const inp = document.getElementById('imagePackFile');
+  const f = inp && inp.files && inp.files[0];
+  if(!f){
+    alert('请先选择zip图片包');
+    return;
+  }
+  const fd = new FormData();
+  fd.append('image_pack', f, f.name || 'images.zip');
+  const resp = await fetch(`/api/tasks/${materialTaskId}/materials/image-pack`, {method:'POST', body:fd});
+  if(!resp.ok){
+    alert(await resp.text());
+    return;
+  }
+  const data = await resp.json();
+  alert(`图片包导入完成：匹配 ${data.matched_plans || 0} 条，更新 ${data.updated_plans || 0} 条（小程序 ${data.updated_mini || 0}，图片 ${data.updated_moments || 0}）`);
+  await openMaterialModal(materialTaskId);
 }
 
 async function saveTaskMaterials(){
