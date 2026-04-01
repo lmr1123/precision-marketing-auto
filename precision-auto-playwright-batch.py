@@ -113,7 +113,7 @@ FEISHU_USER_ID = "ou_ed20f9990c63fa5448a0f2cd613ecf30"
 DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:9222"
 DEBUG_DROPDOWN_OPTIONS = os.getenv("PM_DEBUG_DROPDOWN_OPTIONS", "0").strip() in ("1", "true", "yes", "on")
 MOMENTS_UPLOAD_MODE = os.getenv("PM_MOMENTS_UPLOAD_MODE", "batch_then_slow").strip().lower()
-MOMENTS_UPLOAD_DELAY_SECONDS = float(os.getenv("PM_MOMENTS_UPLOAD_DELAY", "1.2") or 1.2)
+MOMENTS_UPLOAD_DELAY_SECONDS = float(os.getenv("PM_MOMENTS_UPLOAD_DELAY", "1.4") or 1.4)
 MOMENTS_UPLOAD_WAIT_SECONDS = float(os.getenv("PM_MOMENTS_UPLOAD_WAIT", "8") or 8)
 
 # ============ 工具函数 ============
@@ -1236,6 +1236,22 @@ def resolve_channels_for_plan(plan: dict, step3_channels_override: str = "") -> 
     return parse_step3_channels(step3_channels_override)
 
 
+def infer_channels_from_create_url(url: str) -> list:
+    """当计划行未写 channels 时，按创建链接反推渠道，避免被全局覆盖误伤。"""
+    u = (url or "").strip()
+    if not u:
+        return []
+    if "addcommunityPlan" in u:
+        return ["会员通-发送社群"]
+    for ch, cu in CHANNEL_CREATE_URLS.items():
+        if cu and cu in u:
+            return [ch]
+    for combo, cu in CHANNEL_COMBO_CREATE_URLS.items():
+        if cu and cu in u:
+            return list(combo)
+    return []
+
+
 def resolve_base_url_by_channel(
     plan: dict,
     step3_channels_override: str = "",
@@ -1916,7 +1932,11 @@ async def upload_step3_moments_images(page, raw_paths: str):
             else:
                 print(f"      ✅ 已上传图片({idx}/{len(resolved)}): {Path(file_path).name}")
 
-            await asyncio.sleep(max(0.6, MOMENTS_UPLOAD_DELAY_SECONDS))
+            # 后几张更容易触发后端上传并发限流，追加稳态等待
+            extra_wait = 0.0
+            if idx >= 7:
+                extra_wait = 0.8
+            await asyncio.sleep(max(0.8, MOMENTS_UPLOAD_DELAY_SECONDS) + extra_wait)
 
         if weak_pass == len(resolved):
             return True, f"已提交上传{len(resolved)}张（回读弱校验）"
@@ -1932,7 +1952,9 @@ async def fill_step3_message_mini_program(
     page_path: str,
 ):
     """第3步（会员通-发客户消息）添加小程序。"""
-    program_name = (program_name or "大参林健康").strip()
+    raw_program_name = (program_name or "大参林健康").strip()
+    _program_candidates = [x.strip() for x in re.split(r"[、,，/|]", raw_program_name) if x.strip()]
+    program_name = (_program_candidates[0] if _program_candidates else "大参林健康").strip()
     program_title = (program_title or "").strip()
     page_path = (page_path or "").strip()
     cover_path = os.path.expanduser((cover_path or "").strip())
@@ -2387,6 +2409,10 @@ async def fill_step3_message_mini_program(
             diag = {}
         if diag:
             print(f"      🧪 小程序下拉诊断: curr={diag.get('curr','')}, opts={diag.get('opts',[])}")
+            curr = str(diag.get("curr", "") or "").replace(" ", "")
+            expect = str(program_name or "").replace(" ", "")
+            if curr and ("请选择" not in curr) and ((expect and expect in curr) or ("大参林" in curr)):
+                selected_ok = True
         if not option_diag:
             try:
                 option_diag = await page.evaluate("""() => {
@@ -2404,8 +2430,9 @@ async def fill_step3_message_mini_program(
                 }""")
             except Exception:
                 option_diag = []
-        d = (" / 可见选项=" + "、".join(option_diag[:6])) if option_diag else ""
-        errors.append(f"配置小程序未选中: {program_name}{d}")
+        if not selected_ok:
+            d = (" / 可见选项=" + "、".join(option_diag[:6])) if option_diag else ""
+            errors.append(f"配置小程序未选中: {program_name}{d}")
 
     try:
         title_input = None
@@ -2964,6 +2991,7 @@ async def ensure_step3_saved(page, save_resp_task=None, before_url: str = "") ->
     api_body = ""
     api_success = False
     api_hard_fail = False
+    api_retryable_fail = False
     if save_resp_task is not None:
         try:
             resp = await asyncio.wait_for(save_resp_task, timeout=12)
@@ -3006,6 +3034,13 @@ async def ensure_step3_saved(page, save_resp_task=None, before_url: str = "") ->
                 msg_norm = str(msg or "").strip().lower()
                 if any(k in msg_norm for k in ["失败", "错误", "非法", "不能为空", "未通过", "重复"]):
                     api_hard_fail = True
+                # 特例：朋友圈图片上传偶发接口并发限流（45033），可等待后重试保存一次
+                if (
+                    str(code or "").strip() == "45033"
+                    or ("并发调用超过限制" in str(msg or ""))
+                ):
+                    api_retryable_fail = True
+                    api_hard_fail = False
                 content_diag = summarize_content_fields_from_payload(post_data)
                 if content_diag:
                     print(f"      🧪 请求体内容字段诊断: {content_diag}")
@@ -3061,6 +3096,15 @@ async def ensure_step3_saved(page, save_resp_task=None, before_url: str = "") ->
         except Exception:
             pass
         await asyncio.sleep(0.2)
+
+    # 接口已明确失败：直接中断（避免“页面无提示但后端返回失败”被误判成功）
+    if api_hard_fail:
+        suffix = f" | {api_diag}" if api_diag else ""
+        raise RuntimeError(f"保存接口失败{suffix}")
+    if api_retryable_fail:
+        suffix = f" | {api_diag}" if api_diag else ""
+        print(f"      ⚠️ 检测到可重试保存失败（上传并发限流）{suffix}")
+        return False
 
     # 无 toast 时，回退到 URL / 接口判定：
     # 1) 优先识别真实跳转（viewPlan/editPlan/列表）
@@ -4069,12 +4113,12 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
             const wrappers = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap')).filter(isVisible);
             for (const w of wrappers) {
                 const txt = norm(w.textContent || '');
-                if (txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消')) return true;
+                if (txt.includes('选择员工')) return true;
             }
             const dialogs = Array.from(document.querySelectorAll('.el-dialog, .ant-modal')).filter(isVisible);
             for (const d of dialogs) {
                 const txt = norm(d.textContent || '');
-                if (txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消')) return true;
+                if (txt.includes('选择员工')) return true;
             }
             return false;
         }""")
@@ -4096,7 +4140,7 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
             const pickModal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
                 if (!isVisible(d)) return false;
                 const txt = norm(d.textContent || '');
-                return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+                return txt.includes('选择员工');
             });
             if (!pickModal) return false;
             const tgt = norm(target);
@@ -4161,7 +4205,7 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
             const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
                 if (!isVisible(d)) return false;
                 const txt = (d.textContent || '').replace(/\\s+/g, '');
-                return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+                return txt.includes('选择员工');
             });
             if (!modal) return false;
             const btn = Array.from(modal.querySelectorAll('button,span,a,div')).find(el => {
@@ -4188,7 +4232,7 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
             const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
                 if (!isVisible(d)) return false;
                 const txt = (d.textContent || '').replace(/\\s+/g, '');
-                return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+                return txt.includes('选择员工');
             });
             if (!modal) return false;
             let btn = Array.from(modal.querySelectorAll('button.el-button.el-button--success.el-button--mini')).find(el => {
@@ -4225,7 +4269,7 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
             const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
                 if (!isVisible(d)) return false;
                 const txt = (d.textContent || '').replace(/\\s+/g, '');
-                return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+                return txt.includes('选择员工');
             });
             if (!modal) return false;
             // 1) 首选 footer 内主按钮（最稳定）
@@ -4282,7 +4326,7 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
                 const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
                     if (!isVisible(d)) return false;
                     const txt = norm(d.textContent || '');
-                    return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+                    return txt.includes('选择员工');
                 });
                 if (!modal) return '';
                 const cand = modal.querySelector('.el-tree-node.is-current .el-tree-node__label')
@@ -4343,7 +4387,7 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
                 const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
                     if (!isVisible(d)) return false;
                     const txt = norm(d.textContent || '');
-                    return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+                    return txt.includes('选择员工');
                 });
                 if (!modal) return 0;
                 const txt = norm(modal.textContent || '');
@@ -4385,7 +4429,7 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
                 const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
                     if (!isVisible(d)) return false;
                     const txt = norm(d.textContent || '');
-                    return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+                    return txt.includes('选择员工');
                 });
                 if (!modal) return 0;
                 const txt = norm(modal.textContent || '');
@@ -4403,6 +4447,45 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
             }""") or 0)
         except Exception:
             return 0
+
+    async def modal_target_checked(target: str) -> bool:
+        """判定当前目标节点是否被选中（用于“添加全部后人数未增长”的去重场景）。"""
+        try:
+            return bool(await page.evaluate("""(target) => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                };
+                const norm = (s) => (s || '').replace(/\\s+/g, '');
+                const tgt = norm(target || '');
+                const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
+                    if (!isVisible(d)) return false;
+                    const txt = norm(d.textContent || '');
+                    return txt.includes('选择员工');
+                });
+                if (!modal || !tgt) return false;
+                const rows = Array.from(modal.querySelectorAll('.el-tree-node__content')).filter(isVisible);
+                let hit = null;
+                let best = -1;
+                for (const row of rows) {
+                    const lb = row.querySelector('.el-tree-node__label');
+                    const txt = norm(lb ? lb.textContent : row.textContent || '');
+                    if (!txt) continue;
+                    let score = -1;
+                    if (txt === tgt) score = 3;
+                    else if (txt.includes(tgt)) score = 2;
+                    else if (!tgt.includes('加盟') && tgt.includes(txt)) score = 1;
+                    if (score > best) { best = score; hit = row; }
+                }
+                if (!hit || best < 0) return false;
+                const box = hit.querySelector('.el-checkbox__input') || hit.querySelector('.el-checkbox');
+                const cls = box ? (box.className || '') : '';
+                return cls.includes('is-checked') || cls.includes('checked');
+            }""", target))
+        except Exception:
+            return False
 
     if not await open_picker():
         print("      ⚠️ 按条件筛选客户-未找到“选择员工”入口")
@@ -4486,9 +4569,11 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
                         break
             selected_now = await read_selected_count()
             print(f"      🧪 添加全部后右侧已选条数: before={modal_added_before}, after={modal_added_now}, target={t}")
-            if modal_added_now > modal_added_before:
+            target_checked = await modal_target_checked(t)
+            if (modal_added_now > modal_added_before) or target_checked:
                 picked_any = True
-                modal_added_before = modal_added_now
+                if modal_added_now > modal_added_before:
+                    modal_added_before = modal_added_now
                 selected_before = max(selected_before, selected_now)
             else:
                 print(f"      ⚠️ 添加全部后右侧已选条数未增长，判定未生效: {t}")
@@ -4506,7 +4591,7 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
                 const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
                     if (!isVisible(d)) return false;
                     const txt = (d.textContent || '').replace(/\\s+/g, '');
-                    return txt.includes('选择员工') && txt.includes('确定') && txt.includes('取消');
+                    return txt.includes('选择员工');
                 });
                 if (!modal) return { found: false, buttons: [], preview: '' };
                 const btns = Array.from(modal.querySelectorAll('button,span,a,div'))
@@ -6404,6 +6489,11 @@ async def fill_step3(
     
     results = {}
     selected_channels = resolve_channels_for_plan(data, step3_channels_override)
+    if (len(selected_channels) > 1) and (not parse_step3_channels(str(data.get("channels", "") or ""))):
+        inferred = infer_channels_from_create_url(str(data.get("create_url", "") or ""))
+        if inferred:
+            selected_channels = inferred
+            print(f"   🧪 渠道收敛: 未读取到计划行渠道，按创建链接推断为 {'、'.join(selected_channels)}")
     if selected_channels:
         print(f"   📡 渠道选择: {'、'.join(selected_channels)}")
     else:
@@ -6483,6 +6573,7 @@ async def fill_step3(
     moments_gate_ok = True
     moments_gate_errors = []
     message_like_required = customer_msg_required or moments_required or community_required
+    image_upload_enabled = False
     if message_like_required:
         if has_channel_filter:
             if community_required:
@@ -6637,6 +6728,7 @@ async def fill_step3(
             results["第3步-添加小程序"] = True
 
         image_upload_required = moments_required or community_required or customer_msg_required
+        image_upload_enabled = bool(image_upload_required and moments_add_images)
         if image_upload_required:
             print(f"   🖼️ 朋友圈图片: {'需要上传' if moments_add_images else '不上传'}")
             if moments_add_images:
@@ -6699,6 +6791,10 @@ async def fill_step3(
     print("\n   ✅ 第3步完成")
     
     print("   💾 点击保存...")
+    if image_upload_enabled:
+        settle = max(2.5, min(6.0, MOMENTS_UPLOAD_WAIT_SECONDS * 0.6))
+        print(f"      ⏳ 图片上传稳态等待 {settle:.1f}s（避免接口并发限流）...")
+        await asyncio.sleep(settle)
     sms_before_save = await read_step3_sms_text(page) if sms_required else ""
     if sms_required and len(sms_before_save) == 0 and sms_content:
         print("      ⚠️ 保存前短信为空，执行一次重填...")
@@ -6806,18 +6902,17 @@ async def fill_step3(
     if (not saved_ok) and save_req_candidates:
         core_req_hit = any(_is_core_save_api(u) for _, u in save_req_candidates)
         if core_req_hit:
-            if moments_required:
-                print("      ⚠️ 朋友圈图片场景启用强校验：已禁用弱成功放行")
-            else:
-                has_visible_error = await _has_visible_save_error()
-                if not has_visible_error:
-                    if community_like:
-                        print("      ⚠️ 社群页已命中核心保存请求，且未检测到可见错误提示：按弱成功放行（防止about:blank误判）")
-                    else:
-                        print("      ⚠️ 已命中核心保存请求，且未检测到可见错误提示：按弱成功放行（防止CDP标签页切换导致误判）")
-                    saved_ok = True
+            has_visible_error = await _has_visible_save_error()
+            if not has_visible_error:
+                if image_upload_enabled:
+                    print("      ⚠️ 图片上传场景：已命中核心保存请求且未检测到失败信号，按已提交放行")
+                elif community_like:
+                    print("      ⚠️ 社群页已命中核心保存请求，且未检测到可见错误提示：按弱成功放行（防止about:blank误判）")
                 else:
-                    print("      ⚠️ 已捕获保存请求，但页面存在错误提示，仍按失败处理")
+                    print("      ⚠️ 已命中核心保存请求，且未检测到可见错误提示：按弱成功放行（防止CDP标签页切换导致误判）")
+                saved_ok = True
+            else:
+                print("      ⚠️ 已捕获保存请求，但页面存在错误提示，仍按失败处理")
         elif not community_like:
             print("      ⚠️ 已捕获保存请求，但未命中核心保存接口，按失败处理")
     try:
@@ -6830,8 +6925,8 @@ async def fill_step3(
         pass
     if (not saved_ok) and (not community_like):
         # 兜底：补点一次“主保存”后再次判定，规避首次点击命中错误按钮或点击未生效
-        if moments_required:
-            print(f"      ⚠️ 朋友圈图片强校验：上传后先等待{MOMENTS_UPLOAD_WAIT_SECONDS:.1f}s，再重试一次保存...")
+        if image_upload_enabled:
+            print(f"      ⚠️ 图片上传强校验：上传后先等待{MOMENTS_UPLOAD_WAIT_SECONDS:.1f}s，再重试一次保存...")
             await wait_and_log(page, MOMENTS_UPLOAD_WAIT_SECONDS, "图片上传后等待稳定...")
         print("      ⚠️ 首次保存未确认成功，补点一次主保存后重试判定...")
         retry_task = asyncio.get_running_loop().create_future()

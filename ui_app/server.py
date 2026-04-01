@@ -2202,6 +2202,9 @@ async def upload_tasks(
     operator: str = Form(""),
 ) -> JSONResponse:
     created = []
+    created_task_ids: List[str] = []
+    zip_files: List[UploadFile] = []
+    task_files: List[UploadFile] = []
     options = TaskOptions(
         connect_cdp=connect_cdp,
         cdp_endpoint=cdp_endpoint.strip(),
@@ -2216,6 +2219,19 @@ async def upload_tasks(
         create_url=create_url.strip(),
         executor_include_franchise=executor_include_franchise,
     )
+
+    # 支持一次上传多个文件：CSV/XLSX 任务文件 + ZIP 图片包
+    for f in files:
+        name = str(f.filename or "").lower()
+        if name.endswith(".zip"):
+            zip_files.append(f)
+        elif name.endswith(".csv") or name.endswith(".xlsx"):
+            task_files.append(f)
+        else:
+            raise HTTPException(status_code=400, detail=f"仅支持 CSV/XLSX/ZIP：{f.filename}")
+
+    if not task_files:
+        raise HTTPException(status_code=400, detail="请至少上传一个 CSV 或 XLSX 任务文件")
 
     # 朋友圈图片（由本UI上传），按上传顺序透传到任务CSV
     image_blobs: List[tuple[str, bytes]] = []
@@ -2258,10 +2274,8 @@ async def upload_tasks(
         if b:
             step2_product_blob = (step2_product_file.filename or "step2_product.xlsx", b)
 
-    for f in files:
+    for f in task_files:
         lower = f.filename.lower()
-        if not (lower.endswith(".csv") or lower.endswith(".xlsx")):
-            raise HTTPException(status_code=400, detail=f"Only CSV/XLSX supported: {f.filename}")
         tid = str(uuid.uuid4())
         stem = Path(f.filename).stem
         dst = UPLOAD_DIR / f"{tid}_{stem}.csv"
@@ -2350,7 +2364,33 @@ async def upload_tasks(
             )
             await runner.add_task(task, auto_start=False)
             created.append(task.to_dict())
-    return JSONResponse({"created": created})
+            created_task_ids.append(task.id)
+
+    # 若同批上传了图片ZIP包，则自动按“计划图片ID”写回每个新任务CSV
+    zip_apply_stats: List[dict] = []
+    if zip_files and created_task_ids:
+        for zf in zip_files:
+            zname = zf.filename or "images.zip"
+            data = await zf.read()
+            if (not data) or (not zname.lower().endswith(".zip")):
+                continue
+            for task_id in created_task_ids:
+                task = await runner.get_task(task_id)
+                csv_path = Path(task.file_path)
+                if not csv_path.exists():
+                    continue
+                stat = apply_plan_image_zip_to_csv(task_id, csv_path, data)
+                zip_apply_stats.append(
+                    {
+                        "task_id": task_id,
+                        "zip": zname,
+                        "matched_plans": stat.get("matched", 0),
+                        "updated_plans": stat.get("updated", 0),
+                        "updated_mini": stat.get("updated_mini", 0),
+                        "updated_moments": stat.get("updated_moments", 0),
+                    }
+                )
+    return JSONResponse({"created": created, "zip_applied": zip_apply_stats})
 
 
 @app.post("/api/tasks/{task_id}/retry")
@@ -3845,8 +3885,8 @@ UI_HTML = """
             <div>
               <div class="up-icon">☁</div>
               <div class="up-title">点击或将文件拖拽至此</div>
-              <div class="up-sub">支持 .csv, .xlsx 格式 (最大 50MB)</div>
-              <input id="files" class="file-uniform hidden" type="file" multiple accept=".csv,.xlsx"/>
+              <div class="up-sub">支持 .csv, .xlsx, .zip 格式 (最大 50MB)</div>
+              <input id="files" class="file-uniform hidden" type="file" multiple accept=".csv,.xlsx,.zip"/>
             </div>
           </div>
           <div id="uploadHint" class="tiny" style="margin-top:8px;min-height:20px;opacity:.9;"></div>
@@ -4149,8 +4189,14 @@ async function upload(){
       setUploadHint(`上传失败：${errText}`, false);
       alert(errText);
     } else {
+      const data = await r.json();
       await refreshTasks();
-      setUploadHint('上传文件成功，已加入任务列表。', true);
+      const zipApplied = Array.isArray(data.zip_applied) ? data.zip_applied.length : 0;
+      if(zipApplied > 0){
+        setUploadHint(`上传成功，已生成任务并自动写入图片包素材（${zipApplied} 条任务应用）。`, true);
+      }else{
+        setUploadHint('上传文件成功，已加入任务列表。', true);
+      }
     }
   } finally {
     fileInput.value = '';
