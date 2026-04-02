@@ -1201,11 +1201,25 @@ def normalize_area_alias(area: str) -> str:
     a = (area or "").strip()
     if not a:
         return a
+    # 先处理“xx加盟”后缀，标准化后再补回。
+    is_join = a.endswith("加盟")
+    base = a[:-2] if is_join else a
     alias_map = {
         "郑州": "大郑州营运区",
         "郑州加盟": "大郑州营运区加盟",
+        "武汉": "武汉营运区",
+        "武汉加盟": "武汉营运区加盟",
     }
-    return alias_map.get(a, a)
+    hit = alias_map.get(a)
+    if hit:
+        return hit
+
+    # 业务侧常直接给“广州一/广州二/花都/番禺/佛山...”等营运区简称。
+    # 规则：若不包含层级关键词，则按营运区简称补全为“xx营运区”。
+    if not any(k in base for k in ("全国", "大区", "省区", "营运区", "片区", "门店", "店")):
+        base = f"{base}营运区"
+
+    return f"{base}加盟" if is_join else base
 
 
 def normalize_area_for_step2(area: str) -> str:
@@ -3868,20 +3882,26 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
         menu = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(menu_index)
         nodes = menu.locator(".el-cascader-node")
         count = await nodes.count()
+        target_has_join = ("加盟" in (target or ""))
         for i in range(count):
             node = nodes.nth(i)
             label = node.locator(".el-cascader-node__label").first
             if await label.count() == 0:
                 continue
             txt = ((await label.text_content()) or "").strip()
-            if txt != target and target not in txt:
+            txt_has_join = ("加盟" in txt)
+            if target_has_join != txt_has_join:
+                continue
+            # 兼容简称/全称（如 广州一 <-> 广州一营运区）双向匹配
+            if txt != target and target not in txt and txt not in target:
                 continue
             await node.scroll_into_view_if_needed()
             postfix = node.locator(".el-cascader-node__postfix").first
             if await postfix.count() > 0:
                 await postfix.click(force=True)
             else:
-                await label.click(force=True)
+                # 避免点击label触发勾选（尤其“全国”），没有展开箭头时不执行展开点击。
+                return False
             await asyncio.sleep(0.2)
             return True
         return False
@@ -3892,13 +3912,17 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
         count = await nodes.count()
         if count == 0:
             return "panel_not_found"
+        target_has_join = ("加盟" in (target or ""))
         for i in range(count):
             node = nodes.nth(i)
             label = node.locator(".el-cascader-node__label").first
             if await label.count() == 0:
                 continue
             txt = ((await label.text_content()) or "").strip()
-            if txt != target and target not in txt:
+            txt_has_join = ("加盟" in txt)
+            if target_has_join != txt_has_join:
+                continue
+            if txt != target and target not in txt and txt not in target:
                 continue
             cb = node.locator(".el-checkbox__input").first
             if await cb.count() == 0:
@@ -3913,13 +3937,17 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
         menu = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(menu_index)
         nodes = menu.locator(".el-cascader-node")
         count = await nodes.count()
+        target_has_join = ("加盟" in (target or ""))
         for i in range(count):
             node = nodes.nth(i)
             label = node.locator(".el-cascader-node__label").first
             if await label.count() == 0:
                 continue
             txt = ((await label.text_content()) or "").strip()
-            if txt != target and target not in txt:
+            txt_has_join = ("加盟" in txt)
+            if target_has_join != txt_has_join:
+                continue
+            if txt != target and target not in txt and txt not in target:
                 continue
             cb = node.locator(".el-checkbox__input").first
             if await cb.count() == 0:
@@ -3934,13 +3962,17 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
         menu = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(menu_index)
         nodes = menu.locator(".el-cascader-node")
         count = await nodes.count()
+        target_has_join = ("加盟" in (target or ""))
         for i in range(count):
             node = nodes.nth(i)
             label = node.locator(".el-cascader-node__label").first
             if await label.count() == 0:
                 continue
             txt = ((await label.text_content()) or "").strip()
-            if txt != target and target not in txt:
+            txt_has_join = ("加盟" in txt)
+            if target_has_join != txt_has_join:
+                continue
+            if txt != target and target not in txt and txt not in target:
                 continue
             checkbox = node.locator(".el-checkbox__input").first
             if await checkbox.count() == 0:
@@ -3971,6 +4003,46 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
     await expand_in_menu(0, "全国")
 
     selected = {t: False for t in targets}
+    # 路径提示优先：确保先展开到“省区”再勾选“营运区/加盟营运区”
+    area_path_hints = {
+        "黑龙江省区": ["北方大区", "黑龙江省区"],
+        "黑龙江省区加盟": ["北方大区加盟", "黑龙江省区加盟"],
+        "武汉营运区": ["华中大区", "湖北省区", "武汉营运区"],
+        "武汉营运区加盟": ["华中大区加盟", "湖北省区加盟", "武汉营运区加盟"],
+        "广佛省区": ["华南大区", "广佛省区"],
+        "广佛省区加盟": ["华南大区加盟", "广佛省区加盟"],
+        "大郑州营运区": ["西北大区", "河南省区", "大郑州营运区"],
+        "大郑州营运区加盟": ["西北大区加盟", "河南省区加盟", "大郑州营运区加盟"],
+        # 广佛省区常用简称（从文件主消费营运区复用到执行员工）
+        "广州一营运区": ["华南大区", "广佛省区", "广州一营运区"],
+        "广州一营运区加盟": ["华南大区加盟", "广佛省区加盟", "广州一营运区加盟"],
+        "广州二营运区": ["华南大区", "广佛省区", "广州二营运区"],
+        "广州二营运区加盟": ["华南大区加盟", "广佛省区加盟", "广州二营运区加盟"],
+        "花都营运区": ["华南大区", "广佛省区", "花都营运区"],
+        "花都营运区加盟": ["华南大区加盟", "广佛省区加盟", "花都营运区加盟"],
+        "番禺营运区": ["华南大区", "广佛省区", "番禺营运区"],
+        "番禺营运区加盟": ["华南大区加盟", "广佛省区加盟", "番禺营运区加盟"],
+        "佛山营运区": ["华南大区", "广佛省区", "佛山营运区"],
+        "佛山营运区加盟": ["华南大区加盟", "广佛省区加盟", "佛山营运区加盟"],
+        "顺德营运区": ["华南大区", "广佛省区", "顺德营运区"],
+        "顺德营运区加盟": ["华南大区加盟", "广佛省区加盟", "顺德营运区加盟"],
+        "江门营运区": ["华南大区", "广佛省区", "江门营运区"],
+        "江门营运区加盟": ["华南大区加盟", "广佛省区加盟", "江门营运区加盟"],
+    }
+    for t in targets:
+        path = area_path_hints.get(t)
+        if not path:
+            continue
+        for i, seg in enumerate(path):
+            menu_idx = i + 1
+            if i < len(path) - 1:
+                await expand_in_menu(menu_idx, seg)
+            else:
+                for idx in (menu_idx, 2, 3, 4):
+                    if await check_in_menu(idx, seg):
+                        selected[t] = True
+                        break
+
     region_targets = [t for t in targets if "大区" in t]
     province_targets = [t for t in targets if "省区" in t or "营运区" in t or "店" in t]
 
@@ -4018,17 +4090,7 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             if not unresolved:
                 break
 
-    # 深层兜底2：按路径提示展开后再勾选（如 湖北省区 -> 武汉营运区）
-    area_path_hints = {
-        "黑龙江省区": ["北方大区", "黑龙江省区"],
-        "黑龙江省区加盟": ["北方大区加盟", "黑龙江省区加盟"],
-        "武汉营运区": ["华中大区", "湖北省区", "武汉营运区"],
-        "武汉营运区加盟": ["华中大区加盟", "湖北省区加盟", "武汉营运区加盟"],
-        "广佛省区": ["华南大区", "广佛省区"],
-        "广佛省区加盟": ["华南大区加盟", "广佛省区加盟"],
-        "大郑州营运区": ["西北大区", "河南省区", "大郑州营运区"],
-        "大郑州营运区加盟": ["西北大区加盟", "河南省区加盟", "大郑州营运区加盟"],
-    }
+    # 深层兜底2：再次按路径提示展开后再勾选（如 湖北省区 -> 武汉营运区）
     unresolved = [k for k, v in selected.items() if not v]
     for t in unresolved:
         path = area_path_hints.get(t)
@@ -6643,7 +6705,11 @@ async def fill_step3(
             executor_include_franchise = True
             print("   🧩 社群按条件筛选：已自动开启“包含加盟区域”")
 
-        need_executor = customer_msg_required or moments_required or community_condition_mode
+        effective_upload_stores = bool(upload_stores or community_import_mode)
+        # 客户消息/朋友圈：若走“上传门店”则不再强制执行员工文本选择
+        need_executor = (
+            (customer_msg_required or moments_required) and (not effective_upload_stores)
+        ) or community_condition_mode
         # 分配方式强校验仅用于社群渠道；1对1/朋友圈页面若不存在该控件不阻断。
         mode_ok = True
         if need_executor or community_required:
@@ -6719,7 +6785,6 @@ async def fill_step3(
             moments_gate_ok = False
             moments_gate_errors.append("发送内容")
 
-        effective_upload_stores = bool(upload_stores or community_import_mode)
         print(f"   🏬 上传门店: {'需要上传' if effective_upload_stores else '不上传'}")
         if effective_upload_stores:
             store_ok, store_msg = await upload_step3_store_file(page, store_file_path)
@@ -6787,7 +6852,9 @@ async def fill_step3(
 
     # 显式约束：会员通-发客户消息始终要求结束时间/执行员工/发送内容都成功
     if customer_msg_required:
-        must_keys = ["第3步-结束时间", "第3步-执行员工", "第3步-发送内容"]
+        must_keys = ["第3步-结束时间", "第3步-发送内容"]
+        if not effective_upload_stores:
+            must_keys.append("第3步-执行员工")
         missing = [k.replace("第3步-", "") for k in must_keys if not results.get(k, False)]
         if missing:
             moments_gate_ok = False

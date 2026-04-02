@@ -700,6 +700,7 @@ def apply_unified_field_mapping_and_refs(
     for col in (
         "sms_content",
         "send_content",
+        "executor_include_franchise",
         "upload_stores",
         "store_file_path",
         "main_store_file_path",
@@ -779,6 +780,7 @@ def apply_unified_field_mapping_and_refs(
         parts = [p.strip() for p in re.split(r"[|,，、/]+", channel_scope) if p.strip()]
         is_community = "会员通-发送社群" in parts
         is_moments = "会员通-发客户朋友圈" in parts
+        is_customer_msg = "会员通-发客户消息" in parts
 
         # 默认值补齐（模板已简化，避免缺列后脚本失败）
         if not str(row.get("region", "") or "").strip():
@@ -844,6 +846,10 @@ def apply_unified_field_mapping_and_refs(
             row["step2_store_file_path"] = step2_store_path
             # 书名号引用场景下不再走“主消费营运区树节点选择”
             row["main_operating_area"] = ""
+            # 会员通1对1/朋友圈：主消费营运区《xxx》同步作为执行员工“上传门店”来源
+            if is_customer_msg or is_moments:
+                row["upload_stores"] = "是"
+                row["store_file_path"] = step2_store_path
 
         # 执行员工书名号引用 -> 目标门店sheet（第3步上传门店）
         emp_ref = _extract_book_title_ref(row.get("executor_employees", ""))
@@ -856,6 +862,22 @@ def apply_unified_field_mapping_and_refs(
                 fallback_exec = str(row.get("main_operating_area", "") or "").strip()
                 if fallback_exec:
                     row["executor_employees"] = fallback_exec
+
+        # 客户消息/朋友圈：若未填“执行员工”，自动复用“主消费营运区”
+        # 规则：
+        # 1) xx大区/xx省区 -> 执行员工复用并默认同步加盟；
+        # 2) 不含“大区/省区”视为营运区（如 大郑州营运区）-> 也默认同步加盟；
+        # 3) 《xxx》在上方已转为上传门店逻辑。
+        if (is_customer_msg or is_moments):
+            exec_raw = str(row.get("executor_employees", "") or "").strip()
+            main_area_raw = str(row.get("main_operating_area", "") or "").strip()
+            if (not exec_raw) and main_area_raw:
+                if _extract_book_title_ref(main_area_raw):
+                    # 《xxx》场景：仅走上传门店，不强行写执行员工文本
+                    pass
+                else:
+                    row["executor_employees"] = main_area_raw
+                    row["executor_include_franchise"] = "是"
 
         # 购买目标商品编码书名号引用 -> 商品编码上传sheet
         product_ref = _extract_book_title_ref(row.get("purchase_target_product_code", ""))
