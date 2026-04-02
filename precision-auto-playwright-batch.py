@@ -2904,7 +2904,11 @@ async def upload_step3_store_file(page, raw_path: str):
         print(f"      🧪 上传门店消息: {(status_info or {}).get('msg','')}")
     if (status_info or {}).get("hasFail"):
         return False, f"上传门店失败提示: {(status_info or {}).get('msg','')}"
+    # 会员通1对1/朋友圈页面经常不展示“已上传X家”或文件名，
+    # 但上传成功后会直接反映到“执行员工”标签变化，视为成功。
     if not (upload_read.get("hasCount") or upload_read.get("hasFileName")):
+        if changed:
+            return True, f"门店文件已上传(执行员工标签变化): {path.name}"
         return False, "上传门店回读未命中（未检测到已上传家数或文件名）"
     return True, f"门店文件已上传: {path.name}"
 
