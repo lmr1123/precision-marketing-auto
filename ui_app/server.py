@@ -34,7 +34,7 @@ HISTORY_DIR = UPLOAD_DIR / "task_history"
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_DATA_CSV = ROOT / "data" / "plans.csv"
 # 网页“Excel模板”下载优先使用用户指定模板文件
-CUSTOM_EXPORT_TEMPLATE_XLSX = Path("/Users/liminrong/Downloads/精准营销任务模板（导入模板）.xlsx")
+CUSTOM_EXPORT_TEMPLATE_XLSX = Path("/Users/liminrong/Downloads/精准营销任务模板模板-4.3版本.xlsx")
 
 
 HEADER_EN_TO_CN: Dict[str, str] = {
@@ -529,7 +529,12 @@ def normalize_channels_in_csv(dst_csv: Path) -> None:
         return
 
 
-def _parse_dt_for_upload(raw: str, *, end_of_day_for_date_only: bool = False) -> datetime:
+def _parse_dt_for_upload(
+    raw: str,
+    *,
+    end_of_day_for_date_only: bool = False,
+    date_only_end_time: tuple[int, int, int] | None = None,
+) -> datetime:
     s = str(raw or "").strip()
     if not s:
         raise ValueError("空值")
@@ -545,7 +550,8 @@ def _parse_dt_for_upload(raw: str, *, end_of_day_for_date_only: bool = False) ->
         try:
             dt = datetime.strptime(s, fmt)
             if fmt in ("%Y-%m-%d", "%Y/%m/%d") and end_of_day_for_date_only:
-                dt = dt.replace(hour=23, minute=59, second=59)
+                h, m, sec = date_only_end_time or (23, 59, 59)
+                dt = dt.replace(hour=h, minute=m, second=sec)
             return dt
         except Exception:
             continue
@@ -579,7 +585,11 @@ def prevalidate_csv_time_fields(dst_csv: Path) -> None:
         if start_s and end_s:
             try:
                 st = _parse_dt_for_upload(start_s)
-                et = _parse_dt_for_upload(end_s, end_of_day_for_date_only=True)
+                et = _parse_dt_for_upload(
+                    end_s,
+                    end_of_day_for_date_only=True,
+                    date_only_end_time=(23, 0, 0),
+                )
                 if et < st:
                     raise HTTPException(status_code=400, detail=f"第{i}行：计划结束时间早于开始时间")
                 if (et - st).total_seconds() > 14 * 24 * 3600:
@@ -793,11 +803,20 @@ def apply_unified_field_mapping_and_refs(
             row["global_limit"] = "不限制"
 
         # 日期字段自动补时分秒
-        def _norm_dt_text(raw: str, *, end_of_day_for_date_only: bool) -> str:
+        def _norm_dt_text(
+            raw: str,
+            *,
+            end_of_day_for_date_only: bool,
+            date_only_end_time: tuple[int, int, int] | None = None,
+        ) -> str:
             s = str(raw or "").strip()
             if not s:
                 return ""
-            dt = _parse_dt_for_upload(s, end_of_day_for_date_only=end_of_day_for_date_only)
+            dt = _parse_dt_for_upload(
+                s,
+                end_of_day_for_date_only=end_of_day_for_date_only,
+                date_only_end_time=date_only_end_time,
+            )
             return dt.strftime("%Y-%m-%d %H:%M:%S")
 
         for key, eod in (
@@ -808,7 +827,11 @@ def apply_unified_field_mapping_and_refs(
             val = str(row.get(key, "") or "").strip()
             if val:
                 try:
-                    row[key] = _norm_dt_text(val, end_of_day_for_date_only=eod)
+                    row[key] = _norm_dt_text(
+                        val,
+                        end_of_day_for_date_only=eod,
+                        date_only_end_time=(23, 0, 0) if key == "end_time" else None,
+                    )
                 except Exception as e:
                     label = HEADER_EN_TO_CN.get(key, key)
                     raise HTTPException(status_code=400, detail=f"第{idx}行：{label}格式错误: {e}")
@@ -818,17 +841,17 @@ def apply_unified_field_mapping_and_refs(
             raise HTTPException(status_code=400, detail=f"第{idx}行：发送渠道不能为空")
         row["channels"] = "、".join(parts)
 
-        # 社群任务：场景类型、计划类型必填（仅社群要求）
+        # 社群任务：场景类型、计划类型为空时使用默认值
         if is_community:
             if not str(row.get("scene_type", "") or "").strip():
-                raise HTTPException(status_code=400, detail=f"第{idx}行：社群任务“场景类型”不能为空")
+                row["scene_type"] = "促销营销"
             if not str(row.get("plan_type", "") or "").strip():
-                raise HTTPException(status_code=400, detail=f"第{idx}行：社群任务“计划类型”不能为空")
+                row["plan_type"] = "促销精准营销（大促&会员日）"
 
-        # 创建链接规则：任务文件中不允许手填，统一按渠道自动赋值
+        # 创建链接规则：优先使用任务文件中的创建链接；未填写时再按渠道自动赋值
+        raw_create_url = str(row.get("create_url", "") or "").strip()
         auto_url = _default_create_url_for_parts(parts) or community_default
-        # 强制覆盖，避免误链路
-        row["create_url"] = auto_url
+        row["create_url"] = raw_create_url or auto_url
 
         # 推送内容路由
         push_content = str(row.get("push_content", "") or "").strip()

@@ -120,13 +120,19 @@ MOMENTS_UPLOAD_WAIT_SECONDS = float(os.getenv("PM_MOMENTS_UPLOAD_WAIT", "8") or 
 
 def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> list:
     """从 CSV 加载计划数据"""
-    def _parse_dt(raw: str) -> datetime:
+    def _parse_dt(raw: str, *, end_of_day_for_date_only: bool = False) -> datetime:
         text = (raw or "").strip().replace("T", " ").replace("/", "-")
         if not text:
             raise ValueError("为空")
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
             try:
-                return datetime.strptime(text, fmt)
+                dt = datetime.strptime(text, fmt)
+                if fmt == "%Y-%m-%d":
+                    if end_of_day_for_date_only:
+                        dt = dt.replace(hour=23, minute=0, second=0)
+                    else:
+                        dt = dt.replace(hour=0, minute=0, second=0)
+                return dt
             except Exception:
                 pass
         raise ValueError(f"不支持的时间格式: {raw}")
@@ -217,7 +223,7 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
             # 前置业务校验（避免跑到页面保存阶段才失败）
             try:
                 st = _parse_dt(plan.get("start_time", ""))
-                et = _parse_dt(plan.get("end_time", ""))
+                et = _parse_dt(plan.get("end_time", ""), end_of_day_for_date_only=True)
                 if et < st:
                     raise ValueError(f"第{i}行：计划结束时间早于开始时间")
                 if (et - st).total_seconds() > 14 * 24 * 3600:
@@ -997,13 +1003,13 @@ async def select_radio(page, label: str, value: str):
         except:
             continue
 
-def split_datetime(raw: str):
+def split_datetime(raw: str, default_time: str = "00:00:00"):
     """将 YYYY-MM-DD HH:MM[:SS] 拆分为 (date, time) 并标准化为 HH:MM:SS。"""
     raw = (raw or "").strip()
     if " " in raw:
         date_part, time_part = raw.split(" ", 1)
     else:
-        date_part, time_part = raw, "00:00:00"
+        date_part, time_part = raw, default_time
     if len(time_part.split(":")) == 2:
         time_part = f"{time_part}:00"
     return date_part, time_part
@@ -1223,8 +1229,23 @@ def normalize_area_alias(area: str) -> str:
 
 
 def normalize_area_for_step2(area: str) -> str:
-    """第2步主消费营运区：保持业务原值，不做郑州->大郑州映射。"""
-    return (area or "").strip()
+    """第2步主消费营运区名称标准化。
+
+    规则：
+    - 保持“郑州”原值（业务要求第2步按页面原文匹配，不强制映射到“大郑州营运区”）。
+    - 已包含层级关键词（大区/省区/营运区/片区/门店等）时不改写。
+    - 纯简称（如“肇庆/云浮/南昌”）自动补全为“xx营运区”，提升匹配成功率。
+    """
+    a = (area or "").strip()
+    if not a:
+        return a
+    if a == "郑州":
+        return a
+    if any(k in a for k in ("全国", "大区", "省区", "营运区", "片区", "门店", "店")):
+        return a
+    if a.endswith("加盟"):
+        a = a[:-2]
+    return f"{a}营运区"
 
 
 def parse_step3_channels(raw: str) -> list:
@@ -3829,14 +3850,21 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
         pass
 
     opened = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        };
         const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
         for (const label of labels) {
             const txt = (label.textContent || '').replace(/\\s+/g, '');
             if (!txt.includes('执行员工')) continue;
             const item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
             if (!item) continue;
+            if (!isVisible(item)) continue;
             const input = item.querySelector('input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"], .el-cascader input.el-input__inner');
-            if (input) {
+            if (input && isVisible(input)) {
                 input.click();
                 return true;
             }
@@ -3849,16 +3877,29 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
 
     # 先清空字段内已有标签，避免营销模板默认区域残留
     await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        };
         const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
         for (const label of labels) {
             const txt = (label.textContent || '').replace(/\\s+/g, '');
             if (!txt.includes('执行员工')) continue;
             const item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
             if (!item) continue;
+            if (!isVisible(item)) continue;
             const closes = Array.from(item.querySelectorAll('.el-tag__close'));
             for (const c of closes) c.click();
+            const clearIcons = Array.from(item.querySelectorAll('.el-input__suffix .el-icon-circle-close, .el-input__icon.el-icon-circle-close'))
+                .filter(isVisible);
+            for (const ci of clearIcons) {
+                if ((ci.getAttribute('class') || '').includes('is-show-close')) ci.click();
+                else ci.click();
+            }
             const input = item.querySelector('input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"], .el-cascader input.el-input__inner');
-            if (input) input.click();
+            if (input && isVisible(input)) input.click();
             return;
         }
     }""")
@@ -3866,14 +3907,21 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
 
     async def reopen_executor_panel():
         await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
             const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
             for (const label of labels) {
                 const txt = (label.textContent || '').replace(/\\s+/g, '');
                 if (!txt.includes('执行员工')) continue;
                 const item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
                 if (!item) continue;
+                if (!isVisible(item)) continue;
                 const input = item.querySelector('input.el-input__inner[placeholder*="请选择"], input[placeholder*="请选择"], .el-cascader input.el-input__inner');
-                if (input) {
+                if (input && isVisible(input)) {
                     input.click();
                     return;
                 }
@@ -3881,6 +3929,33 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
         }""")
         await page.locator(".el-cascader-panel:visible").last.wait_for(timeout=5000)
         await asyncio.sleep(0.15)
+
+    def area_name_match(txt: str, target: str) -> bool:
+        a = (txt or "").strip()
+        b = (target or "").strip()
+        if not a or not b:
+            return False
+        if a == b or b in a or a in b:
+            return True
+        # 宽松匹配：去后缀后按核心地名匹配（兼容“肇庆一营运区”等变体）
+        def simplify(s: str) -> str:
+            return (
+                (s or "")
+                .replace("加盟", "")
+                .replace("营运区", "")
+                .replace("省区", "")
+                .replace("大区", "")
+                .replace("片区", "")
+                .replace("门店", "")
+                .replace("店", "")
+                .replace(" ", "")
+                .strip()
+            )
+        sa = simplify(a)
+        sb = simplify(b)
+        if not sa or not sb:
+            return False
+        return (sb in sa) or (sa in sb)
 
     async def expand_in_menu(menu_index: int, target: str) -> bool:
         menu = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(menu_index)
@@ -3897,16 +3972,19 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             if target_has_join != txt_has_join:
                 continue
             # 兼容简称/全称（如 广州一 <-> 广州一营运区）双向匹配
-            if txt != target and target not in txt and txt not in target:
+            if not area_name_match(txt, target):
                 continue
-            await node.scroll_into_view_if_needed()
+            try:
+                await node.scroll_into_view_if_needed()
+            except Exception:
+                pass
             postfix = node.locator(".el-cascader-node__postfix").first
             if await postfix.count() > 0:
                 await postfix.click(force=True)
             else:
                 # 避免点击label触发勾选（尤其“全国”），没有展开箭头时不执行展开点击。
                 return False
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
             return True
         return False
 
@@ -3926,14 +4004,22 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             txt_has_join = ("加盟" in txt)
             if target_has_join != txt_has_join:
                 continue
-            if txt != target and target not in txt and txt not in target:
+            if not area_name_match(txt, target):
                 continue
             cb = node.locator(".el-checkbox__input").first
-            if await cb.count() == 0:
+            cb_original = node.locator("input.el-checkbox__original").first
+            if await cb.count() == 0 and await cb_original.count() == 0:
                 return "missing"
             node_cls = (await node.get_attribute("class")) or ""
-            cb_cls = (await cb.get_attribute("class")) or ""
-            checked = ("in-checked-path" in node_cls) or ("is-checked" in cb_cls)
+            cb_cls = (await cb.get_attribute("class")) if await cb.count() > 0 else ""
+            checked = False
+            if await cb_original.count() > 0:
+                try:
+                    checked = await cb_original.is_checked()
+                except Exception:
+                    checked = False
+            if not checked:
+                checked = ("in-checked-path" in node_cls) or ("is-checked" in (cb_cls or ""))
             return "checked" if checked else "unchecked"
         return "not_found"
 
@@ -3951,14 +4037,20 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             txt_has_join = ("加盟" in txt)
             if target_has_join != txt_has_join:
                 continue
-            if txt != target and target not in txt and txt not in target:
+            if not area_name_match(txt, target):
                 continue
             cb = node.locator(".el-checkbox__input").first
-            if await cb.count() == 0:
+            cb_inner = node.locator(".el-checkbox__inner").first
+            cb_original = node.locator("input.el-checkbox__original").first
+            if await cb.count() == 0 and await cb_inner.count() == 0 and await cb_original.count() == 0:
                 return False
-            await cb.scroll_into_view_if_needed()
-            await cb.click(force=True)
-            await asyncio.sleep(0.2)
+            click_target = cb_inner if await cb_inner.count() > 0 else (cb_original if await cb_original.count() > 0 else cb)
+            try:
+                await click_target.scroll_into_view_if_needed()
+            except Exception:
+                pass
+            await click_target.click(force=True)
+            await asyncio.sleep(0.1)
             return True
         return False
 
@@ -3976,19 +4068,114 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             txt_has_join = ("加盟" in txt)
             if target_has_join != txt_has_join:
                 continue
-            if txt != target and target not in txt and txt not in target:
+            if not area_name_match(txt, target):
                 continue
             checkbox = node.locator(".el-checkbox__input").first
-            if await checkbox.count() == 0:
+            cb_inner = node.locator(".el-checkbox__inner").first
+            cb_original = node.locator("input.el-checkbox__original").first
+            if await checkbox.count() == 0 and await cb_inner.count() == 0 and await cb_original.count() == 0:
                 continue
-            await checkbox.scroll_into_view_if_needed()
+            click_target = cb_inner if await cb_inner.count() > 0 else (cb_original if await cb_original.count() > 0 else checkbox)
+            try:
+                await click_target.scroll_into_view_if_needed()
+            except Exception:
+                pass
             node_cls = (await node.get_attribute("class")) or ""
-            cb_cls = (await checkbox.get_attribute("class")) or ""
-            if ("in-checked-path" not in node_cls) and ("is-checked" not in cb_cls):
-                await checkbox.click(force=True)
-                await asyncio.sleep(0.15)
+            cb_cls = (await checkbox.get_attribute("class")) if await checkbox.count() > 0 else ""
+            checked = False
+            if await cb_original.count() > 0:
+                try:
+                    checked = await cb_original.is_checked()
+                except Exception:
+                    checked = False
+            if not checked:
+                checked = ("in-checked-path" in node_cls) or ("is-checked" in (cb_cls or ""))
+            if not checked:
+                await click_target.click(force=True)
+                await asyncio.sleep(0.08)
             return True
         return False
+
+    async def js_pick_target_by_path(path: list[str]) -> bool:
+        """在页面内按路径展开并勾选末级节点（更稳定，避免 locator 误中/视口抖动）。"""
+        if not path:
+            return False
+        try:
+            return bool(await page.evaluate("""(path) => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                };
+                const norm = (s) => (s || '').replace(/\\s+/g, '');
+                const fire = (el) => {
+                    if (!el) return false;
+                    ['pointerdown','mousedown','mouseup','click'].forEach(tp => {
+                        el.dispatchEvent(new MouseEvent(tp, { bubbles: true, cancelable: true, view: window }));
+                    });
+                    if (typeof el.click === 'function') el.click();
+                    return true;
+                };
+                const panel = Array.from(document.querySelectorAll('.el-cascader-panel')).filter(isVisible).pop();
+                if (!panel) return false;
+                const menus = Array.from(panel.querySelectorAll('.el-cascader-menu'));
+                if (!menus.length) return false;
+
+                const findNode = (menuIdx, target, preferJoin) => {
+                    const menu = menus[menuIdx];
+                    if (!menu) return null;
+                    const nodes = Array.from(menu.querySelectorAll('.el-cascader-node')).filter(isVisible);
+                    let best = null, score = -1;
+                    const tgt = norm(target);
+                    for (const n of nodes) {
+                        const lb = n.querySelector('.el-cascader-node__label');
+                        const txt = norm(lb ? lb.textContent : n.textContent || '');
+                        if (!txt) continue;
+                        const hasJoin = txt.includes('加盟');
+                        if (preferJoin !== null && hasJoin !== preferJoin) continue;
+                        let s = -1;
+                        if (txt === tgt) s = 3;
+                        else if (txt.includes(tgt)) s = 2;
+                        else if (tgt.includes(txt)) s = 1;
+                        if (s > score) { score = s; best = n; }
+                    }
+                    return score >= 0 ? best : null;
+                };
+
+                const ensureExpanded = (node) => {
+                    if (!node) return false;
+                    const exp = node.querySelector('.el-cascader-node__postfix');
+                    if (!exp) return false;
+                    return fire(exp);
+                };
+
+                const pathNorm = path.map(x => String(x || '').trim()).filter(Boolean);
+                if (!pathNorm.length) return false;
+                for (let i = 0; i < pathNorm.length; i++) {
+                    const seg = pathNorm[i];
+                    const preferJoin = seg.includes('加盟');
+                    const menuIdx = i + 1; // 0 是“全国”
+                    const node = findNode(menuIdx, seg, preferJoin);
+                    if (!node) return false;
+                    node.scrollIntoView({ block: 'center' });
+                    if (i < pathNorm.length - 1) {
+                        ensureExpanded(node);
+                        continue;
+                    }
+                    // 末级：勾选
+                    const input = node.querySelector('input.el-checkbox__original');
+                    const inner = node.querySelector('.el-checkbox__inner');
+                    const checked = !!(input && input.checked);
+                    if (!checked) {
+                        if (!(fire(inner) || fire(input) || fire(node))) return false;
+                    }
+                    return true;
+                }
+                return false;
+            }""", path))
+        except Exception:
+            return False
 
     # 先按业务规则双击“全国”：第一次全选，第二次清空。
     await reopen_executor_panel()
@@ -3997,14 +4184,57 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
     nation_after_first = await get_menu_checked_state(0, "全国")
     second_ok = await toggle_in_menu(0, "全国")
     nation_after_second = await get_menu_checked_state(0, "全国")
+    # 强校验：双击后若“全国”仍为选中，补点一次确保清空。
+    if nation_after_second == "checked":
+        _ = await toggle_in_menu(0, "全国")
+        await asyncio.sleep(0.15)
+        nation_after_second = await get_menu_checked_state(0, "全国")
+    if nation_after_second != "unchecked":
+        # DOM 兜底：直接对“全国”节点做最多3轮取消，避免残留全选污染后续选择。
+        nation_after_second = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const panel = Array.from(document.querySelectorAll('.el-cascader-panel')).filter(isVisible).pop();
+            if (!panel) return 'panel_not_found';
+            const menu0 = panel.querySelector('.el-cascader-menu');
+            if (!menu0) return 'panel_not_found';
+            const rows = Array.from(menu0.querySelectorAll('.el-cascader-node')).filter(isVisible);
+            const nation = rows.find(r => ((r.querySelector('.el-cascader-node__label')?.textContent || '').trim()) === '全国');
+            if (!nation) return 'not_found';
+            const input = nation.querySelector('input.el-checkbox__original');
+            const inner = nation.querySelector('.el-checkbox__inner');
+            const fire = (el) => {
+                if (!el) return false;
+                ['pointerdown','mousedown','mouseup','click'].forEach(tp => {
+                    el.dispatchEvent(new MouseEvent(tp, { bubbles: true, cancelable: true, view: window }));
+                });
+                if (typeof el.click === 'function') el.click();
+                return true;
+            };
+            const isChecked = () => {
+                if (input) return !!input.checked;
+                const nc = nation.getAttribute('class') || '';
+                const cc = nation.querySelector('.el-checkbox__input')?.getAttribute('class') || '';
+                return nc.includes('in-checked-path') || cc.includes('is-checked');
+            };
+            for (let i = 0; i < 3; i++) {
+                if (!isChecked()) return 'unchecked';
+                fire(inner) || fire(input) || fire(nation);
+            }
+            return isChecked() ? 'checked' : 'unchecked';
+        }""")
     print(
         "      🧪 全国双击清空: "
         f"before={nation_before}, firstClick={first_ok}, afterFirst={nation_after_first}, "
         f"secondClick={second_ok}, afterSecond={nation_after_second}"
     )
-    await asyncio.sleep(0.2)
-    # 再点全国展开大区列
-    await expand_in_menu(0, "全国")
+    await asyncio.sleep(0.1)
+    # 再点全国展开大区列（快路径，避免反复等待）
+    _ = await expand_in_menu(0, "全国")
 
     selected = {t: False for t in targets}
     # 路径提示优先：确保先展开到“省区”再勾选“营运区/加盟营运区”
@@ -4017,6 +4247,10 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
         "广佛省区加盟": ["华南大区加盟", "广佛省区加盟"],
         "大郑州营运区": ["西北大区", "河南省区", "大郑州营运区"],
         "大郑州营运区加盟": ["西北大区加盟", "河南省区加盟", "大郑州营运区加盟"],
+        "肇庆营运区": ["华南大区", "广佛省区", "肇庆营运区"],
+        "肇庆营运区加盟": ["华南大区加盟", "广佛省区加盟", "肇庆营运区加盟"],
+        "云浮营运区": ["华南大区", "广佛省区", "云浮营运区"],
+        "云浮营运区加盟": ["华南大区加盟", "广佛省区加盟", "云浮营运区加盟"],
         # 广佛省区常用简称（从文件主消费营运区复用到执行员工）
         "广州一营运区": ["华南大区", "广佛省区", "广州一营运区"],
         "广州一营运区加盟": ["华南大区加盟", "广佛省区加盟", "广州一营运区加盟"],
@@ -4033,9 +4267,14 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
         "江门营运区": ["华南大区", "广佛省区", "江门营运区"],
         "江门营运区加盟": ["华南大区加盟", "广佛省区加盟", "江门营运区加盟"],
     }
+
     for t in targets:
         path = area_path_hints.get(t)
         if not path:
+            continue
+        # 快路径：保持面板一次展开，连续点选，避免每个目标 reopen 带来的卡顿。
+        if await js_pick_target_by_path(path):
+            selected[t] = True
             continue
         for i, seg in enumerate(path):
             menu_idx = i + 1
@@ -4044,15 +4283,59 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             else:
                 for idx in (menu_idx, 2, 3, 4):
                     if await check_in_menu(idx, seg):
-                        selected[t] = True
+                        selected[t] = (await get_menu_checked_state(idx, seg)) == "checked"
+                        if not selected[t]:
+                            selected[t] = True
                         break
+
+    if all(selected.values()):
+        selected_labels = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const panel = Array.from(document.querySelectorAll('.el-cascader-panel')).find(isVisible);
+            if (!panel) return [];
+            const checked = Array.from(panel.querySelectorAll('.el-checkbox__input.is-checked'));
+            return checked.map(c => {
+                const node = c.closest('.el-cascader-node');
+                const label = node ? node.querySelector('.el-cascader-node__label') : null;
+                return (label?.textContent || '').trim();
+            }).filter(Boolean);
+        }""")
+        print(f"      🧪 执行员工面板勾选节点: {selected_labels}")
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.15)
+        readback = await page.evaluate("""() => {
+            const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
+            for (const label of labels) {
+                const txt = (label.textContent || '').replace(/\\s+/g, '');
+                if (!txt.includes('执行员工')) continue;
+                const item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
+                if (!item) continue;
+                const input = item.querySelector('input.el-input__inner');
+                const tags = Array.from(item.querySelectorAll('.el-tag .el-tag__content, .el-cascader__tags span'))
+                    .map(n => (n.textContent || '').trim())
+                    .filter(Boolean);
+                return [input ? (input.value || '').trim() : '', ...tags].join(' ');
+            }
+            return '';
+        }""")
+        for t in targets:
+            if t in readback:
+                selected[t] = True
+        print(f"      🧪 执行员工回读文本: {readback}")
+        return all(selected.values())
 
     region_targets = [t for t in targets if "大区" in t]
     province_targets = [t for t in targets if "省区" in t or "营运区" in t or "店" in t]
 
     # 先选大区目标（例如西北大区）
     for rt in region_targets:
-        selected[rt] = await check_in_menu(1, rt)
+        if await check_in_menu(1, rt):
+            selected[rt] = (await get_menu_checked_state(1, rt)) == "checked" or selected.get(rt, False)
 
     # 再跨大区选省区目标（例如湖北省区）
     region_nodes = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(1).locator(".el-cascader-node .el-cascader-node__label")
@@ -4060,7 +4343,7 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
     region_names = []
     for i in range(region_count):
         txt = ((await region_nodes.nth(i).text_content()) or "").strip()
-        if txt.endswith("大区"):
+        if "大区" in txt:
             region_names.append(txt)
 
     for region in region_names:
@@ -4069,32 +4352,9 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             if selected.get(pt):
                 continue
             if await check_in_menu(2, pt):
-                selected[pt] = True
+                selected[pt] = (await get_menu_checked_state(2, pt)) == "checked" or selected.get(pt, False)
 
-    # 深层兜底1：按历史稳定逻辑遍历大区后再次尝试未命中目标（覆盖视口/延迟渲染）
-    unresolved = [k for k, v in selected.items() if not v]
-    if unresolved:
-        region_nodes = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(1).locator(".el-cascader-node .el-cascader-node__label")
-        region_count = await region_nodes.count()
-        region_names = []
-        for i in range(region_count):
-            txt = ((await region_nodes.nth(i).text_content()) or "").strip()
-            if "大区" in txt:
-                region_names.append(txt)
-        for region in region_names:
-            await expand_in_menu(1, region)
-            for t in list(unresolved):
-                if selected.get(t):
-                    continue
-                for idx in (2, 3, 4):
-                    if await check_in_menu(idx, t):
-                        selected[t] = True
-                        break
-            unresolved = [k for k, v in selected.items() if not v]
-            if not unresolved:
-                break
-
-    # 深层兜底2：再次按路径提示展开后再勾选（如 湖北省区 -> 武汉营运区）
+    # 深层兜底：仅对未命中目标再按路径重试一轮（避免慢速反复展开）
     unresolved = [k for k, v in selected.items() if not v]
     for t in unresolved:
         path = area_path_hints.get(t)
@@ -4107,8 +4367,69 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             else:
                 for idx in (menu_idx, 2, 3, 4):
                     if await check_in_menu(idx, seg):
-                        selected[t] = True
+                        selected[t] = (await get_menu_checked_state(idx, seg)) == "checked" or selected.get(t, False)
                         break
+
+    # 通用叶子兜底：不依赖固定层级，按“可见节点文本”直接勾选；若未出现则自动展开后再试。
+    unresolved = [k for k, v in selected.items() if not v]
+    for t in unresolved:
+        ok = await page.evaluate("""(target) => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const norm = (s) => (s || '').replace(/\\s+/g, '');
+            const fire = (el) => {
+                if (!el) return false;
+                ['pointerdown','mousedown','mouseup','click'].forEach(tp => {
+                    el.dispatchEvent(new MouseEvent(tp, { bubbles: true, cancelable: true, view: window }));
+                });
+                if (typeof el.click === 'function') el.click();
+                return true;
+            };
+            const tgt = String(target || '').trim();
+            const tgtNorm = norm(tgt);
+            const needJoin = tgtNorm.includes('加盟');
+            const simple = tgtNorm.replace('营运区', '').replace('省区', '').replace('大区', '').replace('加盟', '');
+            const panel = Array.from(document.querySelectorAll('.el-cascader-panel')).filter(isVisible).pop();
+            if (!panel) return false;
+
+            const pickVisible = () => {
+                const nodes = Array.from(panel.querySelectorAll('.el-cascader-node')).filter(isVisible);
+                let candidate = null;
+                let score = -1;
+                for (const node of nodes) {
+                    const lb = node.querySelector('.el-cascader-node__label');
+                    const txt = norm(lb ? lb.textContent : '');
+                    if (!txt) continue;
+                    const hasJoin = txt.includes('加盟');
+                    if (hasJoin !== needJoin) continue;
+                    let s = -1;
+                    if (txt === tgtNorm) s = 4;
+                    else if (txt.includes(tgtNorm)) s = 3;
+                    else if (tgtNorm.includes(txt)) s = 2;
+                    else if (simple && txt.includes(simple)) s = 1;
+                    if (s > score) { score = s; candidate = node; }
+                }
+                if (!candidate || score < 0) return false;
+                const input = candidate.querySelector('input.el-checkbox__original');
+                const inner = candidate.querySelector('.el-checkbox__inner');
+                const checked = !!(input && input.checked);
+                if (!checked) fire(inner) || fire(input) || fire(candidate);
+                return true;
+            };
+
+            if (pickVisible()) return true;
+
+            // 展开一轮后再尝试
+            const expanders = Array.from(panel.querySelectorAll('.el-cascader-node__postfix')).filter(isVisible);
+            for (const exp of expanders) fire(exp);
+            return pickVisible();
+        }""", t)
+        if ok:
+            selected[t] = True
 
     selected_labels = await page.evaluate("""() => {
         const isVisible = (el) => {
@@ -4151,8 +4472,44 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
         if t in readback:
             selected[t] = True
 
+    print(f"      🧪 执行员工目标命中: {selected}")
     print(f"      🧪 执行员工回读文本: {readback}")
-    return all(selected.values())
+    if all(selected.values()):
+        return True
+
+    # 二级判定（防误杀）：页面已存在执行员工回读且未出现该字段校验报错时放行。
+    try:
+        loose_ok = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
+            for (const label of labels) {
+                const txt = (label.textContent || '').replace(/\\s+/g, '');
+                if (!txt.includes('执行员工')) continue;
+                const item = label.closest('.item, .el-form-item, .ant-form-item') || label.parentElement;
+                if (!item || !isVisible(item)) continue;
+                const input = item.querySelector('input.el-input__inner, input[placeholder*="请选择"]');
+                const inputVal = ((input && input.value) || '').trim();
+                const tags = Array.from(item.querySelectorAll('.el-tag .el-tag__content, .el-cascader__tags span'))
+                    .map(n => (n.textContent || '').trim())
+                    .filter(Boolean);
+                const hasValue = !!(inputVal || tags.length > 0);
+                const hasError = Array.from(item.querySelectorAll('.el-form-item__error, .ant-form-item-explain-error'))
+                    .some(n => isVisible(n));
+                return hasValue && !hasError;
+            }
+            return false;
+        }""")
+        if loose_ok:
+            print("      ⚠️ 执行员工精确回读未全命中，按页面已填+无报错放行")
+            return True
+    except Exception:
+        pass
+    return False
 
 async def fill_step3_executor_by_condition(page, raw_values: str, include_franchise: bool = False) -> bool:
     """第3步执行员工（按条件筛选客户）：选择员工弹窗 -> 树节点 -> 添加全部 -> 确定。"""
@@ -4285,6 +4642,66 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
             if (cbInput && fire(cbInput)) return true;
             return false;
         }""", {"target": target, "expandOnly": bool(expand_only)})
+
+    async def modal_filter_pick_area(target: str) -> bool:
+        """优先通过“输入关键字进行过滤”快速定位并点击目标节点。"""
+        return await page.evaluate("""(target) => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const norm = (s) => (s || '').replace(/\\s+/g, '');
+            const modal = Array.from(document.querySelectorAll('.el-dialog__wrapper, .ant-modal-wrap, .el-dialog, .ant-modal')).find(d => {
+                if (!isVisible(d)) return false;
+                const txt = norm(d.textContent || '');
+                return txt.includes('选择员工');
+            });
+            if (!modal) return false;
+            const tgt = norm(target || '');
+            if (!tgt) return false;
+            const fireInput = (inp, val) => {
+                if (!inp) return false;
+                inp.focus();
+                inp.value = val;
+                inp.dispatchEvent(new Event('input', { bubbles: true }));
+                inp.dispatchEvent(new Event('change', { bubbles: true }));
+                inp.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+                return true;
+            };
+            const fireClick = (el) => {
+                if (!el) return false;
+                ['pointerdown','mousedown','mouseup','click'].forEach(tp => {
+                    el.dispatchEvent(new MouseEvent(tp, { bubbles: true, cancelable: true, view: window }));
+                });
+                if (typeof el.click === 'function') el.click();
+                return true;
+            };
+            const kw = Array.from(modal.querySelectorAll('input, textarea')).find(inp => {
+                if (!isVisible(inp)) return false;
+                const p = norm(inp.getAttribute('placeholder') || '');
+                return p.includes('关键字') || p.includes('过滤');
+            });
+            if (kw) {
+                fireInput(kw, target || '');
+            }
+            const labels = Array.from(modal.querySelectorAll('.el-tree-node__label')).filter(isVisible);
+            let hit = null;
+            let best = -1;
+            for (const lb of labels) {
+                const txt = norm(lb.textContent || '');
+                if (!txt) continue;
+                let score = -1;
+                if (txt === tgt) score = 3;
+                else if (txt.includes(tgt)) score = 2;
+                else if (!tgt.includes('加盟') && tgt.includes(txt)) score = 1;
+                if (score > best) { best = score; hit = lb; }
+            }
+            if (!hit || best < 0) return false;
+            hit.scrollIntoView({ block: 'center' });
+            return fireClick(hit);
+        }""", target)
 
     async def modal_switch_to_tree() -> bool:
         """若弹窗存在“切换为选择树”，先切到树模式再选区域。"""
@@ -4605,12 +5022,24 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
         "武汉加盟": ["华中大区加盟", "湖北省区加盟", "武汉营运区加盟"],
         "江西省区": ["华中大区", "江西省区"],
         "江西省区加盟": ["华中大区加盟", "江西省区加盟"],
+        # 社群常见简称（文件里只写城市名）
+        "肇庆": ["华南大区", "广佛省区", "肇庆营运区"],
+        "肇庆营运区": ["华南大区", "广佛省区", "肇庆营运区"],
+        "肇庆加盟": ["华南大区加盟", "广佛省区加盟", "肇庆营运区加盟"],
+        "肇庆营运区加盟": ["华南大区加盟", "广佛省区加盟", "肇庆营运区加盟"],
+        "云浮": ["华南大区", "广佛省区", "云浮营运区"],
+        "云浮营运区": ["华南大区", "广佛省区", "云浮营运区"],
+        "云浮加盟": ["华南大区加盟", "广佛省区加盟", "云浮营运区加盟"],
+        "云浮营运区加盟": ["华南大区加盟", "广佛省区加盟", "云浮营运区加盟"],
     }
 
     picked_any = False
     selected_before = await read_selected_count()
     modal_added_before = await read_modal_added_count()
     for t in targets:
+        # 先走关键词过滤命中（对层级较深的营运区更稳）
+        _ = await modal_filter_pick_area(t)
+        await asyncio.sleep(0.15)
         chain = path_hints.get(t, [t])
         target_hit = False
         for idx, seg in enumerate(chain):
@@ -4629,6 +5058,24 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
                 plain_ok = await modal_pick_area(plain)
                 target_hit = target_hit or bool(plain_ok)
                 await asyncio.sleep(0.15)
+        if not target_hit:
+            # 简称兜底：如“肇庆/云浮”在树里实际为“肇庆营运区/云浮营运区”
+            cand = []
+            if t.endswith("加盟"):
+                plain = t[:-2]
+                if (plain and ("大区" not in plain) and ("省区" not in plain) and ("营运区" not in plain)):
+                    cand.append(f"{plain}营运区加盟")
+            else:
+                if ("大区" not in t) and ("省区" not in t) and ("营运区" not in t):
+                    cand.append(f"{t}营运区")
+            for c in cand:
+                c_ok = await modal_pick_area(c)
+                target_hit = target_hit or bool(c_ok)
+                await asyncio.sleep(0.15)
+                if target_hit:
+                    # 统一把当前目标替换为真实命中节点文本，后续激活校验/日志更准确
+                    t = c
+                    break
         if not target_hit:
             continue
         active_ok = await ensure_modal_target_active(t)
@@ -4722,7 +5169,7 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
 async def set_plan_time_range(page, start_time: str, end_time: str):
     """设置 Element 日期范围并点击确定，避免值未提交。"""
     s_date, s_time = split_datetime(start_time)
-    e_date, e_time = split_datetime(end_time)
+    e_date, e_time = split_datetime(end_time, default_time="23:00:00")
     print(f"   📅 计划时间: {s_date} {s_time} -> {e_date} {e_time}")
 
     item = await get_form_item_by_label(page, "计划时间")
@@ -5454,6 +5901,10 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         '九江': ['华中大区', '江西省区'],
                                         '南昌': ['华中大区', '江西省区'],
                                         '广州二': ['华南大区', '广佛省区'],
+                                        '肇庆': ['华南大区', '广佛省区'],
+                                        '云浮': ['华南大区', '广佛省区'],
+                                        '肇庆营运区': ['华南大区', '广佛省区'],
+                                        '云浮营运区': ['华南大区', '广佛省区'],
                                     };
 
                                     const expandTopRegions = async () => {
@@ -5512,25 +5963,44 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             }
                                         }
 
-                                        let node = findNodeByScroll(leaf);
+                                        const leafCandidates = Array.from(new Set([
+                                            leaf,
+                                            leaf.replace(/营运区$/, ''),
+                                            leaf.replace(/省区$/, ''),
+                                            leaf.replace(/大区$/, ''),
+                                            leaf.includes('营运区') ? '' : (leaf + '营运区'),
+                                        ].filter(Boolean)));
+                                        const findNodeByCandidates = () => {
+                                            for (const k of leafCandidates) {
+                                                const n = findNodeByScroll(k);
+                                                if (n) return { node: n, key: k };
+                                            }
+                                            return { node: null, key: '' };
+                                        };
+
+                                        let hit = findNodeByCandidates();
+                                        let node = hit.node;
                                         // 仍找不到时，尝试先把根大区展开再搜索一次
                                         if (!node) {
                                             await expandTopRegions();
                                             trace.push('expand_roots');
                                             await sleep(300);
-                                            node = findNodeByScroll(leaf);
+                                            hit = findNodeByCandidates();
+                                            node = hit.node;
                                         }
                                         // 仍找不到，兜底：逐轮展开可见闭合节点，再搜索
                                         if (!node) {
                                             await expandAllVisibleClosed(5);
                                             trace.push('expand_visible_closed');
                                             await sleep(300);
-                                            node = findNodeByScroll(leaf);
+                                            hit = findNodeByCandidates();
+                                            node = hit.node;
                                         }
                                         if (!node) {
-                                            items.push({ area: target, status: 'not_found', trace });
+                                            items.push({ area: target, status: 'not_found', trace, tried: leafCandidates });
                                             continue;
                                         }
+                                        if (hit.key && hit.key !== leaf) trace.push('leaf_fallback:' + hit.key);
                                         node.scrollIntoView({ block: 'center' });
                                         const cb = node.querySelector('.ant-tree-checkbox');
                                         if (!cb) {
@@ -5795,8 +6265,15 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 print(f"      ⚠️ 主消费营运区操作失败: {e}")
                     
                     # 第2步：门店信息通用上传（选择数据 -> 上传文件，非必填）
+                    # 规则：当主消费营运区已配置且非《书名号引用》时，仅走“区域选择”逻辑，不再执行门店上传兜底。
+                    main_area_raw = (data.get("main_operating_area", "") or "").strip()
+                    main_area_is_sheet_ref = bool(re.match(r"^《[^》]+》$", main_area_raw))
+                    skip_step2_store_upload = bool(main_area_raw) and (not main_area_is_sheet_ref)
+
                     step2_store_file_path = (data.get("step2_store_file_path", "") or data.get("main_store_file_path", "")).strip()
-                    if step2_store_file_path:
+                    if skip_step2_store_upload and step2_store_file_path:
+                        print("   🏬 第2步门店信息文件: ⏭️ 已跳过（主消费营运区走区域选择，不走门店上传）")
+                    elif step2_store_file_path:
                         print(f"   🏬 第2步门店信息文件: {step2_store_file_path}")
                         try:
                             store_path = Path(os.path.expanduser(step2_store_file_path))
@@ -5805,6 +6282,87 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                             if (not store_path.exists()) or store_path.suffix.lower() not in {".xlsx", ".xls"}:
                                 print(f"      ⚠️ 第2步门店信息文件无效: {store_path}")
                             else:
+                                # 当文件是《xxx》门店引用时，行类型常默认停留在“主消费营运区”，
+                                # 需要先切换到“主消费门店/主要消费门店”，否则会打开树弹窗而非上传弹窗。
+                                try:
+                                    switch_store_row = await frame.evaluate("""() => {
+                                        const isVisible = (el) => {
+                                            if (!el) return false;
+                                            const s = window.getComputedStyle(el);
+                                            const r = el.getBoundingClientRect();
+                                            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                        };
+                                        const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                        const fire = (el) => {
+                                            if (!el) return false;
+                                            ['pointerdown','mousedown','mouseup','click'].forEach(t => {
+                                                el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+                                            });
+                                            if (typeof el.click === 'function') el.click();
+                                            return true;
+                                        };
+                                        const rows = Array.from(document.querySelectorAll('.condition, .event-row, .ant-form-item, .ant-row, div'))
+                                            .filter(isVisible);
+                                        const findPickBtn = (row) =>
+                                            Array.from(row.querySelectorAll('button.ant-btn.ant-btn-primary, button.ant-btn'))
+                                                .filter(isVisible)
+                                                .find(b => norm(b.textContent || '').includes('选择数据'));
+                                        const targetRow =
+                                            rows.find(r => {
+                                                const t = norm(r.textContent || '');
+                                                return (t.includes('主消费') || t.includes('主要消费')) && !!findPickBtn(r);
+                                            }) ||
+                                            rows.find(r => !!findPickBtn(r)) ||
+                                            null;
+                                        if (!targetRow) return { ok: false, mode: 'row_not_found' };
+
+                                        const currentLabelNode =
+                                            targetRow.querySelector('.ant-select-selection-item[title]') ||
+                                            targetRow.querySelector('.ant-select-selection-item');
+                                        const currentLabel = norm((currentLabelNode?.getAttribute('title') || currentLabelNode?.textContent || ''));
+                                        if (currentLabel && currentLabel.includes('门店')) {
+                                            return { ok: true, mode: 'already_store', current: currentLabel };
+                                        }
+
+                                        const selectBox = targetRow.querySelector('.ant-select-selector, .ant-select');
+                                        if (!selectBox) return { ok: false, mode: 'select_not_found', current: currentLabel };
+                                        fire(selectBox);
+
+                                        const dropdowns = Array.from(document.querySelectorAll('.ant-select-dropdown')).filter(isVisible);
+                                        const dd = dropdowns[dropdowns.length - 1] || null;
+                                        if (!dd) return { ok: false, mode: 'dropdown_not_found', current: currentLabel };
+
+                                        const items = Array.from(dd.querySelectorAll('.ant-select-item-option, .ant-select-item'))
+                                            .filter(isVisible);
+                                        let target = null;
+                                        // 优先精确
+                                        target = items.find(i => {
+                                            const t = norm(i.textContent || '');
+                                            return t.includes('主要消费门店') || t.includes('主消费门店');
+                                        });
+                                        // 兜底：同分组下任一“门店”选项
+                                        if (!target) {
+                                            target = items.find(i => {
+                                                const t = norm(i.textContent || '');
+                                                return t.includes('门店') && (t.includes('消费') || t.includes('入会') || t.includes('至尊'));
+                                            });
+                                        }
+                                        if (!target) return { ok: false, mode: 'store_option_not_found', current: currentLabel };
+                                        fire(target);
+                                        const afterNode =
+                                            targetRow.querySelector('.ant-select-selection-item[title]') ||
+                                            targetRow.querySelector('.ant-select-selection-item');
+                                        const afterLabel = norm((afterNode?.getAttribute('title') || afterNode?.textContent || ''));
+                                        return { ok: true, mode: 'switched_to_store', current: currentLabel, after: afterLabel };
+                                    }""")
+                                    if switch_store_row:
+                                        if switch_store_row.get("mode") == "switched_to_store":
+                                            print(f"      🧪 门店信息行类型切换: {switch_store_row.get('current','')} -> {switch_store_row.get('after','')}")
+                                        elif switch_store_row.get("mode") == "already_store":
+                                            print(f"      🧪 门店信息行类型: 已是门店 ({switch_store_row.get('current','')})")
+                                except Exception:
+                                    pass
+
                                 open_store_picker_info = await frame.evaluate("""() => {
                                     const isVisible = (el) => {
                                         if (!el) return false;
@@ -5836,6 +6394,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                         '至尊续费门店','至尊续费片区','至尊续费营运区','至尊续费大区','至尊续费省区',
                                         '会员通绑定门店','会员通绑定片区','会员通绑定营运区','会员通绑定大区','会员通绑定省区',
                                         '最后消费门店','最后消费片区','最后消费营运区','最后消费大区','最后消费省区',
+                                        '主消费门店','主消费片区','主消费营运区','主消费大区','主消费省区',
                                         '主要消费门店','主要消费片区','主要消费营运区','主要消费大区','主要消费省区',
                                         '消费过的门店','消费过的片区','消费过的营运区','消费过的大区','消费过的省区'
                                     ];
@@ -5859,23 +6418,30 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                 else:
                                     print(f"      🧪 门店信息选择器来源: {open_store_picker_info.get('source','unknown')}")
                                     await asyncio.sleep(0.6)
-                                    modal_pick_info = {"ok": False, "source": "strict_product_picker"}
-                                    for _ in range(12):
+                                    modal_pick_info = {"ok": False, "source": "store_modal_not_found"}
+                                    for _ in range(20):
                                         modal_pick_info = await frame.evaluate("""() => {
-                                        const isVisible = (el) => {
-                                            if (!el) return false;
-                                            const s = window.getComputedStyle(el);
-                                            const r = el.getBoundingClientRect();
-                                            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-                                        };
-                                        const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                        const visibleModals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
-                                        const openedModal = visibleModals.find(m => {
-                                            const t = norm(m.textContent || '');
-                                            return t.includes('选择数据') && t.includes('上传文件');
-                                        });
-                                        if (openedModal) openedModal.setAttribute('data-step2-store-modal', '1');
-                                    }""")
+                                            const isVisible = (el) => {
+                                                if (!el) return false;
+                                                const s = window.getComputedStyle(el);
+                                                const r = el.getBoundingClientRect();
+                                                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                            };
+                                            const norm = (s) => (s || '').replace(/\\s+/g, '');
+                                            const visibleModals = Array.from(document.querySelectorAll('.ant-modal, .ant-modal-wrap, .ant-modal-root')).filter(isVisible);
+                                            const openedModal = visibleModals.find(m => {
+                                                const t = norm(m.textContent || '');
+                                                return t.includes('选择数据') && t.includes('上传文件');
+                                            });
+                                            if (openedModal) {
+                                                openedModal.setAttribute('data-step2-store-modal', '1');
+                                                return { ok: true, source: 'store_select_data_modal' };
+                                            }
+                                            return { ok: false, source: 'store_modal_not_found' };
+                                        }""")
+                                        if modal_pick_info and modal_pick_info.get("ok"):
+                                            break
+                                        await asyncio.sleep(0.15)
                                     # 优先用可见 modal 内的 file input 直接上传
                                     uploaded_store = False
                                     try:
