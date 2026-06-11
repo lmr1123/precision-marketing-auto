@@ -32,6 +32,8 @@ import subprocess
 import re
 import json
 import os
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import List
@@ -59,6 +61,7 @@ CHANNEL_CREATE_URLS = {
     "会员通-发客户朋友圈": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702926159527936",
     "短信": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702746907561984",
     "会员通-发短信": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702746907561984",
+    "智能电话": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=620450416034897920",
 }
 CHANNEL_COMBO_CREATE_URLS = {
     frozenset(["短信", "会员通-发客户消息"]): "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=600035736992907264",
@@ -92,6 +95,7 @@ DEFAULT_PLAN = {
     "group_send_name": "福利",
     "executor_include_franchise": "否",
     "send_content": "企微1对1内容测试",
+    "activity_intro": "",
     "channels": "",
     "create_url": "",
     "moments_add_images": "否",
@@ -111,10 +115,18 @@ MAX_RETRIES = 2
 MAX_CONCURRENT = 3
 FEISHU_USER_ID = "ou_ed20f9990c63fa5448a0f2cd613ecf30"
 DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:9222"
+DEFAULT_CDP_CONNECT_TIMEOUT_MS = int(os.getenv("PM_CDP_CONNECT_TIMEOUT_MS", "15000") or 15000)
+DEFAULT_CDP_CONNECT_RETRIES = int(os.getenv("PM_CDP_CONNECT_RETRIES", "2") or 2)
 DEBUG_DROPDOWN_OPTIONS = os.getenv("PM_DEBUG_DROPDOWN_OPTIONS", "0").strip() in ("1", "true", "yes", "on")
 MOMENTS_UPLOAD_MODE = os.getenv("PM_MOMENTS_UPLOAD_MODE", "batch_then_slow").strip().lower()
 MOMENTS_UPLOAD_DELAY_SECONDS = float(os.getenv("PM_MOMENTS_UPLOAD_DELAY", "1.4") or 1.4)
 MOMENTS_UPLOAD_WAIT_SECONDS = float(os.getenv("PM_MOMENTS_UPLOAD_WAIT", "8") or 8)
+APP_DIR = Path(__file__).resolve().parent
+PACKAGE_DIR = APP_DIR.parent if APP_DIR.name == "app" else APP_DIR
+DATA_DIR = Path(os.getenv("PM_DATA_DIR", str(PACKAGE_DIR / "data"))).resolve()
+PLAYWRIGHT_PROFILE_DIR = Path(
+    os.getenv("PM_PLAYWRIGHT_PROFILE_DIR", str(DATA_DIR / "playwright-profile"))
+).resolve()
 
 # ============ 工具函数 ============
 
@@ -195,6 +207,7 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                 "group_send_name": _gv("group_send_name", "delivery_group_name", "下发群名"),
                 "executor_include_franchise": _gv("executor_include_franchise", "执行员工包含加盟区域"),
                 "send_content": _gv("send_content", "发送内容"),
+                "activity_intro": _gv("activity_intro", "活动介绍"),
                 "channels": _gv("channels", "发送渠道"),
                 "create_url": _gv("create_url", "创建链接"),
                 "moments_add_images": _gv("moments_add_images", "朋友圈是否上传图片"),
@@ -215,6 +228,10 @@ def load_plans_from_csv(csv_path: str, start: int = None, end: int = None) -> li
                     plan["sms_content"] = push_content
                 if any(k in channels_raw for k in ("会员通-发客户消息", "会员通-发客户朋友圈", "会员通-发送社群")) and (not plan.get("send_content", "")):
                     plan["send_content"] = push_content
+                if ("智能电话" in channels_raw) and (not plan.get("activity_intro", "")):
+                    plan["activity_intro"] = push_content
+                if ("智能电话" in channels_raw) and (not plan.get("activity_intro", "")) and plan.get("send_content", ""):
+                    plan["activity_intro"] = plan["send_content"]
                 if (not plan.get("sms_content", "")) and (not plan.get("send_content", "")):
                     # 未指定渠道时兜底：两个都写，交给后续渠道判定使用。
                     plan["sms_content"] = push_content
@@ -1712,6 +1729,224 @@ async def fill_step3_send_content(page, content: str) -> bool:
     rb = ((await editable.inner_text()) or "").strip()
     return len(rb) > 0 and (content[:4] in rb if len(content) >= 4 else content in rb)
 
+async def fill_step3_smart_phone_activity_intro(page, content: str) -> bool:
+    """第3步智能电话自定义参数：按“参数名称=活动介绍”定位同一行的“参数详情”输入框。"""
+    text = (content or "").strip()
+    if not text:
+        return False
+    ok = await page.evaluate("""(value) => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const norm = (s) => (s || '').replace(/\\s+/g, '');
+        const readVal = (el) => norm(el.value || el.getAttribute('placeholder') || el.getAttribute('title') || el.textContent || '');
+        const isWritable = (el) => {
+            if (!el || !isVisible(el)) return false;
+            if (el.disabled || el.readOnly) return false;
+            const cls = el.className || '';
+            const parentCls = el.parentElement ? (el.parentElement.className || '') : '';
+            return !String(cls + ' ' + parentCls).includes('is-disabled');
+        };
+        const write = (el, v) => {
+            if (!isWritable(el)) return false;
+            try { el.scrollIntoView({ block: 'center' }); } catch(e) {}
+            el.focus();
+            if ('value' in el) {
+                const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                if (setter) setter.call(el, v);
+                else el.value = v;
+                el.setAttribute('value', v);
+            } else if (el.isContentEditable) {
+                el.innerText = v;
+                el.textContent = v;
+            }
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+            el.blur();
+            el.setAttribute('data-smart-phone-activity-intro-target', '1');
+            return true;
+        };
+        document.querySelectorAll('[data-smart-phone-activity-intro-target="1"]').forEach(el => el.removeAttribute('data-smart-phone-activity-intro-target'));
+
+        // 优先处理表格/栅格行：左侧“参数名称”是活动介绍，右侧“参数详情”为可写输入框。
+        const rowSelectors = [
+            'tr',
+            '.el-table__row',
+            '.el-row',
+            '.ant-row',
+            '[class*="row"]'
+        ];
+        const rows = Array.from(document.querySelectorAll(rowSelectors.join(','))).filter(isVisible);
+        for (const row of rows) {
+            const controls = Array.from(row.querySelectorAll('input, textarea, [contenteditable="true"]')).filter(isVisible);
+            if (controls.length < 2) continue;
+            const nameControls = controls.filter(el => readVal(el).includes('活动介绍'));
+            if (!nameControls.length && !norm(row.textContent || '').includes('活动介绍')) continue;
+            const nameIdx = nameControls.length ? controls.indexOf(nameControls[0]) : 0;
+            const candidates = controls.slice(Math.max(1, nameIdx + 1)).filter(el => isWritable(el) && !readVal(el).includes('活动介绍'));
+            if (candidates.length && write(candidates[0], value)) return true;
+        }
+
+        // 兜底处理截图中的两列表单块：找到含“参数名称/参数详情”的最近容器后按左右列匹配。
+        const sections = Array.from(document.querySelectorAll('div, section')).filter(el => {
+            if (!isVisible(el)) return false;
+            const t = norm(el.textContent || '');
+            return t.includes('参数名称') && t.includes('参数详情') && t.includes('活动介绍');
+        }).sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
+        for (const section of sections) {
+            const controls = Array.from(section.querySelectorAll('input, textarea, [contenteditable="true"]')).filter(isVisible);
+            const nameIdx = controls.findIndex(el => readVal(el).includes('活动介绍'));
+            if (nameIdx < 0) continue;
+            const candidates = controls.slice(nameIdx + 1).filter(el => isWritable(el) && !readVal(el).includes('活动介绍'));
+            if (candidates.length && write(candidates[0], value)) return true;
+        }
+        return false;
+    }""", text)
+    if not ok:
+        return False
+    try:
+        rb = await page.evaluate("""() => {
+            const el = document.querySelector('[data-smart-phone-activity-intro-target="1"]');
+            if (!el) return '';
+            return (el.value || el.innerText || el.textContent || '').trim();
+        }""")
+    except Exception:
+        rb = ""
+    if rb:
+        print(f"      🧪 活动介绍参数详情回读: {rb[:80]}")
+    if not rb or text[: min(6, len(text))] not in rb:
+        return False
+    clicked = await click_button_with_text(page, "保存自定义参数")
+    if clicked:
+        await asyncio.sleep(0.5)
+    else:
+        print("      ⚠️ 未找到“保存自定义参数”按钮，已保留输入值继续保存计划")
+    return True
+
+async def fill_step3_smart_phone_task_validity(page, start_time: str, end_time: str) -> bool:
+    """智能电话第3步任务有效期：字段位于触达内容模块内，直接写入开始/结束时间。"""
+    s_date, s_time = split_datetime(start_time)
+    e_date, e_time = split_datetime(end_time, default_time="23:00:00")
+    start_full = f"{s_date} {s_time}"
+    end_full = f"{e_date} {e_time}"
+    marked = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const norm = (s) => (s || '').replace(/\\s+/g, '');
+        document.querySelectorAll('[data-smart-phone-validity-root="1"]').forEach(el => el.removeAttribute('data-smart-phone-validity-root'));
+        const roots = Array.from(document.querySelectorAll('.el-form-item, .ant-form-item, .item, .el-row, div'))
+            .filter(el => isVisible(el) && norm(el.textContent || '').includes('任务有效期') && el.querySelector('input'))
+            .sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
+        if (!roots.length) return false;
+        roots[0].setAttribute('data-smart-phone-validity-root', '1');
+        return true;
+    }""")
+    if marked:
+        root = page.locator('[data-smart-phone-validity-root="1"]').first
+        try:
+            await root.scroll_into_view_if_needed()
+            await root.locator("input").first.click(force=True)
+            panel = page.locator('.el-picker-panel.el-date-range-picker:visible').first
+            await panel.wait_for(timeout=3000)
+            s_date_input = panel.get_by_placeholder("开始日期").first
+            s_time_input = panel.get_by_placeholder("开始时间").first
+            e_date_input = panel.get_by_placeholder("结束日期").first
+            e_time_input = panel.get_by_placeholder("结束时间").first
+            await fill_with_retry(s_date_input, s_date)
+            await s_date_input.press("Enter")
+            await fill_with_retry(s_time_input, s_time)
+            await s_time_input.press("Enter")
+            await fill_with_retry(e_date_input, e_date)
+            await e_date_input.press("Enter")
+            await fill_with_retry(e_time_input, e_time)
+            await e_time_input.press("Enter")
+            await panel.locator('.el-picker-panel__footer button:has-text("确定")').first.click(force=True)
+            await asyncio.sleep(0.5)
+            values = await root.evaluate("""(node) => Array.from(node.querySelectorAll('input')).map(i => i.value || '').filter(Boolean)""")
+            print(f"      🧪 智能电话任务有效期面板回读: {values}")
+            if values_include_datetime(values, s_date, s_time) and values_include_datetime(values, e_date, e_time):
+                return True
+        except Exception as e:
+            print(f"      ⚠️ 智能电话任务有效期面板填写失败，尝试兜底: {e}")
+
+    ok = await page.evaluate("""({startFull, endFull}) => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const norm = (s) => (s || '').replace(/\\s+/g, '');
+        const write = (el, val) => {
+            if (!el || !isVisible(el)) return false;
+            try { el.scrollIntoView({ block: 'center' }); } catch(e) {}
+            el.focus();
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+            if (setter) setter.call(el, val);
+            else el.value = val;
+            el.setAttribute('value', val);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+            el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+            el.blur();
+            return true;
+        };
+        const roots = Array.from(document.querySelectorAll('[data-smart-phone-validity-root="1"], .item, .el-form-item, .ant-form-item, .el-row, div'))
+            .filter(el => isVisible(el) && norm(el.textContent || '').includes('任务有效期') && el.querySelector('input'))
+            .sort((a, b) => {
+                if (a.getAttribute('data-smart-phone-validity-root') === '1') return -1;
+                if (b.getAttribute('data-smart-phone-validity-root') === '1') return 1;
+                return (a.textContent || '').length - (b.textContent || '').length;
+            });
+        for (const root of roots) {
+            const inputs = Array.from(root.querySelectorAll('input')).filter(isVisible);
+            if (inputs.length >= 2) {
+                const ok1 = write(inputs[0], startFull);
+                const ok2 = write(inputs[1], endFull);
+                if (ok1 && ok2) return true;
+            }
+            if (inputs.length === 1) {
+                if (write(inputs[0], `${startFull} - ${endFull}`)) return true;
+            }
+        }
+        return false;
+    }""", {"startFull": start_full, "endFull": end_full})
+    await asyncio.sleep(0.3)
+    values = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const norm = (s) => (s || '').replace(/\\s+/g, '');
+        const roots = Array.from(document.querySelectorAll('[data-smart-phone-validity-root="1"], .item, .el-form-item, .ant-form-item, .el-row, div'))
+            .filter(el => isVisible(el) && norm(el.textContent || '').includes('任务有效期') && el.querySelector('input'))
+            .sort((a, b) => {
+                if (a.getAttribute('data-smart-phone-validity-root') === '1') return -1;
+                if (b.getAttribute('data-smart-phone-validity-root') === '1') return 1;
+                return (a.textContent || '').length - (b.textContent || '').length;
+            });
+        for (const root of roots) {
+            const vals = Array.from(root.querySelectorAll('input')).filter(isVisible).map(i => i.value || '').filter(Boolean);
+            if (vals.length) return vals;
+        }
+        return [];
+    }""")
+    print(f"      🧪 智能电话任务有效期回读: {values}")
+    return bool(ok and values_include_datetime(values, s_date, s_time) and values_include_datetime(values, e_date, e_time))
+
 async def fill_step3_sms_content(page, content: str) -> bool:
     """第3步短信内容：固定写入“短信内容(必填)”对应编辑器，并校验长度>0。"""
     ok = await page.evaluate("""() => {
@@ -2959,6 +3194,160 @@ def extract_review_link_from_text(text: str) -> str:
         return m_edit.group(1).strip().rstrip(".,)")
     return ""
 
+def extract_activity_id_from_api_body(text: str) -> str:
+    """从保存接口响应体里提取 activityId。"""
+    if not text:
+        return ""
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for key in ("activityId", "activity_id", "id"):
+                val = obj.get(key)
+                if val is not None and str(val).strip():
+                    return str(val).strip()
+            for val in obj.values():
+                hit = walk(val)
+                if hit:
+                    return hit
+        elif isinstance(obj, list):
+            for val in obj:
+                hit = walk(val)
+                if hit:
+                    return hit
+        return ""
+
+    try:
+        data = json.loads(text)
+    except Exception:
+        m = re.search(r'"activityId"\s*:\s*"?([0-9A-Za-z_-]+)"?', text)
+        return m.group(1).strip() if m else ""
+    return walk(data)
+
+def build_review_link_from_activity_id(activity_id: str, source_url: str = "") -> str:
+    """根据 activityId 构造营销计划编辑链接。"""
+    aid = str(activity_id or "").strip()
+    if not aid:
+        return ""
+    if "addcommunityPlan" in str(source_url or ""):
+        return f"https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=edit&activityId={aid}"
+    return f"https://precision.dslyy.com/admin#/marketingPlan/editPlan?activityId={aid}"
+
+def extract_community_activity_id_from_rows(rows, plan_name: str) -> str:
+    """从社群列表行文本中按计划名称提取 activityId。"""
+    name = str(plan_name or "").strip()
+    if not name:
+        return ""
+    for row in rows or []:
+        if isinstance(row, dict):
+            explicit_names = [
+                str(row.get(k, "") or "").strip()
+                for k in ("name", "planName", "marketingName", "activityName")
+            ]
+            if any(explicit_names) and name not in explicit_names:
+                continue
+            text = " ".join(str(v or "") for v in row.values())
+        else:
+            text = str(row or "")
+        if name not in text:
+            continue
+        m = re.search(r"\b(\d{15,})\b", text)
+        if m:
+            return m.group(1)
+    return ""
+
+async def lookup_community_review_link_from_list(page, plan_name: str) -> str:
+    """社群保存响应缺少 activityId 时，通过已登录列表页 UI 搜索计划名兜底拿链接。"""
+    name = str(plan_name or "").strip()
+    if not name:
+        return ""
+    list_url = "https://precision.dslyy.com/admin#/marketingPlan/communityPlanList"
+    try:
+        await page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            await page.wait_for_selector(".el-table", timeout=12000)
+        except Exception:
+            pass
+
+        filled = await page.evaluate(
+            """(planName) => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                };
+                const inputs = Array.from(document.querySelectorAll('input[placeholder*="请输入关键词"], input.el-input__inner'))
+                    .filter(isVisible);
+                const input = inputs.find(i => (i.getAttribute('placeholder') || '').includes('请输入关键词')) || inputs[0];
+                if (!input) return false;
+                const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
+                if (setter) setter.call(input, planName);
+                else input.value = planName;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                input.focus();
+                return true;
+            }""",
+            name,
+        )
+        if not filled:
+            print("      ⚠️ 社群列表兜底未找到关键词输入框")
+            return ""
+        try:
+            await page.keyboard.press("Enter")
+        except Exception:
+            pass
+        clicked = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const norm = (s) => (s || '').replace(/\\s+/g, '');
+            const btns = Array.from(document.querySelectorAll('button')).filter(isVisible);
+            const btn = btns.find(b => ['查询', '搜索'].some(t => norm(b.textContent || '').includes(t)));
+            if (!btn) return false;
+            btn.click();
+            return true;
+        }""")
+        if clicked:
+            await asyncio.sleep(1.5)
+        else:
+            await asyncio.sleep(2.0)
+
+        activity_id = ""
+        for _ in range(8):
+            rows = await page.evaluate(
+                """() => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const s = window.getComputedStyle(el);
+                        const r = el.getBoundingClientRect();
+                        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                    };
+                    return Array.from(document.querySelectorAll('.el-table__body-wrapper tbody tr'))
+                        .filter(isVisible)
+                        .map(row => (row.textContent || '').replace(/\\s+/g, ' ').trim())
+                        .filter(Boolean)
+                        .slice(0, 20);
+                }"""
+            )
+            activity_id = extract_community_activity_id_from_rows(rows, name)
+            if activity_id:
+                break
+            await asyncio.sleep(0.5)
+
+        if not activity_id:
+            print("      ⚠️ 社群列表兜底未按计划名找到 activityId")
+            return ""
+        link = build_review_link_from_activity_id(activity_id, "addcommunityPlan")
+        print(f"      🔗 复核链接: {link}")
+        return link
+    except Exception as exc:
+        print(f"      ⚠️ 社群列表兜底获取复核链接失败: {exc}")
+        return ""
+
 def summarize_content_fields_from_payload(post_data: str) -> str:
     """解析保存请求体，摘要短信/内容相关字段长度，便于定位长度=0原因。"""
     if not post_data:
@@ -2993,7 +3382,18 @@ def summarize_content_fields_from_payload(post_data: str) -> str:
     req_count = len(req_items) if isinstance(req_items, list) else 0
     return f"multiChannelItemReq={req_count}, zeroFields={zero_fields}, nonZeroSample={non_zero_fields}"
 
-async def ensure_step3_saved(page, save_resp_task=None, before_url: str = "") -> bool:
+async def read_save_response_body(resp, timeout: float = 20.0) -> str:
+    """读取保存接口响应体；社群接口偶发 body 到达较慢，给有限等待窗口。"""
+    if resp is None:
+        return ""
+    try:
+        return await asyncio.wait_for(resp.text(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return ""
+    except Exception:
+        return ""
+
+async def ensure_step3_saved(page, save_resp_task=None, before_url: str = "", before_context_urls: set[str] | None = None) -> bool:
     """确保第3步保存真正提交：处理确认弹窗并等待成功提示。"""
     async def _click_visible_confirm_once() -> bool:
         try:
@@ -3067,11 +3467,9 @@ async def ensure_step3_saved(page, save_resp_task=None, before_url: str = "") ->
                     status = int(resp.status or 0)
                 except Exception:
                     status = 0
-                body = ""
-                try:
-                    body = await resp.text()
-                except Exception:
-                    body = ""
+                body = await read_save_response_body(resp)
+                if not body:
+                    print("      ⚠️ 保存接口响应体读取超时，继续使用请求/页面信号判断")
                 api_body = body or ""
                 code, msg = extract_api_code_message(api_body) if api_body else ("", "")
                 post_data = ""
@@ -3110,6 +3508,11 @@ async def ensure_step3_saved(page, save_resp_task=None, before_url: str = "") ->
                 content_diag = summarize_content_fields_from_payload(post_data)
                 if content_diag:
                     print(f"      🧪 请求体内容字段诊断: {content_diag}")
+                activity_id = extract_activity_id_from_api_body(api_body) or extract_activity_id_from_api_body(post_data)
+                if activity_id:
+                    review_link = build_review_link_from_activity_id(activity_id, before_url)
+                    if review_link:
+                        print(f"      🔗 复核链接: {review_link}")
         except asyncio.TimeoutError:
             pass
         except Exception:
@@ -3194,8 +3597,11 @@ async def ensure_step3_saved(page, save_resp_task=None, before_url: str = "") ->
                 context_urls.append(u)
     except Exception:
         context_urls = []
+    old_context_urls = before_context_urls or set()
     if context_urls and ((not moved) or current_url.startswith("about:blank")):
         for u in context_urls:
+            if u in old_context_urls:
+                continue
             if ("#/marketingPlan/editPlan?" in u) or ("#/marketingPlan/viewPlan?" in u) or ("limitList" in u) or ("marketingPlan/list" in u):
                 moved = True
                 moved_to_review = ("#/marketingPlan/editPlan?" in u) or ("#/marketingPlan/viewPlan?" in u)
@@ -3334,6 +3740,11 @@ async def ensure_step3_saved(page, save_resp_task=None, before_url: str = "") ->
             else:
                 # 再从接口响应体里兜底提取
                 api_review_link = extract_review_link_from_text(api_body)
+                if not api_review_link:
+                    api_review_link = build_review_link_from_activity_id(
+                        extract_activity_id_from_api_body(api_body),
+                        before_url,
+                    )
                 if api_review_link:
                     print(f"      🔗 复核链接: {api_review_link}")
     return moved
@@ -3957,6 +4368,30 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             return False
         return (sb in sa) or (sa in sb)
 
+    async def safe_cascader_click(locator) -> bool:
+        try:
+            await locator.scroll_into_view_if_needed(timeout=1000)
+        except Exception:
+            pass
+        try:
+            await locator.click(force=True, timeout=3000)
+            return True
+        except PlaywrightTimeout:
+            pass
+        except Exception:
+            pass
+        try:
+            return bool(await locator.evaluate("""(el) => {
+                if (!el) return false;
+                ['pointerdown','mousedown','mouseup','click'].forEach(tp => {
+                    el.dispatchEvent(new MouseEvent(tp, { bubbles: true, cancelable: true, view: window }));
+                });
+                if (typeof el.click === 'function') el.click();
+                return true;
+            }"""))
+        except Exception:
+            return False
+
     async def expand_in_menu(menu_index: int, target: str) -> bool:
         menu = page.locator(".el-cascader-panel:visible").last.locator(".el-cascader-menu").nth(menu_index)
         nodes = menu.locator(".el-cascader-node")
@@ -3980,7 +4415,7 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
                 pass
             postfix = node.locator(".el-cascader-node__postfix").first
             if await postfix.count() > 0:
-                await postfix.click(force=True)
+                await safe_cascader_click(postfix)
             else:
                 # 避免点击label触发勾选（尤其“全国”），没有展开箭头时不执行展开点击。
                 return False
@@ -4049,7 +4484,7 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
                 await click_target.scroll_into_view_if_needed()
             except Exception:
                 pass
-            await click_target.click(force=True)
+            await safe_cascader_click(click_target)
             await asyncio.sleep(0.1)
             return True
         return False
@@ -4091,7 +4526,7 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             if not checked:
                 checked = ("in-checked-path" in node_cls) or ("is-checked" in (cb_cls or ""))
             if not checked:
-                await click_target.click(force=True)
+                await safe_cascader_click(click_target)
                 await asyncio.sleep(0.08)
             return True
         return False
@@ -4249,6 +4684,8 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
         "大郑州营运区加盟": ["西北大区加盟", "河南省区加盟", "大郑州营运区加盟"],
         "肇庆营运区": ["华南大区", "广佛省区", "肇庆营运区"],
         "肇庆营运区加盟": ["华南大区加盟", "广佛省区加盟", "肇庆营运区加盟"],
+        "肇云营运区": ["华南大区", "广佛省区", "肇云营运区"],
+        "肇云营运区加盟": ["华南大区加盟", "广佛省区加盟", "肇云营运区加盟"],
         "云浮营运区": ["华南大区", "广佛省区", "云浮营运区"],
         "云浮营运区加盟": ["华南大区加盟", "广佛省区加盟", "云浮营运区加盟"],
         # 广佛省区常用简称（从文件主消费营运区复用到执行员工）
@@ -4477,15 +4914,24 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
     if all(selected.values()):
         return True
 
-    # 二级判定（防误杀）：页面已存在执行员工回读且未出现该字段校验报错时放行。
+    # 二级判定（防误杀）：页面回读必须包含目标核心词，避免模板默认值残留被当成成功。
     try:
-        loose_ok = await page.evaluate("""() => {
+        loose_ok = await page.evaluate("""(targets) => {
             const isVisible = (el) => {
                 if (!el) return false;
                 const s = window.getComputedStyle(el);
                 const r = el.getBoundingClientRect();
                 return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
             };
+            const norm = (s) => (s || '').replace(/\\s+/g, '');
+            const simplify = (s) => norm(s)
+                .replace(/加盟/g, '')
+                .replace(/营运区/g, '')
+                .replace(/省区/g, '')
+                .replace(/大区/g, '')
+                .replace(/片区/g, '')
+                .replace(/门店/g, '')
+                .replace(/店/g, '');
             const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
             for (const label of labels) {
                 const txt = (label.textContent || '').replace(/\\s+/g, '');
@@ -4500,12 +4946,18 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
                 const hasValue = !!(inputVal || tags.length > 0);
                 const hasError = Array.from(item.querySelectorAll('.el-form-item__error, .ant-form-item-explain-error'))
                     .some(n => isVisible(n));
-                return hasValue && !hasError;
+                if (!hasValue || hasError) return false;
+                const readback = norm([inputVal, ...tags].join(' '));
+                return (targets || []).every(t => {
+                    const tgt = norm(t);
+                    const core = simplify(t);
+                    return !!tgt && (readback.includes(tgt) || (!!core && readback.includes(core)));
+                });
             }
             return false;
-        }""")
+        }""", targets)
         if loose_ok:
-            print("      ⚠️ 执行员工精确回读未全命中，按页面已填+无报错放行")
+            print("      ⚠️ 执行员工精确回读未全命中，按目标核心词回读命中放行")
             return True
     except Exception:
         pass
@@ -5027,6 +5479,10 @@ async def fill_step3_executor_by_condition(page, raw_values: str, include_franch
         "肇庆营运区": ["华南大区", "广佛省区", "肇庆营运区"],
         "肇庆加盟": ["华南大区加盟", "广佛省区加盟", "肇庆营运区加盟"],
         "肇庆营运区加盟": ["华南大区加盟", "广佛省区加盟", "肇庆营运区加盟"],
+        "肇云": ["华南大区", "广佛省区", "肇云营运区"],
+        "肇云营运区": ["华南大区", "广佛省区", "肇云营运区"],
+        "肇云加盟": ["华南大区加盟", "广佛省区加盟", "肇云营运区加盟"],
+        "肇云营运区加盟": ["华南大区加盟", "广佛省区加盟", "肇云营运区加盟"],
         "云浮": ["华南大区", "广佛省区", "云浮营运区"],
         "云浮营运区": ["华南大区", "广佛省区", "云浮营运区"],
         "云浮加盟": ["华南大区加盟", "广佛省区加盟", "云浮营运区加盟"],
@@ -5173,11 +5629,17 @@ async def set_plan_time_range(page, start_time: str, end_time: str):
     print(f"   📅 计划时间: {s_date} {s_time} -> {e_date} {e_time}")
 
     item = await get_form_item_by_label(page, "计划时间")
+    label_used = "计划时间"
     if not item:
-        print("      ⚠️ 未找到“计划时间”字段，回退到普通输入")
+        item = await get_form_item_by_label(page, "任务有效期")
+        label_used = "任务有效期"
+    if not item:
+        print("      ⚠️ 未找到“计划时间/任务有效期”字段，回退到普通输入")
         await fill_input(page, "开始日期", start_time)
         await fill_input(page, "结束日期", end_time)
         return
+    if label_used != "计划时间":
+        print(f"      🧪 使用字段标签: {label_used}")
 
     async def apply_once() -> bool:
         # 打开日期范围面板
@@ -6690,7 +7152,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                                     const m2 = txt.match(/已选中\\s*\\d+/);
                                                     return m2 ? m2[0] : '';
                                                 }""")
-                                                m = re.search(r'(\\d+)', selected_text or "")
+                                                m = re.search(r'(\d+)', selected_text or "")
                                                 n = int(m.group(1)) if m else 0
                                                 if n > 0:
                                                     break
@@ -6730,11 +7192,25 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                             }""")
                                             if confirm_product and confirm_product.get("ok"):
                                                 print(f"      🧪 商品编码确认动作: 已点击按钮 [{(confirm_product.get('text') or '').strip()}]")
-                                                await asyncio.sleep(0.6)
+                                                # 等弹窗关闭和主页面条件行回写，避免刚点确认就读到旧的“已选：0”。
+                                                for _ in range(20):
+                                                    modal_visible = await frame.evaluate("""() => {
+                                                        const isVisible = (el) => {
+                                                            if (!el) return false;
+                                                            const s = window.getComputedStyle(el);
+                                                            const r = el.getBoundingClientRect();
+                                                            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                                                        };
+                                                        return Array.from(document.querySelectorAll('[data-step2-product-modal="1"], .ant-modal, .ant-modal-wrap'))
+                                                            .some(el => isVisible(el) && ((el.textContent || '').includes('商品编码')));
+                                                    }""")
+                                                    if not modal_visible:
+                                                        break
+                                                    await asyncio.sleep(0.2)
                                                 # 只读“商品编码”行本身的“已选”，避免串读其它区域
                                                 product_row_selected = ""
                                                 n = 0
-                                                for _ in range(12):
+                                                for _ in range(30):
                                                     product_row_selected = await frame.evaluate("""() => {
                                                         const isVisible = (el) => {
                                                             if (!el) return false;
@@ -6743,22 +7219,42 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                                                             return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
                                                         };
                                                         const norm = (s) => (s || '').replace(/\\s+/g, '');
-                                                        const rows = Array.from(document.querySelectorAll('.event-row, .condition')).filter(isVisible);
-                                                        for (const row of rows) {
-                                                            const hasTitle = !!row.querySelector('.ant-select-selection-item[title="商品编码"], [title="商品编码"]');
-                                                            const txt = norm(row.textContent || '');
-                                                            if (!hasTitle && !txt.includes('商品编码')) continue;
-                                                            const direct = row.querySelector('.ml-2');
-                                                            const val = (direct && (direct.textContent || '').trim()) || '';
-                                                            if (/已选[:：]\\s*\\d+/.test(val)) return val;
+                                                        const candidateRows = [];
+                                                        const addRow = (row) => {
+                                                            if (row && isVisible(row) && !candidateRows.includes(row)) candidateRows.push(row);
+                                                        };
+                                                        const titleNodes = Array.from(document.querySelectorAll('.ant-select-selection-item[title="商品编码"], [title="商品编码"]'))
+                                                            .filter(isVisible);
+                                                        for (const node of titleNodes) {
+                                                            for (const sel of ['.event-row', '.condition', '.ant-form-item', '.ant-row']) {
+                                                                addRow(node.closest(sel));
+                                                            }
+                                                        }
+                                                        Array.from(document.querySelectorAll('.event-row, .condition, .ant-form-item, .ant-row'))
+                                                            .filter(isVisible)
+                                                            .forEach(row => {
+                                                                const txt = norm(row.textContent || '');
+                                                                if (txt.includes('商品编码') && !txt.includes('门店编码')) addRow(row);
+                                                            });
+                                                        for (const row of candidateRows) {
+                                                            const txtRaw = (row.textContent || '').trim();
+                                                            const txt = norm(txtRaw);
+                                                            if (!txt.includes('商品编码') || txt.includes('门店编码')) continue;
+                                                            const directNodes = Array.from(row.querySelectorAll('.ml-2, [class*="selected"], [class*="count"]')).filter(isVisible);
+                                                            for (const direct of directNodes) {
+                                                                const val = (direct.textContent || '').trim();
+                                                                if (/已选[:：]\\s*\\d+/.test(val)) return val;
+                                                            }
+                                                            const m = txtRaw.match(/已选[:：]\\s*\\d+/);
+                                                            if (m) return m[0];
                                                         }
                                                         return '';
                                                     }""")
-                                                    m = re.search(r'(\\d+)', product_row_selected or "")
+                                                    m = re.search(r'(\d+)', product_row_selected or "")
                                                     n = int(m.group(1)) if m else 0
                                                     if n > 0:
                                                         break
-                                                    await asyncio.sleep(0.3)
+                                                    await asyncio.sleep(0.4)
                                                 if product_row_selected:
                                                     print(f"      🧪 商品编码行回读: {product_row_selected}")
                                                 if n > 0:
@@ -6959,7 +7455,7 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
                     });
                     return hit ? (hit.textContent || '').trim() : '';
                 }""")
-                m = re.search(r'(\\d+)', selected_info_text or "")
+                m = re.search(r'(\d+)', selected_info_text or "")
                 n = int(m.group(1)) if m else 0
                 if n > 0:
                     results["第2步-门店信息已选"] = True
@@ -6971,6 +7467,25 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
 
     # 严格模式下，字段级回读失败也要终止，避免“日志看着成功”。
     if strict_step2:
+        # 检测 iframe 页面是否实际包含商品编码/券规则字段，
+        # 不同渠道（如智能电话）的分群页面可能不含这些字段。
+        page_has_product_field = False
+        page_has_coupon_field = False
+        try:
+            _fd = await frame.evaluate("""() => {
+                const t = (document.body && document.body.innerText) || '';
+                const n = t.replace(/\\s+/g, '');
+                return { p: n.includes('商品编码'), c: n.includes('券规则') };
+            }""")
+            page_has_product_field = _fd.get("p", False)
+            page_has_coupon_field = _fd.get("c", False)
+            if not page_has_product_field and (data.get("step2_product_file_path", "") or "").strip():
+                print("      ℹ️ 当前分群页面不含'商品编码'字段（渠道差异），自动跳过该字段校验")
+            if not page_has_coupon_field and data.get("coupon_ids"):
+                print("      ℹ️ 当前分群页面不含'券规则ID'字段（渠道差异），自动跳过该字段校验")
+        except Exception:
+            pass
+
         required_keys = ["第2步-编辑按钮", "第2步-弹窗可见", "第2步-更新方式", "第2步-预跑按钮"]
         has_main_area_cfg = bool((data.get("main_operating_area", "") or "").strip())
         has_main_store_cfg = bool(
@@ -6990,7 +7505,9 @@ async def fill_step2(page, data: dict, strict_step2: bool = False):
             ])
             if not store_ok:
                 required_keys.append("第2步-主消费营运区")
-        if data.get("coupon_ids"):
+        if has_product_cfg and page_has_product_field:
+            required_keys.append("第2步-商品编码")
+        if data.get("coupon_ids") and page_has_coupon_field:
             required_keys.append("第2步-券规则ID")
         failed = [k for k in required_keys if not results.get(k, False)]
         if has_store_cfg and not failed:
@@ -7055,7 +7572,12 @@ async def skip_step2(page, data: dict | None = None):
                     txt.includes('员工任务结束时间') ||
                     txt.includes('执行员工') ||
                     txt.includes('发送内容') ||
-                    txt.includes('社群群发')
+                    txt.includes('社群群发') ||
+                    txt.includes('智能电话') ||
+                    txt.includes('活动介绍') ||
+                    txt.includes('参数详情') ||
+                    txt.includes('自定义参数') ||
+                    txt.includes('触达内容')
                 );
             }""")
             if step3_like:
@@ -7105,7 +7627,8 @@ async def fill_step3(
             const hasEditable = Array.from(document.querySelectorAll('[contenteditable="true"]')).some(isVisible);
             const strongSignals = [
                 '发送限制', '分配方式', '执行员工', '任务详情',
-                '发送内容', '短信内容', '添加图片', '结束时间'
+                '发送内容', '短信内容', '添加图片', '结束时间',
+                '自定义参数', '参数名称', '参数详情', '活动介绍', '任务有效期'
             ];
             const hitSignals = strongSignals.filter(s => text.includes(s));
             return { text, placeholders, hasCascader, hasEditable, hitSignals };
@@ -7186,6 +7709,7 @@ async def fill_step3(
     customer_msg_required = ("会员通-发客户消息" in selected_channels) if has_channel_filter else True
     community_required = ("会员通-发送社群" in selected_channels) if has_channel_filter else False
     moments_required = ("会员通-发客户朋友圈" in selected_channels) if has_channel_filter else True
+    smart_phone_required = ("智能电话" in selected_channels) if has_channel_filter else False
 
     print("   📝 短信内容...")
     sms_content = data.get("sms_content", "测试短信内容")
@@ -7290,8 +7814,7 @@ async def fill_step3(
             )
             print(f"   ⚙️ 社群任务分配方式: {distribution_mode if mode_ok else '未找到分配方式控件'}")
             if community_required and (not mode_ok):
-                moments_gate_ok = False
-                moments_gate_errors.append("分配方式")
+                print("      ⚠️ 未找到分配方式控件，继续保存前校验；若业务必填则由保存接口返回明确错误")
 
         if need_executor:
             print(f"   👥 执行员工: {executor_vals}")
@@ -7304,13 +7827,17 @@ async def fill_step3(
                 targets = split_multi_values(executor_check_override) if executor_check_override else split_multi_values(executor_vals)
                 overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
                 if overlap_msg:
-                    print(f"      ⚠️ {overlap_msg}（当前按业务场景仅提示，不阻断保存）")
+                    print(f"      ⚠️ {overlap_msg}（已按严格复核阻断保存）")
+                    results["第3步-执行员工"] = False
+                    moments_gate_ok = False
+                    if "执行员工重叠" not in moments_gate_errors:
+                        moments_gate_errors.append("执行员工重叠")
                 haystack = " ".join([
                     debug_data.get("inputValue", ""),
                     " ".join(debug_data.get("tags", [])),
                     " ".join([n.get("text", "") for n in debug_data.get("checked", []) if isinstance(n, dict)]),
                 ])
-                manual_ok = all(t in haystack for t in targets)
+                manual_ok = (not overlap_msg) and all(t in haystack for t in targets)
                 if not manual_ok:
                     print(f"      ⚠️ 手动执行员工校验失败：当前未匹配目标 {targets}")
                 else:
@@ -7339,7 +7866,11 @@ async def fill_step3(
                 targets = split_multi_values(executor_vals)
                 overlap_msg = detect_executor_overlap_conflict(debug_data, targets)
                 if overlap_msg:
-                    print(f"      ⚠️ {overlap_msg}（当前按业务场景仅提示，不阻断保存）")
+                    print(f"      ⚠️ {overlap_msg}（已按严格复核阻断保存）")
+                    results["第3步-执行员工"] = False
+                    moments_gate_ok = False
+                    if "执行员工重叠" not in moments_gate_errors:
+                        moments_gate_errors.append("执行员工重叠")
         else:
             if community_import_mode:
                 print("   👥 执行员工: ⏭️ 当前为“导入门店/选中门店”，无需选择员工")
@@ -7420,6 +7951,36 @@ async def fill_step3(
         results["第3步-添加小程序"] = True
         results["第3步-朋友圈图片"] = True
 
+    if smart_phone_required:
+        smart_time_ok = True
+        try:
+            smart_time_ok = await fill_step3_smart_phone_task_validity(
+                page,
+                data.get("start_time", ""),
+                data.get("end_time", ""),
+            )
+        except Exception as e:
+            smart_time_ok = False
+            print(f"      ⚠️ 智能电话任务有效期填充失败: {e}")
+        results["第3步-任务有效期"] = smart_time_ok
+        if not smart_time_ok:
+            raise RuntimeError("智能电话必填项未完成: 任务有效期")
+        activity_intro = (
+            data.get("activity_intro")
+            or data.get("push_content")
+            or data.get("send_content")
+            or ""
+        )
+        print(f"   ☎️ 活动介绍: {activity_intro}")
+        intro_ok = await fill_step3_smart_phone_activity_intro(page, activity_intro)
+        print(f"      {'✅' if intro_ok else '⚠️'} 活动介绍{'已填充' if intro_ok else '未匹配到参数详情输入框'}")
+        results["第3步-活动介绍"] = intro_ok
+        if not intro_ok:
+            raise RuntimeError("智能电话必填项未完成: 活动介绍")
+    else:
+        print("   ☎️ 活动介绍: ⏭️ 当前所选渠道无需填写，已跳过")
+        results["第3步-活动介绍"] = True
+
     # 显式约束：会员通-发客户消息始终要求结束时间/执行员工/发送内容都成功
     if customer_msg_required:
         must_keys = ["第3步-结束时间", "第3步-发送内容"]
@@ -7483,6 +8044,7 @@ async def fill_step3(
     save_resp_task = loop.create_future()
     save_resp_candidates = []
     save_req_candidates = []
+    save_request_review_link = ""
 
     def _is_core_save_api(url: str) -> bool:
         u = (url or "").lower()
@@ -7506,16 +8068,33 @@ async def fill_step3(
             pass
 
     def _on_request(req):
+        nonlocal save_request_review_link
         try:
             m = req.method or ""
             if m in ("POST", "PUT", "PATCH"):
                 save_req_candidates.append((m, req.url))
+                if _is_core_save_api(req.url or "") and not save_request_review_link:
+                    try:
+                        body = req.post_data or ""
+                    except Exception:
+                        body = ""
+                    activity_id = extract_activity_id_from_api_body(body)
+                    if activity_id:
+                        save_request_review_link = build_review_link_from_activity_id(activity_id, save_start_url)
         except Exception:
             pass
 
     page.on("response", _on_response)
     page.on("request", _on_request)
     save_start_url = page.url
+    save_start_context_urls = set()
+    try:
+        for p in page.context.pages:
+            u = p.url or ""
+            if u:
+                save_start_context_urls.add(u)
+    except Exception:
+        save_start_context_urls = set()
     clicked = await click_step3_save_button(page)
     if not clicked:
         if not save_resp_task.done():
@@ -7537,9 +8116,16 @@ async def fill_step3(
         print("      🧪 点击保存后发送内容回读: 已跳过（当前渠道无需发送内容）")
     if save_req_candidates:
         print(f"      🧪 保存阶段请求候选: {[u for _, u in save_req_candidates[-10:]]}")
+    if save_request_review_link:
+        print(f"      🔗 复核链接: {save_request_review_link}")
     if save_resp_candidates:
         print(f"      🧪 保存阶段POST候选: {[u for _, u in save_resp_candidates[:8]]}")
-    saved_ok = await ensure_step3_saved(page, save_resp_task=save_resp_task, before_url=save_start_url)
+    saved_ok = await ensure_step3_saved(
+        page,
+        save_resp_task=save_resp_task,
+        before_url=save_start_url,
+        before_context_urls=save_start_context_urls,
+    )
     community_like = "addcommunityPlan" in (save_start_url or "")
 
     async def _has_visible_save_error() -> bool:
@@ -7620,7 +8206,12 @@ async def fill_step3(
                 clicked_retry = await click_step3_save_button(page)
                 if clicked_retry:
                     await wait_and_log(page, 1.6, f"补点保存中(第{attempt}次)...")
-                    saved_ok = await ensure_step3_saved(page, save_resp_task=retry_task, before_url=save_start_url)
+                    saved_ok = await ensure_step3_saved(
+                        page,
+                        save_resp_task=retry_task,
+                        before_url=save_start_url,
+                        before_context_urls=save_start_context_urls,
+                    )
                 if saved_ok:
                     break
             finally:
@@ -7661,7 +8252,12 @@ async def fill_step3(
                 clicked_retry = await click_step3_save_button(page)
                 if clicked_retry:
                     await wait_and_log(page, 1.6, "补点保存中...")
-                    saved_ok = await ensure_step3_saved(page, save_resp_task=retry_task, before_url=save_start_url)
+                    saved_ok = await ensure_step3_saved(
+                        page,
+                        save_resp_task=retry_task,
+                        before_url=save_start_url,
+                        before_context_urls=save_start_context_urls,
+                    )
             finally:
                 try:
                     page.remove_listener("response", _on_response_retry)
@@ -7671,12 +8267,20 @@ async def fill_step3(
             print("      ⚠️ 社群页首次保存未确认成功，且当前URL异常，跳过补点")
     if not saved_ok:
         raise RuntimeError(f"保存未真正提交（未检测到成功提示/跳转），当前URL={page.url}")
+    if community_like and not save_request_review_link:
+        await lookup_community_review_link_from_list(page, data.get("name", ""))
     print("      ✅ 已检测到保存成功")
     return results
 
 async def dump_executor_debug(page):
     """打印执行员工级联选择的调试信息（无需 DevTools）。"""
     data = await page.evaluate("""() => {
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        };
         const labels = Array.from(document.querySelectorAll('.item .label, .el-form-item__label, .ant-form-item-label label'));
         let item = null;
         for (const label of labels) {
@@ -7687,7 +8291,7 @@ async def dump_executor_debug(page):
             }
         }
         const root = item ? item.querySelector('.el-cascader') : null;
-        const panel = document.querySelector('.el-cascader-panel');
+        const panel = Array.from(document.querySelectorAll('.el-cascader-panel')).filter(isVisible).pop();
         const checked = panel
             ? Array.from(panel.querySelectorAll('.el-cascader-node'))
                 .filter(n => n.querySelector('.el-checkbox__input.is-checked'))
@@ -7741,24 +8345,60 @@ def detect_executor_overlap_conflict(debug_data: dict, targets: list) -> str:
 
 # ============ 浏览器连接 ============
 
-async def connect_browser(p, connect_cdp: bool, cdp_endpoint: str):
-    """连接浏览器：本地启动或接管已有 Chrome(CDP)。"""
-    if connect_cdp:
-        print(f"   🔌 通过 CDP 接管已有浏览器: {cdp_endpoint}")
-        last_err = None
-        for i in range(3):
-            try:
-                browser = await p.chromium.connect_over_cdp(cdp_endpoint)
-                if not browser.contexts:
-                    # CDP 模式下通常至少有 1 个默认上下文，这里兜底。
-                    await browser.new_context()
-                return browser
-            except Exception as e:
-                last_err = e
-                print(f"   ⚠️ CDP 连接失败({i+1}/3): {e}")
-                await asyncio.sleep(1.2 * (i + 1))
-        raise RuntimeError(f"CDP 连接失败（重试3次后仍失败）: {last_err}")
+def normalize_cdp_endpoint(cdp_endpoint: str) -> str:
+    endpoint = (cdp_endpoint or "").strip()
+    return endpoint.rstrip("/")
 
+
+def probe_cdp_endpoint(cdp_endpoint: str, timeout_seconds: float = 3.0) -> dict:
+    endpoint = normalize_cdp_endpoint(cdp_endpoint)
+    if not endpoint:
+        raise RuntimeError("CDP 地址为空")
+    url = f"{endpoint}/json/version"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_seconds) as resp:
+            raw = resp.read(512 * 1024).decode("utf-8", errors="replace")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"无法访问 {url}: {e}") from e
+    except TimeoutError as e:
+        raise RuntimeError(f"访问 {url} 超时") from e
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"{url} 返回不是 JSON: {raw[:120]}") from e
+    websocket_url = str(data.get("webSocketDebuggerUrl") or "").strip()
+    if not websocket_url:
+        raise RuntimeError(f"{url} 缺少 webSocketDebuggerUrl，Chrome 可能未以远程调试模式启动")
+    return data
+
+
+def is_cdp_context_management_unsupported_error(err: object) -> bool:
+    text = str(err or "")
+    return (
+        "Browser.setDownloadBehavior" in text
+        and "Browser context management is not supported" in text
+    )
+
+
+class PersistentBrowserAdapter:
+    """把 launch_persistent_context 返回的 context 适配成当前脚本需要的 browser 形态。"""
+
+    def __init__(self, context):
+        self._context = context
+        self.contexts = [context]
+        self.is_persistent_adapter = True
+
+    async def new_page(self):
+        return await self._context.new_page()
+
+    async def new_context(self):
+        return self._context
+
+    async def close(self):
+        await self._context.close()
+
+
+async def launch_managed_browser(p):
     print("   🚀 启动新浏览器会话")
     return await p.chromium.launch(
         headless=HEADLESS,
@@ -7772,6 +8412,71 @@ async def connect_browser(p, connect_cdp: bool, cdp_endpoint: str):
             '--disable-blink-features=AutomationControlled'
         ]
     )
+
+
+async def launch_persistent_fallback_browser(p):
+    PLAYWRIGHT_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"   🚀 启动备用浏览器会话: {PLAYWRIGHT_PROFILE_DIR}")
+    context = await p.chromium.launch_persistent_context(
+        str(PLAYWRIGHT_PROFILE_DIR),
+        headless=HEADLESS,
+        slow_mo=SLOW_MO,
+        args=[
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-infobars',
+            '--disable-blink-features=AutomationControlled'
+        ],
+    )
+    return PersistentBrowserAdapter(context)
+
+
+async def connect_browser(
+    p,
+    connect_cdp: bool,
+    cdp_endpoint: str,
+    cdp_timeout_ms: int = DEFAULT_CDP_CONNECT_TIMEOUT_MS,
+    cdp_retries: int = DEFAULT_CDP_CONNECT_RETRIES,
+):
+    """连接浏览器：本地启动或接管已有 Chrome(CDP)。返回 (browser, actual_connect_cdp)。"""
+    if connect_cdp:
+        cdp_endpoint = normalize_cdp_endpoint(cdp_endpoint)
+        print(f"   🔌 通过 CDP 接管已有浏览器: {cdp_endpoint}")
+        try:
+            version = await asyncio.to_thread(probe_cdp_endpoint, cdp_endpoint)
+            browser_name = version.get("Browser") or "未知浏览器"
+            print(f"   ✅ CDP 预检通过: {browser_name}")
+        except Exception as e:
+            raise RuntimeError(
+                f"CDP 预检失败：{e}\n"
+                f"请确认 Chrome 已用远程调试模式启动，并且地址填写为 {cdp_endpoint}。\n"
+                "Windows 示例：chrome.exe --remote-debugging-port=18800 --user-data-dir=\"data\\chrome-cdp-profile\"\n"
+                "Mac 示例：open -a 'Google Chrome' --args --remote-debugging-port=18800 --user-data-dir=\"data/chrome-cdp-profile\""
+            ) from e
+        last_err = None
+        attempts = max(1, int(cdp_retries or 1))
+        timeout_ms = max(3000, int(cdp_timeout_ms or DEFAULT_CDP_CONNECT_TIMEOUT_MS))
+        for i in range(attempts):
+            try:
+                browser = await p.chromium.connect_over_cdp(cdp_endpoint, timeout=timeout_ms)
+                if not browser.contexts:
+                    # CDP 模式下通常至少有 1 个默认上下文，这里兜底。
+                    await browser.new_context()
+                return browser, True
+            except Exception as e:
+                last_err = e
+                print(f"   ⚠️ CDP 连接失败({i+1}/{attempts}, timeout={timeout_ms}ms): {e}")
+                await asyncio.sleep(1.2 * (i + 1))
+        if is_cdp_context_management_unsupported_error(last_err):
+            print("   ⚠️ 当前 Chrome CDP 与 Playwright 不兼容，已自动改用内置 Chromium。")
+            print(f"   ℹ️ 备用浏览器会复用登录目录: {PLAYWRIGHT_PROFILE_DIR}")
+            print("   ℹ️ 首次若弹出登录页，请在新浏览器中扫码登录；后续会尽量复用登录态。")
+            return await launch_persistent_fallback_browser(p), False
+        raise RuntimeError(f"CDP 连接失败（重试{attempts}次后仍失败）: {last_err}")
+
+    return await launch_managed_browser(p), False
 
 async def ensure_login(browser, connect_cdp: bool):
     """确保登录状态。CDP 模式默认复用已有登录，不再强制扫码。"""
@@ -7824,8 +8529,9 @@ async def process_single_plan(
         print(f"📋 计划 {plan_index}: {plan['name']}")
         print(f"{'='*60}")
 
-        context = browser.contexts[0] if connect_cdp and browser.contexts else await browser.new_context()
-        owns_context = not (connect_cdp and browser.contexts)
+        persistent_adapter = bool(getattr(browser, "is_persistent_adapter", False))
+        context = browser.contexts[0] if (connect_cdp or persistent_adapter) and browser.contexts else await browser.new_context()
+        owns_context = not ((connect_cdp or persistent_adapter) and browser.contexts)
         page = await context.new_page()
         field_results = {}
 
@@ -7849,14 +8555,12 @@ async def process_single_plan(
                 community_only = bool(selected_channels_for_plan) and all(c == "会员通-发送社群" for c in selected_channels_for_plan)
                 community_url = (create_url_override or plan.get("create_url", "") or current_base_url or "")
                 auto_skip_step2_for_community = community_only or ("addcommunityPlan" in community_url)
-                allow_manual_skip_step2 = bool(skip_step2_mode and community_only)
-
-                # 规则：--skip-step2 仅社群渠道可跳过；其他渠道不允许手动跳过。
-                if skip_step2_mode and (not community_only):
-                    print("   ⚠️ --skip-step2 仅社群渠道可用；当前渠道将执行第2步")
+                allow_manual_skip_step2 = bool(skip_step2_mode)
 
                 if allow_manual_skip_step2 or auto_skip_step2_for_community:
-                    if auto_skip_step2_for_community and (not allow_manual_skip_step2):
+                    if allow_manual_skip_step2 and (not community_only):
+                        print("   ⏭️  已按参数跳过第2步：仅验证第1步、第3步和保存")
+                    elif auto_skip_step2_for_community and (not allow_manual_skip_step2):
                         print("   ⏭️  社群渠道模式：自动跳过第2步，直接进入第3步")
                     field_results.update(await fill_step1(page, plan, auto_next=True))
                     field_results.update(await skip_step2(page, plan))
@@ -7892,10 +8596,15 @@ async def process_single_plan(
                     "第2步-商品编码",
                     "第2步-门店信息已选",
                 }
+                step2_optional_when_not_configured = set()
+                if not (plan.get("coupon_ids", "") or "").strip():
+                    step2_optional_when_not_configured.add("第2步-券规则ID")
                 for k in sorted(field_results.keys()):
                     if field_results[k]:
                         mark = "✅"
                     elif has_store_cfg_for_summary and store_ok_for_summary and k in step2_optional_when_store_ok:
+                        mark = "⚪"
+                    elif k in step2_optional_when_not_configured:
                         mark = "⚪"
                     else:
                         mark = "❌"
@@ -7952,6 +8661,8 @@ async def main():
     parser.add_argument('--concurrent', type=int, default=MAX_CONCURRENT, help='并发数')
     parser.add_argument('--connect-cdp', action='store_true', help='通过 CDP 接管已登录 Chrome（推荐内网场景）')
     parser.add_argument('--cdp-endpoint', type=str, default=DEFAULT_CDP_ENDPOINT, help='CDP 地址，默认 http://127.0.0.1:9222')
+    parser.add_argument('--cdp-timeout-ms', type=int, default=DEFAULT_CDP_CONNECT_TIMEOUT_MS, help='CDP 连接超时毫秒数，默认 15000')
+    parser.add_argument('--cdp-retries', type=int, default=DEFAULT_CDP_CONNECT_RETRIES, help='CDP 连接重试次数，默认 2')
     parser.add_argument('--hold-seconds', type=int, default=0, help='完成后保留浏览器秒数，默认 0')
     parser.add_argument('--strict-step2', action='store_true', help='开启第2步严格校验（异常直接失败）')
     parser.add_argument('--skip-step2', action='store_true', help='跳过第2步内容（仅联调第1步和第3步）')
@@ -7998,8 +8709,14 @@ async def main():
     )
     
     async with async_playwright() as p:
-        browser = await connect_browser(p, args.connect_cdp, args.cdp_endpoint)
-        await ensure_login(browser, args.connect_cdp)
+        browser, actual_connect_cdp = await connect_browser(
+            p,
+            args.connect_cdp,
+            args.cdp_endpoint,
+            args.cdp_timeout_ms,
+            args.cdp_retries,
+        )
+        await ensure_login(browser, actual_connect_cdp)
 
         # 并发处理
         semaphore = asyncio.Semaphore(args.concurrent)
@@ -8011,7 +8728,7 @@ async def main():
                 plans[i],
                 i + 1,
                 semaphore,
-                args.connect_cdp,
+                actual_connect_cdp,
                 args.strict_step2,
                 args.skip_step2,
                 args.manual_executor,
@@ -8076,4 +8793,9 @@ async def main():
             await asyncio.sleep(args.hold_seconds)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        print("\n❌ 执行失败")
+        print(str(e))
+        sys.exit(1)

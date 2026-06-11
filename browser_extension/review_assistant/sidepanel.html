@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>精准营销复核助手</title>
+  <link rel="stylesheet" href="sidepanel.css"/>
+</head>
+<body>
+  <header>
+    <h1>复核助手</h1>
+    <span id="pageState">未复核</span>
+  </header>
+
+  <section class="section">
+    <label class="label" for="payloadInput">复核数据</label>
+    <textarea id="payloadInput" placeholder="可直接粘贴文本计划，或从 /simple 结果页复制复核数据。"></textarea>
+  </section>
+
+  <section class="section">
+    <label class="label" for="serviceUrlInput">视觉服务地址</label>
+    <input id="serviceUrlInput" class="text-input" type="text" placeholder="http://127.0.0.1:8790"/>
+  </section>
+
+  <section class="section compact">
+    <div id="summary" class="summary">等待载入复核数据。</div>
+    <div class="cost">
+      <span>DOM 复核 <b id="domCount">0</b></span>
+      <span>视觉调用 <b id="visionCount">0</b></span>
+      <span>重复跳过 <b id="cacheCount">0</b></span>
+    </div>
+  </section>
+
+  <section class="section">
+    <div id="resultList" class="results"></div>
+  </section>
+
+  <footer class="bottom-actions">
+    <button id="textReviewBtn" type="button">文本复核</button>
+    <button id="screenshotReviewBtn" type="button">截图复核</button>
+  </footer>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

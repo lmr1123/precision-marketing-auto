@@ -5,6 +5,7 @@ from pathlib import Path
 import importlib.util
 import sys
 import types
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -47,8 +48,8 @@ class BatchScriptTests(unittest.TestCase):
             "group_name", "update_type", "main_operating_area", "coupon_ids", "sms_content"
         ]
         row = [
-            "测试计划", "省区", "其他", "否", "2026-03-01 08:00", "2026-03-01 08:00",
-            "定时-单次任务", "2026-03-01 08:00", "不限制", "否",
+            "测试计划", "省区", "其他", "否", "2026-10-01 08:00", "2026-10-01 08:00",
+            "定时-单次任务", "2026-10-01 08:00", "不限制", "否",
             "测试分群", "自动更新", "广佛省区", "1-20000005475", "短信内容"
         ]
 
@@ -77,6 +78,70 @@ class BatchScriptTests(unittest.TestCase):
         self.assertTrue(self.module.datetime_equals("2026-03-06 08:30", "2026-03-06 08:30:00"))
         self.assertTrue(self.module.datetime_equals("2026-03-06 08:30:00", "2026-03-06 08:30"))
         self.assertFalse(self.module.datetime_equals("2026-03-06 08:30:00", "2026-03-02 08:00:00"))
+
+    def test_load_csv_supports_smart_phone_activity_intro(self):
+        headers = [
+            "name", "channels", "region", "theme", "use_recommend", "start_time", "end_time",
+            "trigger_type", "send_time", "global_limit", "set_target", "activity_intro"
+        ]
+        row = [
+            "智能电话测试", "智能电话", "营运区", "其他", "否", "2026-10-15 09:00:00", "2026-10-22 23:00:00",
+            "定时-单次任务", "2026-10-16 10:00:00", "不限制", "否", "电话活动介绍"
+        ]
+
+        with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8", suffix=".csv") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            writer.writerow(row)
+            f.flush()
+
+            plans = self.module.load_plans_from_csv(f.name)
+
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(plans[0]["activity_intro"], "电话活动介绍")
+
+    def test_resolve_smart_phone_create_url(self):
+        url, reason = self.module.resolve_base_url_by_channel({"channels": "智能电话"})
+
+        self.assertIn("620450416034897920", url)
+        self.assertEqual(reason, "智能电话")
+
+    def test_normalize_cdp_endpoint_strips_trailing_slash(self):
+        self.assertEqual(
+            self.module.normalize_cdp_endpoint(" http://127.0.0.1:18800/ "),
+            "http://127.0.0.1:18800",
+        )
+
+    def test_probe_cdp_endpoint_requires_websocket_url(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, _size):
+                return b'{"Browser":"Chrome/149"}'
+
+        with mock.patch.object(self.module.urllib.request, "urlopen", return_value=FakeResponse()):
+            with self.assertRaisesRegex(RuntimeError, "webSocketDebuggerUrl"):
+                self.module.probe_cdp_endpoint("http://127.0.0.1:18800/")
+
+    def test_detects_chrome_cdp_context_management_unsupported_error(self):
+        err = (
+            "BrowserType.connect_over_cdp: Protocol error "
+            "(Browser.setDownloadBehavior): Browser context management is not supported."
+        )
+
+        self.assertTrue(self.module.is_cdp_context_management_unsupported_error(err))
+        self.assertFalse(self.module.is_cdp_context_management_unsupported_error("ECONNREFUSED"))
+
+    def test_cdp_fallback_uses_persistent_profile(self):
+        source = MODULE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('DATA_DIR / "playwright-profile"', source)
+        self.assertIn("launch_persistent_context", source)
+        self.assertIn("is_persistent_adapter", source)
 
 
 if __name__ == "__main__":
