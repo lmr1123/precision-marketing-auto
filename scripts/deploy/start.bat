@@ -96,7 +96,7 @@ REM --- Reuse only if the running service is this package/version ---
 call :CHECK_EXISTING_UI
 if "!UI_REUSE!"=="1" (
     echo [0/6] UI already running from current package on %UI_URL%
-    start "" "%UI_URL%"
+    call :OPEN_UI
     goto :DONE
 )
 
@@ -254,12 +254,24 @@ echo ========================================
 echo   UI ready: %UI_URL%
 echo ========================================
 echo.
-start "" "%UI_URL%"
+call :OPEN_UI
 goto :DONE
 
 REM ============================================================
 REM  Subroutines
 REM ============================================================
+
+:OPEN_UI
+echo     Opening browser: %UI_URL%
+if not defined CHROME_PATH call :FIND_CHROME
+if defined CHROME_PATH (
+  start "" "%CHROME_PATH%" "%UI_URL%"
+  exit /b 0
+)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process '%UI_URL%'" >nul 2>nul
+if not errorlevel 1 exit /b 0
+start "" "%UI_URL%"
+exit /b 0
 
 :IS_PORT_OPEN
 set "PORT_OPEN=0"

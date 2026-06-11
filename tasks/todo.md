@@ -62,3 +62,25 @@
 - 已发布 `v1.0.31`：Windows zip 根目录只保留 `start.bat`，并新增 `WINDOWS_START_HERE.txt`；Windows 包内不再包含 `start.command`。
 - Mac zip 仍保留 `start.command`。
 - 公网 `latest.json` 返回 `1.0.31`，Win/Mac zip 均 HTTP 200。
+
+## 2026-06-11 Windows 二次双击不唤起浏览器
+
+- [x] 定位 Windows `start.bat` 二次启动复用服务时的打开页面路径
+- [x] 增加统一打开 `/simple` 子程序，优先 Chrome，失败再系统默认打开
+- [x] 首次启动和服务已运行分支都改用统一子程序
+- [x] 构建发布新版并验证 Windows 包内容
+
+### 成功标准
+
+- 服务已运行时再次双击 `start.bat`，也会重新打开 `http://127.0.0.1:8790/simple`。
+- 首次启动成功后仍会自动打开页面。
+
+### Review
+
+- 根因判断：服务复用分支和首次启动成功分支都依赖单一 `start "" "%UI_URL%"` 打开默认浏览器，在部分 Windows 环境下二次双击没有唤起页面。
+- 已新增 `:OPEN_UI` 子程序：优先用 Chrome 路径打开 `/simple`，失败再用 PowerShell `Start-Process`，最后回退到 `start "" "%UI_URL%"`。
+- 服务已运行分支和 `UI_READY` 分支均改为调用 `:OPEN_UI`。
+- 已新增静态测试覆盖二次启动复用分支和打开页面多级兜底。
+- 已构建并发布 `v1.0.32`；Windows zip 根目录仍只包含 `start.bat` 和 `WINDOWS_START_HERE.txt`，不含 `start.command`。
+- 公网 `latest.json` 返回 `1.0.32`，Win/Mac zip 均 HTTP 200。
+- 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（16 tests OK）。
