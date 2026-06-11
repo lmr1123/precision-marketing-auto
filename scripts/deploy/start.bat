@@ -263,12 +263,16 @@ REM ============================================================
 
 :OPEN_UI
 echo     Opening browser: %UI_URL%
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; $u=[uri]::EscapeDataString('%UI_URL%'); try { Invoke-WebRequest -UseBasicParsing -Method Put -Uri ('http://127.0.0.1:18800/json/new?' + $u) -TimeoutSec 2 | Out-Null; exit 0 } catch {}; try { Invoke-WebRequest -UseBasicParsing -Uri ('http://127.0.0.1:18800/json/new?' + $u) -TimeoutSec 2 | Out-Null; exit 0 } catch {}; exit 1" >nul 2>nul
+if not errorlevel 1 exit /b 0
 if not defined CHROME_PATH call :FIND_CHROME
 if defined CHROME_PATH (
   start "" "%CHROME_PATH%" "%UI_URL%"
   exit /b 0
 )
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process '%UI_URL%'" >nul 2>nul
+if not errorlevel 1 exit /b 0
+explorer.exe "%UI_URL%" >nul 2>nul
 if not errorlevel 1 exit /b 0
 start "" "%UI_URL%"
 exit /b 0

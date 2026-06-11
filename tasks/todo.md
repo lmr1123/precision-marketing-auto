@@ -84,3 +84,24 @@
 - 已构建并发布 `v1.0.32`；Windows zip 根目录仍只包含 `start.bat` 和 `WINDOWS_START_HERE.txt`，不含 `start.command`。
 - 公网 `latest.json` 返回 `1.0.32`，Win/Mac zip 均 HTTP 200。
 - 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（16 tests OK）。
+
+## 2026-06-11 Windows 二次双击仍未唤起浏览器
+
+- [x] 增加 Chrome CDP `/json/new` 打开新标签页兜底
+- [x] 增加 `explorer.exe URL` 兜底，覆盖默认浏览器关联异常
+- [x] 更新 Windows 启动器测试
+- [x] 构建发布新版并验证 Windows 包内容
+
+### 成功标准
+
+- Chrome CDP 已运行时，二次双击可通过 DevTools 接口强制打开 `/simple` 新标签页。
+- 即使普通 `start URL` 不生效，也还有 PowerShell 和 explorer 兜底。
+
+### Review
+
+- 已增强 `:OPEN_UI`：优先调用 Chrome CDP `http://127.0.0.1:18800/json/new?...` 强制打开 `/simple` 新标签页；兼容 `PUT` 和普通请求。
+- 后续兜底顺序为：Chrome 路径打开、PowerShell `Start-Process`、`explorer.exe URL`、Windows `start "" URL`。
+- 已更新测试覆盖 CDP `/json/new` 和 `explorer.exe` 兜底。
+- 已构建并发布 `v1.0.33`；Windows zip 根目录仍只有 `start.bat` 和 `WINDOWS_START_HERE.txt`，不含 `start.command`。
+- 公网 `latest.json` 返回 `1.0.33`，Win/Mac zip 均 HTTP 200。
+- 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（16 tests OK）。

@@ -20,8 +20,11 @@ class WindowsLauncherContractTests(unittest.TestCase):
     def test_open_ui_has_multiple_windows_fallbacks(self):
         source = self.source
 
+        self.assertIn("http://127.0.0.1:18800/json/new?", source)
+        self.assertIn("Invoke-WebRequest -UseBasicParsing -Method Put", source)
         self.assertIn('start "" "%CHROME_PATH%" "%UI_URL%"', source)
         self.assertIn("Start-Process '%UI_URL%'", source)
+        self.assertIn('explorer.exe "%UI_URL%"', source)
         self.assertIn('start "" "%UI_URL%"', source)
 
 
