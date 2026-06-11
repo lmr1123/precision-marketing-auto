@@ -143,6 +143,24 @@ class BatchScriptTests(unittest.TestCase):
         self.assertIn("launch_persistent_context", source)
         self.assertIn("is_persistent_adapter", source)
 
+    def test_executor_readback_requires_explicit_franchise_target(self):
+        targets = ["肇云营运区", "肇云营运区加盟"]
+
+        self.assertFalse(
+            self.module.executor_targets_confirmed(
+                targets,
+                readback="全国 / 华南大区 / 广佛省区 / 肇云营运区",
+                selected_labels=["肇云营运区"],
+            )
+        )
+        self.assertTrue(
+            self.module.executor_targets_confirmed(
+                targets,
+                readback="全国 / 华南大区 / 广佛省区 / 肇云营运区 全国 / 华南大区加盟 / 广佛省区加盟 / 肇云营运区加盟",
+                selected_labels=["肇云营运区", "肇云营运区加盟"],
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,7 @@ screenshots/
 ui_uploads/
 release/windows-oneclick/
 release/*.zip
+release/latest.json
 release/extension/
 release/win-runtime-cache/
 data/ui-test/ui-test-*.csv

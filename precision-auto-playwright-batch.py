@@ -1265,6 +1265,37 @@ def normalize_area_for_step2(area: str) -> str:
     return f"{a}营运区"
 
 
+def simplify_area_for_readback(area: str) -> str:
+    return re.sub(
+        r"(加盟|营运区|省区|大区|片区|门店|店)",
+        "",
+        re.sub(r"\s+", "", str(area or "")),
+    )
+
+
+def executor_targets_confirmed(targets: list, readback: str = "", selected_labels: list | None = None) -> bool:
+    """执行员工回读校验。
+
+    非加盟目标允许用核心词兜底；加盟目标必须明确命中“xx加盟”，避免只选普通营运区时误判通过。
+    """
+    labels = selected_labels or []
+    haystack = re.sub(r"\s+", "", " ".join([str(readback or ""), *[str(x or "") for x in labels]]))
+    if not targets:
+        return True
+    for target in targets:
+        tgt = re.sub(r"\s+", "", str(target or ""))
+        if not tgt:
+            continue
+        if tgt in haystack:
+            continue
+        if "加盟" in tgt:
+            return False
+        core = simplify_area_for_readback(tgt)
+        if not core or core not in simplify_area_for_readback(haystack):
+            return False
+    return True
+
+
 def parse_step3_channels(raw: str) -> list:
     """解析第3步渠道多选字符串。支持 、 , ， / | 分隔。"""
     if not raw:
@@ -4764,7 +4795,10 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
             if t in readback:
                 selected[t] = True
         print(f"      🧪 执行员工回读文本: {readback}")
-        return all(selected.values())
+        confirmed = executor_targets_confirmed(targets, readback, selected_labels)
+        if not confirmed:
+            print("      ⚠️ 执行员工回读未完整命中目标，尤其加盟区域不能用普通区域替代")
+        return confirmed
 
     region_targets = [t for t in targets if "大区" in t]
     province_targets = [t for t in targets if "省区" in t or "营运区" in t or "店" in t]
@@ -4911,7 +4945,7 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
 
     print(f"      🧪 执行员工目标命中: {selected}")
     print(f"      🧪 执行员工回读文本: {readback}")
-    if all(selected.values()):
+    if executor_targets_confirmed(targets, readback, selected_labels):
         return True
 
     # 二级判定（防误杀）：页面回读必须包含目标核心词，避免模板默认值残留被当成成功。
@@ -4950,6 +4984,7 @@ async def fill_step3_executor(page, raw_values: str, include_franchise: bool = F
                 const readback = norm([inputVal, ...tags].join(' '));
                 return (targets || []).every(t => {
                     const tgt = norm(t);
+                    if (tgt.includes('加盟') && !readback.includes(tgt)) return false;
                     const core = simplify(t);
                     return !!tgt && (readback.includes(tgt) || (!!core && readback.includes(core)));
                 });

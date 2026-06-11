@@ -21,3 +21,25 @@
 - `/simple` smoke 通过：`/api/runtime` 返回 `version=1.0.29`，`/simple` 页面包含新增粘贴框、图片顺序上传、门店文件、草稿、复制日志等当前新方案元素。
 - 已提交并推送到 GitHub：`d0546a0 feat: sync simple workflow and review assistant`。
 - 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（13 tests OK）。
+
+## 2026-06-11 执行员工加盟区域漏选
+
+- [x] 定位 `执行员工: 肇云营运区` 未勾选加盟区域的判定链路
+- [x] 收紧执行员工回读校验：加盟目标必须明确命中加盟节点
+- [x] 增加单元测试覆盖非加盟不能替代加盟
+- [x] 运行测试
+- [x] 发布新版并同步 GitHub
+
+### 成功标准
+
+- `/simple` 默认包含加盟区域时，`执行员工: 肇云营运区` 必须尝试并校验 `肇云营运区加盟`。
+- 若页面只选中/回读 `肇云营运区`，不能把 `肇云营运区加盟` 判为成功。
+
+### Review
+
+- 根因：执行员工二级核心词兜底会去掉“加盟/营运区”等后缀，导致 `肇云营运区` 和 `肇云营运区加盟` 都简化为 `肇云`，页面只回读普通区域时也可能误判加盟目标通过。
+- 已新增 `executor_targets_confirmed()`：非加盟目标可用核心词兜底；加盟目标必须明确命中完整加盟节点。
+- 已将执行员工两处回读判断改为使用该函数，并在 loose fallback 中禁止加盟目标走普通核心词替代。
+- 已新增测试覆盖“普通肇云不能替代肇云加盟”。
+- 已构建并发布 `v1.0.30`；公网 `latest.json` 返回 `1.0.30`，Win/Mac zip 均 HTTP 200。
+- 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（14 tests OK）。
