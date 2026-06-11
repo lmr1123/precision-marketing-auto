@@ -19,6 +19,11 @@ screenshots/
 # Logs
 *.log
 
+# Local secrets
+.env
+.env.*
+!.env.example
+
 # Runtime uploads / temp artifacts
 ui_uploads/
 release/windows-oneclick/

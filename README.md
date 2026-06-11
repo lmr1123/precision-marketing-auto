@@ -134,7 +134,17 @@ bash scripts/one_click_ui.sh 8793
 release/precision-marketing-auto-windows-oneclick.zip
 ```
 
-2. 首次安装/更新（推荐）：
+2. 首次安装/更新（中国无VPN推荐）：
+
+```text
+scripts\\windows\\install_or_update_from_package.bat
+```
+
+说明：
+- 优先使用本地 zip 安装/更新，不依赖 GitHub 网络。
+- 适合中国内网/无 VPN 场景。
+
+3. 联网可用时再使用（可选）：
 
 ```text
 scripts\\windows\\install_or_update_from_github.bat
@@ -145,7 +155,7 @@ scripts\\windows\\install_or_update_from_github.bat
 - 自动创建桌面图标“精准营销自动化工具”
 - 后续新版本也可重复运行此脚本一键更新
 
-3. 启动工具：
+4. 启动工具：
 
 ```text
 scripts\\windows\\windows_start_ui.bat
@@ -153,7 +163,7 @@ scripts\\windows\\windows_start_ui.bat
 
 打开：`http://127.0.0.1:8790`
 
-4. 本地目录内一键更新（在线）：
+5. 本地目录内一键更新（在线）：
 
 ```text
 scripts\\windows\\windows_update.bat
@@ -161,7 +171,7 @@ scripts\\windows\\windows_update.bat
 
 可用于已安装机器快速升级，无需同一局域网。
 
-5. 离线更新（不依赖 Git，不需要同事会命令行）：
+6. 离线更新（不依赖 Git，不需要同事会命令行）：
 
 - 你发同事最新完整包：`precision-marketing-auto-windows-oneclick.zip`
 - 同事解压后，覆盖原安装目录（如 `D:\precision-marketing-auto-windows` 或 `%LOCALAPPDATA%\PrecisionMarketingAuto`）
@@ -172,7 +182,7 @@ scripts\\windows\\windows_update.bat
 powershell -ExecutionPolicy Bypass -File scripts\\windows\\create_desktop_shortcut.ps1
 ```
 
-> 建议：业务侧统一采用“离线更新”流程（发完整 zip 覆盖），最稳定、最容易培训。
+> 建议：业务侧统一采用“离线更新”流程（发完整 zip + `install_or_update_from_package.bat`），最稳定、最容易培训。
 
 > 维护者如需重新生成一键包：
 >

@@ -1,0 +1,16 @@
+[Unit]
+Description=Precision Marketing Review Vision Proxy
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/precision-marketing-auto
+EnvironmentFile=/opt/precision-marketing-auto/.env.cloud
+ExecStart=/opt/precision-marketing-auto/.venv/bin/python -m uvicorn ui_app.server:app --host 127.0.0.1 --port 8790
+Restart=always
+RestartSec=3
+User=pmreview
+Group=pmreview
+
+[Install]
+WantedBy=multi-user.target

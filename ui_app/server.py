@@ -16,8 +16,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+from ui_app.text_plan_parser import TextPlanParseError, parse_text_plans
 
 try:
     from openpyxl import Workbook, load_workbook
@@ -28,13 +31,93 @@ except Exception:
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "precision-auto-playwright-batch.py"
-UPLOAD_DIR = ROOT / "ui_uploads"
+VERSION_FILE = ROOT / "VERSION.txt"
+
+
+def _read_app_version() -> str:
+    try:
+        version = VERSION_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return "dev"
+    return version or "dev"
+
+
+APP_VERSION = _read_app_version()
+
+
+def _refresh_parent_launchers() -> None:
+    package_dir = ROOT.parent
+    if not (package_dir / "data").is_dir():
+        return
+    candidates = [
+        ("start.command", 0o755),
+        ("start.bat", None),
+    ]
+    for name, mode in candidates:
+        src = ROOT / "scripts" / "deploy" / name
+        dst = package_dir / ("start.bat.pending" if name == "start.bat" else name)
+        if not src.exists():
+            continue
+        try:
+            if dst.exists() and dst.read_bytes() == src.read_bytes():
+                continue
+            shutil.copy2(src, dst)
+            if mode is not None:
+                dst.chmod(mode)
+        except Exception:
+            continue
+
+# ── 数据目录：支持 app/data 分离的部署结构 ──
+# PM_DATA_DIR 环境变量指向 data/ 目录；未设置时自动检测:
+#   1) 兄弟目录 ../data（新版 app/data 布局）
+#   2) 回退到 ROOT（兼容旧版单体部署）
+_env_data = os.getenv("PM_DATA_DIR", "").strip()
+if _env_data:
+    DATA_DIR = Path(_env_data)
+elif (ROOT.parent / "data").is_dir() and not (ROOT / "ui_uploads").is_dir():
+    DATA_DIR = ROOT.parent / "data"
+else:
+    DATA_DIR = ROOT
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+UPLOAD_DIR = DATA_DIR / "ui_uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_DIR = UPLOAD_DIR / "task_history"
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_DATA_CSV = ROOT / "data" / "plans.csv"
-# 网页“Excel模板”下载优先使用用户指定模板文件
-CUSTOM_EXPORT_TEMPLATE_XLSX = Path("/Users/liminrong/Downloads/精准营销任务模板模板-4.3版本.xlsx")
+
+# 导出模板：优先 data/ 中的副本，其次环境变量 PM_EXPORT_TEMPLATE
+_env_tpl = os.getenv("PM_EXPORT_TEMPLATE", "").strip()
+if _env_tpl and Path(_env_tpl).exists():
+    CUSTOM_EXPORT_TEMPLATE_XLSX = Path(_env_tpl)
+elif (DATA_DIR / "精准营销任务模板模板.xlsx").exists():
+    CUSTOM_EXPORT_TEMPLATE_XLSX = DATA_DIR / "精准营销任务模板模板.xlsx"
+else:
+    CUSTOM_EXPORT_TEMPLATE_XLSX = Path("/Users/liminrong/Downloads/精准营销任务模板模板-4.3版本.xlsx")
+
+def _load_local_env_file() -> None:
+    env_path = ROOT / ".env.local"
+    if not env_path.exists():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
+_load_local_env_file()
+
+
+REVIEW_API_TOKEN = os.getenv("REVIEW_API_TOKEN", "").strip()
 
 
 HEADER_EN_TO_CN: Dict[str, str] = {
@@ -44,6 +127,7 @@ HEADER_EN_TO_CN: Dict[str, str] = {
     "scene_type": "场景类型",
     "plan_type": "计划类型",
     "push_content": "推送内容",
+    "activity_intro": "活动介绍",
     "start_time": "计划开始时间",
     "end_time": "计划结束时间",
     "trigger_type": "触发方式",
@@ -82,6 +166,7 @@ HEADER_CN_TO_EN.update({
     "分配方式": "distribution_mode",
     "发送内容": "send_content",
     "短信内容": "sms_content",
+    "活动介绍": "activity_intro",
     "主消费运营区": "main_operating_area",
     "计划图片id": "plan_image_id",
     "计划图片Id": "plan_image_id",
@@ -93,6 +178,7 @@ CHANNEL_CODE_TO_NAME: Dict[str, str] = {
     "2": "会员通-发客户消息",
     "3": "会员通-发客户朋友圈",
     "4": "会员通-发送社群",
+    "5": "智能电话",
 }
 CHANNEL_ALIAS_TO_NAME: Dict[str, str] = {
     "短信": "短信",
@@ -103,6 +189,7 @@ CHANNEL_ALIAS_TO_NAME: Dict[str, str] = {
     "会员通发客户朋友圈": "会员通-发客户朋友圈",
     "会员通-发送社群": "会员通-发送社群",
     "会员通发送社群": "会员通-发送社群",
+    "智能电话": "智能电话",
 }
 TEMPLATE_HIDE_FIELDS = {
     "group_name",
@@ -121,6 +208,7 @@ TEMPLATE_HIDE_FIELDS = {
     "update_type",
     "sms_content",
     "send_content",
+    "activity_intro",
     "group_name",
     "region",
     "trigger_type",
@@ -134,10 +222,13 @@ DEFAULT_CREATE_URL_BY_CHANNEL: Dict[str, str] = {
     "会员通-发客户消息": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=594094287227023360",
     "会员通-发客户朋友圈": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=599702926159527936",
     "会员通-发送社群": "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add",
+    "智能电话": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=620450416034897920",
 }
 DEFAULT_CREATE_URL_COMBO: Dict[str, str] = {
     "短信|会员通-发客户消息": "https://precision.dslyy.com/admin#/marketingTemplate/use?useId=600035736992907264",
 }
+ARK_RESPONSES_URL = "https://ark.cn-beijing.volces.com/api/v3/responses"
+ARK_DEFAULT_VISION_MODEL = "doubao-seed-2-0-lite-260428"
 
 
 def now_iso() -> str:
@@ -163,6 +254,8 @@ def _safe_tail(lines: List[str], size: int = 60) -> List[str]:
 
 
 def _extract_error_summary(task: "Task") -> str:
+    if task.status == "success":
+        return ""
     # Prefer explicit "错误:" line from runtime logs.
     for ln in reversed(task.logs):
         s = (ln or "").strip()
@@ -206,6 +299,146 @@ def _append_failure_index(task: "Task") -> None:
         pass
 
 
+def _field_result_counts(items: List[dict]) -> dict:
+    counts = {"ok": 0, "warn": 0, "fail": 0, "total": 0}
+    for item in items or []:
+        status = str(item.get("status", "") or "")
+        if status in counts:
+            counts[status] += 1
+            counts["total"] += 1
+    return counts
+
+def _build_review_payload(row: Dict[str, str], source_text: str = "", image_count: int = 0) -> dict:
+    fields = [
+        ("计划名称", "name"),
+        ("发送渠道", "channels"),
+        ("营销主题", "theme"),
+        ("计划区域", "region"),
+        ("计划开始时间", "start_time"),
+        ("计划结束时间", "end_time"),
+        ("发送时间", "send_time"),
+        ("主消费营运区", "main_operating_area"),
+        ("执行员工", "executor_employees"),
+        ("目标商品编码", "product_codes"),
+        ("已领或已使用券规则ID", "coupon_ids"),
+        ("员工任务结束时间", "step3_end_time"),
+        ("短信内容", "sms_content"),
+        ("发送内容", "send_content"),
+        ("活动介绍", "activity_intro"),
+        ("社群下发群名", "group_send_name"),
+        ("分配方式", "distribution_mode"),
+    ]
+    expected = []
+    for label, key in fields:
+        val = str(row.get(key, "") or "").strip()
+        if val:
+            expected.append({"name": label, "key": key, "value": val})
+    if image_count:
+        expected.append({"name": "图片数量", "key": "image_count", "value": str(image_count)})
+    return {
+        "version": 1,
+        "source": "simple",
+        "source_text": source_text,
+        "expected_fields": expected,
+    }
+
+def _extract_ark_output_text(data) -> str:
+    if not isinstance(data, dict):
+        return ""
+    direct = data.get("output_text")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    chunks = []
+    for item in data.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for part in item.get("content", []) or []:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text") or part.get("output_text")
+            if isinstance(text, str) and text.strip():
+                chunks.append(text.strip())
+    return "\n".join(chunks).strip()
+
+def _parse_json_object_from_text(text: str) -> dict:
+    s = str(text or "").strip()
+    if not s:
+        return {}
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", s, re.S)
+    if not m:
+        return {}
+    try:
+        obj = json.loads(m.group(0))
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+async def _call_ark_vision(image_url: str, fields: List[dict], page_context: str = "") -> dict:
+    api_key = os.getenv("ARK_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="未配置 ARK_API_KEY，视觉兜底不可用")
+    model = os.getenv("ARK_VISION_MODEL", ARK_DEFAULT_VISION_MODEL).strip() or ARK_DEFAULT_VISION_MODEL
+    field_names = [
+        str((x or {}).get("name", "") or "").strip()
+        for x in (fields or [])[:12]
+        if str((x or {}).get("name", "") or "").strip()
+    ]
+    prompt = (
+        "你是精准营销业务页面复核助手。请只根据截图中可见内容读取字段值，"
+        "不要推测不可见字段。输出严格 JSON，不要输出 Markdown。"
+        "JSON 格式：{\"fields\":[{\"name\":\"字段名\",\"page_value\":\"页面可见值\","
+        "\"confidence\":0.0,\"evidence\":\"可见依据\",\"status\":\"match|mismatch|unknown\"}]}。"
+        f"需要识别的字段：{json.dumps(field_names, ensure_ascii=False)}。"
+        f"页面上下文：{str(page_context or '')[:500]}"
+    )
+    payload = {
+        "model": model,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": image_url},
+                    {"type": "input_text", "text": prompt},
+                ],
+            }
+        ],
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        ARK_RESPONSES_URL,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    def _post() -> dict:
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Ark接口失败: HTTP {e.code}, {body[:300]}")
+        return json.loads(body)
+
+    raw = await asyncio.to_thread(_post)
+    text = _extract_ark_output_text(raw)
+    parsed = _parse_json_object_from_text(text)
+    return {
+        "model": model,
+        "fields": parsed.get("fields", []) if isinstance(parsed.get("fields", []), list) else [],
+        "raw_text": text,
+        "usage": raw.get("usage", {}) if isinstance(raw, dict) else {},
+    }
+
+
 def parse_int(val: str, default: int = 0) -> int:
     try:
         return int(val)
@@ -222,6 +455,7 @@ def _default_headers() -> List[str]:
         "scene_type",
         "plan_type",
         "push_content",
+        "activity_intro",
         "start_time",
         "end_time",
         "trigger_type",
@@ -241,6 +475,7 @@ def _default_headers() -> List[str]:
         "executor_employees",
         "group_send_name",
         "send_content",
+        "activity_intro",
         "plan_image_id",
         "moments_add_images",
         "moments_image_paths",
@@ -710,6 +945,7 @@ def apply_unified_field_mapping_and_refs(
     for col in (
         "sms_content",
         "send_content",
+        "activity_intro",
         "executor_include_franchise",
         "upload_stores",
         "store_file_path",
@@ -733,9 +969,10 @@ def apply_unified_field_mapping_and_refs(
         for p in parts:
             if p not in uniq:
                 uniq.append(p)
-        combo_key = "|".join(sorted(uniq))
-        if combo_key in DEFAULT_CREATE_URL_COMBO:
-            return DEFAULT_CREATE_URL_COMBO[combo_key]
+        uniq_set = set(uniq)
+        for combo_key, url in DEFAULT_CREATE_URL_COMBO.items():
+            if set(combo_key.split("|")) == uniq_set:
+                return url
         for p in uniq:
             if p in DEFAULT_CREATE_URL_BY_CHANNEL:
                 return DEFAULT_CREATE_URL_BY_CHANNEL[p]
@@ -791,10 +1028,13 @@ def apply_unified_field_mapping_and_refs(
         is_community = "会员通-发送社群" in parts
         is_moments = "会员通-发客户朋友圈" in parts
         is_customer_msg = "会员通-发客户消息" in parts
+        is_smart_phone = "智能电话" in parts
+        if is_smart_phone and len(parts) > 1:
+            raise HTTPException(status_code=400, detail=f"第{idx}行：智能电话当前仅支持单渠道计划，请单独创建")
 
         # 默认值补齐（模板已简化，避免缺列后脚本失败）
         if not str(row.get("region", "") or "").strip():
-            row["region"] = "省区"
+            row["region"] = "营运区" if is_smart_phone else "省区"
         if not str(row.get("trigger_type", "") or "").strip():
             row["trigger_type"] = "定时-单次任务"
         if not str(row.get("group_send_name", "") or "").strip():
@@ -856,10 +1096,17 @@ def apply_unified_field_mapping_and_refs(
         # 推送内容路由
         push_content = str(row.get("push_content", "") or "").strip()
         if push_content:
-            if "短信" in parts:
+            if "短信" in parts and not str(row.get("sms_content", "") or "").strip():
                 row["sms_content"] = push_content
-            if any(p in {"会员通-发客户消息", "会员通-发客户朋友圈", "会员通-发送社群"} for p in parts):
+            if (
+                any(p in {"会员通-发客户消息", "会员通-发客户朋友圈", "会员通-发送社群"} for p in parts)
+                and not str(row.get("send_content", "") or "").strip()
+            ):
                 row["send_content"] = push_content
+            if is_smart_phone and not str(row.get("activity_intro", "") or "").strip():
+                row["activity_intro"] = push_content
+        if is_smart_phone and not str(row.get("activity_intro", "") or "").strip():
+            row["activity_intro"] = str(row.get("send_content", "") or "").strip()
 
         # 主消费营运区书名号引用 -> 第2步门店信息sheet（兼容用户把《目标门店X》写在该字段）
         main_area_ref = _extract_book_title_ref(row.get("main_operating_area", ""))
@@ -873,6 +1120,8 @@ def apply_unified_field_mapping_and_refs(
             if is_customer_msg or is_moments:
                 row["upload_stores"] = "是"
                 row["store_file_path"] = step2_store_path
+        elif str(row.get("main_store_file_path", "") or "").strip() and not str(row.get("step2_store_file_path", "") or "").strip():
+            row["step2_store_file_path"] = str(row.get("main_store_file_path", "") or "").strip()
 
         # 执行员工书名号引用 -> 目标门店sheet（第3步上传门店）
         emp_ref = _extract_book_title_ref(row.get("executor_employees", ""))
@@ -1111,6 +1360,42 @@ def _is_valid_jpeg_png_bytes(data: bytes) -> bool:
     return False
 
 
+def _normalize_uploaded_image_for_business(name: str, data: bytes, label: str) -> tuple[str, bytes]:
+    """把业务上传图片统一转成 RGB JPEG，避免素材接口拒绝 PNG 变体/透明通道。"""
+    ext = Path(name).suffix.lower()
+    if ext not in {".jpg", ".jpeg", ".png"}:
+        raise HTTPException(status_code=400, detail=f"{label}格式仅支持 jpg/png: {name}")
+    if len(data) >= 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"{label}需小于10MB: {name}")
+    if not _is_valid_jpeg_png_bytes(data):
+        raise HTTPException(status_code=400, detail=f"{label}不是有效的 jpg/png 图片: {name}")
+    try:
+        from PIL import Image, ImageOps
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"图片处理依赖缺失，请重启启动器完成依赖更新: {exc}")
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            img = ImageOps.exif_transpose(img)
+            if img.mode in {"RGBA", "LA"} or (img.mode == "P" and "transparency" in img.info):
+                rgba = img.convert("RGBA")
+                bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                bg.alpha_composite(rgba)
+                img = bg.convert("RGB")
+            else:
+                img = img.convert("RGB")
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=92, optimize=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{label}无法识别或转换: {name} ({exc})")
+
+    converted = out.getvalue()
+    if not converted.startswith(b"\xff\xd8"):
+        raise HTTPException(status_code=400, detail=f"{label}转换为JPEG失败: {name}")
+    safe_stem = re.sub(r"[^0-9A-Za-z._-]+", "_", Path(name).stem).strip("._-") or "image"
+    return f"{safe_stem}.jpg", converted
+
+
 def save_uploaded_moments_images(task_id: str, images: List[tuple[str, bytes]]) -> List[str]:
     """保存UI上传的朋友圈图片，返回本地绝对路径（按上传顺序）。"""
     if not images:
@@ -1119,15 +1404,10 @@ def save_uploaded_moments_images(task_id: str, images: List[tuple[str, bytes]]) 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_paths: List[str] = []
     for idx, (name, data) in enumerate(images, 1):
-        ext = Path(name).suffix.lower()
-        if ext not in {".jpg", ".jpeg", ".png"}:
-            raise HTTPException(status_code=400, detail=f"朋友圈图片格式仅支持 jpg/png: {name}")
-        if len(data) >= 10 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail=f"朋友圈图片需小于10MB: {name}")
-        safe = re.sub(r"[^0-9A-Za-z._-]+", "_", Path(name).name)
+        safe, normalized = _normalize_uploaded_image_for_business(name, data, "朋友圈图片")
         dst = out_dir / f"{idx:02d}_{safe}"
         with dst.open("wb") as f:
-            f.write(data)
+            f.write(normalized)
         out_paths.append(str(dst.resolve()))
     if len(out_paths) > 9:
         raise HTTPException(status_code=400, detail=f"朋友圈图片最多9张，当前{len(out_paths)}张")
@@ -1139,15 +1419,10 @@ def save_uploaded_mini_program_cover(task_id: str, image: tuple[str, bytes]) -> 
     name, data = image
     out_dir = UPLOAD_DIR / f"{task_id}_mini_program"
     out_dir.mkdir(parents=True, exist_ok=True)
-    ext = Path(name).suffix.lower()
-    if ext not in {".jpg", ".jpeg", ".png"}:
-        raise HTTPException(status_code=400, detail=f"小程序封面格式仅支持 jpg/png: {name}")
-    if len(data) >= 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail=f"小程序封面需小于10MB: {name}")
-    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", Path(name).name)
+    safe, normalized = _normalize_uploaded_image_for_business(name, data, "小程序封面")
     dst = out_dir / f"cover_{safe}"
     with dst.open("wb") as f:
-        f.write(data)
+        f.write(normalized)
     return str(dst.resolve())
 
 
@@ -1276,6 +1551,153 @@ def inject_message_mini_program_to_csv(
             writer.writerow({k: row.get(k, "") for k in headers})
 
 
+def write_internal_plan_csv(dst_csv: Path, row: Dict[str, str]) -> None:
+    headers = _default_headers()
+    for key in row.keys():
+        if key not in headers:
+            headers.append(key)
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerow({k: row.get(k, "") for k in headers})
+
+
+def _split_business_multi_values(raw: str) -> List[str]:
+    return [x.strip() for x in re.split(r"[、，,|;/\n]+", str(raw or "")) if x.strip()]
+
+
+def _normalize_coupon_ids_for_script(raw: str) -> str:
+    return "/".join(_split_business_multi_values(raw))
+
+
+def _create_product_code_xlsx(task_id: str, raw_codes: str) -> str:
+    values = _split_business_multi_values(raw_codes)
+    if not values:
+        return ""
+    if Workbook is None:
+        raise HTTPException(status_code=500, detail="缺少 openpyxl，无法生成目标商品编码上传文件")
+    out_dir = UPLOAD_DIR / f"{task_id}_simple_product"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dst = out_dir / "target_product_codes.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "目标商品"
+    ws.append(["商品编码"])
+    for value in values:
+        ws.append([value])
+    wb.save(dst)
+    wb.close()
+    return str(dst.resolve())
+
+
+def prepare_simple_target_fields(dst_csv: Path, task_id: str) -> None:
+    """把文本直填的目标商品/券规则转换成执行引擎能消费的内部字段。"""
+    with dst_csv.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not rows or not headers:
+        return
+
+    for col in ("purchase_target_product_code", "step2_product_file_path", "coupon_ids_sheet_ref", "coupon_ids"):
+        if col not in headers:
+            headers.append(col)
+
+    changed = False
+    for row in rows:
+        product_raw = str(row.get("purchase_target_product_code", "") or "").strip()
+        if product_raw and not _extract_book_title_ref(product_raw) and not str(row.get("step2_product_file_path", "") or "").strip():
+            row["step2_product_file_path"] = _create_product_code_xlsx(task_id, product_raw)
+            changed = True
+
+        coupon_ref_raw = str(row.get("coupon_ids_sheet_ref", "") or "").strip()
+        if coupon_ref_raw and not _extract_book_title_ref(coupon_ref_raw) and not str(row.get("coupon_ids", "") or "").strip():
+            row["coupon_ids"] = _normalize_coupon_ids_for_script(coupon_ref_raw)
+            changed = True
+        coupon_raw = str(row.get("coupon_ids", "") or "").strip()
+        if coupon_raw:
+            normalized_coupon = _normalize_coupon_ids_for_script(coupon_raw)
+            if normalized_coupon and normalized_coupon != coupon_raw:
+                row["coupon_ids"] = normalized_coupon
+                changed = True
+
+    if not changed:
+        return
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in headers})
+
+
+def inject_ordered_plan_images_to_csv(
+    dst_csv: Path,
+    task_id: str,
+    images: List[tuple[str, bytes]],
+) -> List[str]:
+    """按业务上传顺序注入图片：小程序封面优先，其余作为内容图片。"""
+    if not images:
+        return []
+    with dst_csv.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not rows or not headers:
+        return []
+
+    for col in (
+        "channels",
+        "moments_add_images",
+        "moments_image_paths",
+        "msg_add_mini_program",
+        "msg_mini_program_name",
+        "msg_mini_program_title",
+        "msg_mini_program_cover_path",
+        "msg_mini_program_page_path",
+    ):
+        if col not in headers:
+            headers.append(col)
+
+    row = rows[0]
+    channels = _normalize_channel_text(str(row.get("channels", "") or ""))
+    parts = [p.strip() for p in re.split(r"[|,，、/]+", channels) if p.strip()]
+    has_message = "会员通-发客户消息" in parts
+    has_community = "会员通-发送社群" in parts
+    has_moments = "会员通-发客户朋友圈" in parts
+    warnings: List[str] = []
+    if not (has_message or has_community or has_moments):
+        warnings.append("当前渠道不使用图片，已忽略上传图片")
+        return warnings
+
+    mini_enabled = str(row.get("msg_add_mini_program", "") or "").strip() in {"是", "true", "True", "1"}
+    mini_enabled = mini_enabled or bool(
+        str(row.get("msg_mini_program_name", "") or "").strip()
+        or str(row.get("msg_mini_program_title", "") or "").strip()
+        or str(row.get("msg_mini_program_page_path", "") or "").strip()
+    )
+
+    content_images = images
+    if mini_enabled and (has_message or has_community):
+        cover_path = save_uploaded_mini_program_cover(f"{task_id}_simple", images[0])
+        row["msg_add_mini_program"] = "是"
+        row["msg_mini_program_name"] = str(row.get("msg_mini_program_name", "") or "").strip() or "大参林健康"
+        row["msg_mini_program_title"] = str(row.get("msg_mini_program_title", "") or "").strip() or str(row.get("name", "") or "").strip()
+        row["msg_mini_program_cover_path"] = cover_path
+        content_images = images[1:]
+
+    if content_images:
+        content_paths = save_uploaded_moments_images(f"{task_id}_simple", content_images)
+        row["moments_add_images"] = "是"
+        row["moments_image_paths"] = "|".join(content_paths)
+
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for item in rows:
+            writer.writerow({k: item.get(k, "") for k in headers})
+    return warnings
+
+
 def inject_store_file_to_csv(
     dst_csv: Path,
     step3_channels: str,
@@ -1332,6 +1754,35 @@ def inject_step2_main_store_file_to_csv(
     for row in rows:
         row["main_store_file_path"] = main_store_file_path
         row["step2_store_file_path"] = main_store_file_path
+    with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in headers})
+
+
+def sync_step2_store_file_to_step3_for_customer_message_moments(
+    dst_csv: Path,
+    store_file_path: str,
+) -> None:
+    """复用第2步主消费门店文件到客户消息/朋友圈第3步上传门店。"""
+    if not store_file_path:
+        return
+    with dst_csv.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = list(reader.fieldnames or [])
+    if not headers:
+        return
+    for col in ("upload_stores", "store_file_path", "channels"):
+        if col not in headers:
+            headers.append(col)
+    for row in rows:
+        channel_scope = _normalize_channel_text(str(row.get("channels", "") or "").strip())
+        if ("会员通-发客户消息" not in channel_scope) and ("会员通-发客户朋友圈" not in channel_scope):
+            continue
+        row["upload_stores"] = "是"
+        row["store_file_path"] = store_file_path
     with dst_csv.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
@@ -1456,6 +1907,8 @@ class Task:
     error: str = ""
     logs: List[str] = field(default_factory=list)
     generated_links: List[str] = field(default_factory=list)
+    field_results: List[dict] = field(default_factory=list)
+    review_payload: dict = field(default_factory=dict)
     plan_name_display: str = ""
     channel_display: str = ""
     queued: bool = False
@@ -1489,9 +1942,13 @@ class Task:
             "eta": self.eta,
             "duration_sec": self.duration_sec,
             "error": self.error,
+            "error_summary": _extract_error_summary(self),
             "logs_count": len(self.logs),
             "generated_links": self.generated_links,
             "latest_link": self._latest_link_for_ui(),
+            "field_results": self.field_results,
+            "field_result_counts": _field_result_counts(self.field_results),
+            "review_payload": self.review_payload,
             "plan_name": self.plan_name_display,
             "send_channels": self.channel_display,
             "queued": self.queued,
@@ -1971,10 +2428,11 @@ class TaskRunner:
         return t
 
     async def append_log(self, task: Task, line: str) -> None:
-        task.logs.append(line.rstrip("\n"))
+        clean_line = line.rstrip("\n")
+        task.logs.append(clean_line)
         if len(task.logs) > 5000:
             task.logs = task.logs[-5000:]
-        self._parse_progress(task, line)
+        self._parse_progress(task, clean_line)
 
     def _parse_progress(self, task: Task, line: str) -> None:
         m_total = re.search(r"计划数:\s*(\d+)", line)
@@ -1991,10 +2449,26 @@ class TaskRunner:
         if "❌ 计划 " in line and " 失败 " in line:
             task.completed_plans += 1
         self._parse_generated_links(task, line)
+        self._parse_field_result(task, line)
         self._update_eta(task)
+
+    def _parse_field_result(self, task: Task, line: str) -> None:
+        s = (line or "").strip()
+        m = re.match(r"^(✅|⚪|❌)\s+(.+?)\s*$", s)
+        if not m:
+            return
+        name = m.group(2).strip()
+        if not name.startswith("第"):
+            return
+        status_map = {"✅": "ok", "⚪": "warn", "❌": "fail"}
+        item = {"name": name, "status": status_map.get(m.group(1), "warn")}
+        task.field_results = [x for x in task.field_results if x.get("name") != name]
+        task.field_results.append(item)
 
     def _parse_generated_links(self, task: Task, line: str) -> None:
         # Extract review links from runtime logs for business users.
+        if "上下文页检测到已跳转URL" in (line or "") or "上下文页URL" in (line or ""):
+            return
         urls = re.findall(r"(https?://[^\s]+)", line)
         for u in urls:
             u = u.strip().rstrip(".,)")
@@ -2104,8 +2578,10 @@ class TaskRunner:
             task.options.strict_step2 = False
             task.options.skip_step2 = True
 
-        if task.options.skip_step2 and (not task.options.strict_step2):
+        if worker_community_only:
             await self.append_log(task, "[worker-auto] 社群自动策略生效：已自动关闭严格第2步，并启用跳过第2步")
+        elif task.options.skip_step2 and (not task.options.strict_step2):
+            await self.append_log(task, "[worker-auto] 已按提交参数跳过第2步")
 
         cmd = [
             sys.executable,
@@ -2162,7 +2638,11 @@ class TaskRunner:
             task.status = "success"
         else:
             task.status = "failed"
-            task.error = f"exit_code={rc}"
+            summary = _extract_error_summary(task)
+            if summary and summary != "任务失败，详情见日志":
+                task.error = f"{summary} | exit_code={rc}"
+            else:
+                task.error = f"exit_code={rc}"
         await self.append_log(task, f"[worker-{worker_id}] task finished with status={task.status}")
         _persist_task_history(task)
         if task.status == "failed":
@@ -2172,17 +2652,42 @@ class TaskRunner:
 
 
 app = FastAPI(title="Precision Marketing Automation UI")
-runner = TaskRunner(workers=2)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+runner = TaskRunner(workers=1)
 
 
 @app.on_event("startup")
 async def startup_event() -> None:
+    _refresh_parent_launchers()
     await runner.start()
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return UI_HTML
+
+
+@app.get("/simple", response_class=HTMLResponse)
+async def simple_index() -> str:
+    return SIMPLE_HTML
+
+
+@app.get("/api/runtime")
+async def runtime_info() -> JSONResponse:
+    return JSONResponse(
+        {
+            "ok": True,
+            "version": APP_VERSION,
+            "pid": os.getpid(),
+            "app_dir": str(ROOT),
+            "data_dir": str(DATA_DIR),
+        }
+    )
 
 
 @app.get("/api/tasks")
@@ -2388,6 +2893,125 @@ async def download_community_template_xlsx():
         filename="精准营销社群任务模板（含目标门店）.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+SIMPLE_AUTOMATION_FIELDS_MD = """# 精准营销自动化字段清单
+
+以下为当前 `/simple` 文本计划已支持自动化解析/填充或创建链路处理的字段。业务可按“字段名: 值”填写；多个值使用“、”分隔。
+
+## 基础信息
+
+- 计划名称
+- 创建链接
+- 发送渠道
+- 营销主题
+- 计划区域
+- 计划开始时间
+- 计划结束时间
+- 发送时间
+
+## 第2步 目标人群
+
+- 主消费营运区
+- 主消费门店文件
+- 购买目标商品编码 / 目标商品编码
+- 已领或已使用券规则ID
+
+说明：第2步依赖业务系统内嵌 `cdp.dslyy.com` 页面，若网络不可访问或对应渠道页面没有该字段，会进入待复核/警告。
+
+## 第3步 渠道内容
+
+- 执行员工
+- 员工任务结束时间 / 第3步结束时间
+- 短信内容
+- 发送内容
+- 活动介绍（智能电话）
+- 图片（按 `/simple` 每行选择顺序上传）
+
+## 会员通小程序
+
+- 会员通消息是否添加小程序
+- 1对1-小程序名称
+- 1对1-小程序标题
+- 1对1-小程序链接
+- 小程序封面：对应行第1张图片
+
+## 社群
+
+- 社群下发群名 / 下发群名
+- 社群任务分配方式 / 分配方式
+- 社群门店文件
+
+## 复核说明
+
+- 已创建结果会返回链接和字段复核结果。
+- Chrome 复核插件可用“文本复核”和“截图复核”辅助业务二次核对。
+- 未自动化字段不会阻断核心创建，会提示业务创建后人工复核/手工补充。
+"""
+
+SIMPLE_TEXT_TEMPLATE_TXT = """# 精准营销文本计划模版
+# 使用方式：复制下面示例到 /simple 粘贴框，按业务实际删减字段和值。
+# 多个计划可用单独一行 -- 分隔；多个值用 、 分隔。
+# 图片、目标人群门店文件不用写路径，在 /simple 每条计划对应位置上传。
+# 目标人群门店文件用于第2步“主消费门店”；客户消息/朋友圈会自动复用到第3步上传门店，社群和智能电话不自动复用。
+
+## 基础信息
+计划名称: 【模版-全字段-请改名】多值示例
+发送渠道: 短信、会员通-发客户消息
+创建链接: https://precision.dslyy.com/admin#/marketingTemplate/use?useId=600035736992907264
+计划区域: 省区
+营销主题: 其他、新店营销
+场景类型: 会员营销
+计划类型: 会员权益
+计划开始时间: 2026-10-01 00:00:00
+计划结束时间: 2026-10-10 23:59:59
+发送时间: 2026-10-02 10:00:00
+
+## 目标人群
+主消费营运区: 广佛省区、武汉营运区
+购买目标商品编码: 1010002、1012058
+已领或已使用券规则ID: 1-20000005313、1-20000005475
+
+## 执行员工
+执行员工: 广佛省区、武汉营运区
+员工任务结束时间: 2026-10-10 23:59:59
+
+## 会员通小程序
+会员通消息是否添加小程序: 是
+1对1-小程序名称: 大参林健康
+1对1-小程序标题: 会员福利小程序
+1对1-小程序链接: apps/member/integralMall/pages/home/index
+
+## 渠道内容
+短信内容: |
+  【大参林】会员福利活动上线，欢迎进店咨询。
+发送内容: |
+  会员福利活动上线😁
+  欢迎进店咨询健康服务与优惠信息
+
+## 社群字段（发送渠道为“会员通-发送社群”时保留）
+社群任务分配方式: 按条件筛选客户群
+下发群名: 福利
+
+## 智能电话字段（发送渠道为“智能电话”时保留，并改成智能电话创建链接）
+活动介绍: |
+  您好，我是大参林药店的员工。
+  来电是想通知您门店会员福利活动上线，欢迎进店咨询健康服务与优惠信息。
+"""
+
+
+@app.get("/api/simple/template")
+async def download_simple_text_template() -> FileResponse:
+    p = UPLOAD_DIR / "精准营销文本计划模版.txt"
+    p.write_text(SIMPLE_TEXT_TEMPLATE_TXT, encoding="utf-8")
+    return FileResponse(path=str(p), filename="精准营销文本计划模版.txt", media_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/simple/fields")
+async def download_simple_field_list() -> FileResponse:
+    p = UPLOAD_DIR / "精准营销自动化字段清单.md"
+    p.write_text(SIMPLE_AUTOMATION_FIELDS_MD, encoding="utf-8")
+    return FileResponse(path=str(p), filename="精准营销自动化字段清单.md", media_type="text/markdown; charset=utf-8")
 
 
 @app.post("/api/tasks/upload")
@@ -2608,6 +3232,164 @@ async def upload_tasks(
                     }
                 )
     return JSONResponse({"created": created, "zip_applied": zip_apply_stats})
+
+
+@app.post("/api/simple/submit")
+async def submit_simple_tasks(request: Request) -> JSONResponse:
+    form = await request.form()
+    try:
+        plan_count = int(str(form.get("plan_count") or "0"))
+    except Exception:
+        plan_count = 0
+    if plan_count <= 0:
+        raise HTTPException(status_code=400, detail="请至少添加一条计划文本")
+
+    cdp_endpoint = str(form.get("cdp_endpoint") or "http://127.0.0.1:18800").strip()
+    hold_seconds = parse_int(str(form.get("hold_seconds") or "2"), 2)
+    skip_step2_requested = str(form.get("skip_step2") or "").strip().lower() in {"1", "true", "yes", "on", "是"}
+    created: List[dict] = []
+    errors: List[dict] = []
+    op = os.getenv("USER") or getpass.getuser() or "unknown"
+
+    for idx in range(plan_count):
+        text = str(form.get(f"plan_text_{idx}") or "").strip()
+        if not text:
+            errors.append({"row": idx + 1, "error": "计划文本为空"})
+            continue
+        image_uploads = [
+            item for item in form.getlist(f"images_{idx}")
+            if hasattr(item, "filename") and hasattr(item, "read") and str(getattr(item, "filename", "") or "").strip()
+        ]
+        store_upload = form.get(f"store_{idx}")
+        try:
+            parsed = parse_text_plans(text)
+            if len(parsed) != 1:
+                raise TextPlanParseError("每个粘贴框/文本文件只能包含一条计划，请拆成多行分别上传图片")
+            row = parsed[0]
+            parser_warnings = [
+                x.strip()
+                for x in str(row.pop("__warnings", "") or "").splitlines()
+                if x.strip()
+            ]
+            has_mini_text = bool(
+                str(row.get("msg_mini_program_name", "") or "").strip()
+                or str(row.get("msg_mini_program_title", "") or "").strip()
+                or str(row.get("msg_mini_program_page_path", "") or "").strip()
+                or str(row.get("msg_add_mini_program", "") or "").strip() in {"是", "true", "True", "1"}
+            )
+            if has_mini_text and not image_uploads:
+                raise TextPlanParseError("文本包含小程序字段，请至少上传1张图片作为小程序封面")
+
+            tid = str(uuid.uuid4())
+            dst = UPLOAD_DIR / f"{tid}_simple_plan{idx+1}.csv"
+            write_internal_plan_csv(dst, row)
+            normalize_channels_in_csv(dst)
+            normalize_community_create_url_in_csv(dst, "")
+            prepare_simple_target_fields(dst, tid)
+            if (
+                store_upload is not None
+                and hasattr(store_upload, "filename")
+                and hasattr(store_upload, "read")
+                and str(getattr(store_upload, "filename", "") or "").strip()
+            ):
+                store_data = await store_upload.read()
+                if store_data:
+                    store_path = save_uploaded_main_store_file(
+                        tid,
+                        (store_upload.filename or "step2_main_store.xlsx", store_data),
+                    )
+                    inject_step2_main_store_file_to_csv(dst, store_path)
+                    sync_step2_store_file_to_step3_for_customer_message_moments(dst, store_path)
+            apply_unified_field_mapping_and_refs(dst, tid, "", {})
+            image_blobs: List[tuple[str, bytes]] = []
+            for uf in image_uploads:
+                data = await uf.read()
+                if data:
+                    image_blobs.append((uf.filename or f"image_{len(image_blobs)+1}.jpg", data))
+            warnings = parser_warnings + inject_ordered_plan_images_to_csv(dst, tid, image_blobs)
+            review_payload = _build_review_payload(row, source_text=text, image_count=len(image_blobs))
+            prevalidate_csv_time_fields(dst)
+
+            plan_name_display, channel_display = summarize_csv_meta(dst)
+            community_only = _is_community_only_channels(channel_display)
+            options = TaskOptions(
+                connect_cdp=True,
+                cdp_endpoint=cdp_endpoint,
+                strict_step2=(False if (community_only or skip_step2_requested) else True),
+                skip_step2=(True if (community_only or skip_step2_requested) else False),
+                concurrent=1,
+                hold_seconds=max(0, hold_seconds),
+                step3_channels="",
+                executor_include_franchise=True,
+            )
+            task = Task(
+                id=str(uuid.uuid4()),
+                filename=f"simple-plan-{idx+1}.csv",
+                file_path=str(dst),
+                options=options,
+                operator=op,
+                plan_name_display=plan_name_display,
+                channel_display=channel_display,
+                review_payload=review_payload,
+            )
+            for warning in warnings:
+                task.logs.append(f"[simple] {warning}")
+                task.field_results.append({"name": warning, "status": "warn"})
+            await runner.add_task(task, auto_start=True)
+            payload = task.to_dict()
+            payload["row"] = idx + 1
+            payload["warnings"] = warnings
+            created.append(payload)
+        except HTTPException as e:
+            errors.append({"row": idx + 1, "error": str(e.detail)})
+        except TextPlanParseError as e:
+            errors.append({"row": idx + 1, "error": str(e)})
+        except Exception as e:
+            errors.append({"row": idx + 1, "error": f"生成任务失败: {e}"})
+
+    return JSONResponse({"created": created, "errors": errors})
+
+
+def _check_review_api_token(request: Request) -> None:
+    return
+
+
+@app.options("/api/review/vision")
+async def review_vision_options() -> JSONResponse:
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/review/health")
+async def review_health(request: Request) -> JSONResponse:
+    _check_review_api_token(request)
+    return JSONResponse({
+        "ok": True,
+        "ark_key_configured": bool(os.getenv("ARK_API_KEY", "").strip()),
+        "model": os.getenv("ARK_VISION_MODEL", ARK_DEFAULT_VISION_MODEL).strip() or ARK_DEFAULT_VISION_MODEL,
+        "token_required": False,
+    })
+
+
+@app.post("/api/review/vision")
+async def review_vision(request: Request) -> JSONResponse:
+    _check_review_api_token(request)
+    payload = await request.json()
+    image_url = str(payload.get("image_url") or payload.get("image_data_url") or "").strip()
+    if not image_url:
+        raise HTTPException(status_code=400, detail="缺少 image_url 或 image_data_url")
+    if not (image_url.startswith("data:image/") or image_url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="image_url 仅支持 data:image/* 或 https://")
+    if image_url.startswith("data:image/") and len(image_url) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="截图过大，请裁剪字段区域后再复核")
+    fields = payload.get("fields") or payload.get("expected_fields") or []
+    if not isinstance(fields, list) or not fields:
+        raise HTTPException(status_code=400, detail="缺少待识别字段 fields")
+    result = await _call_ark_vision(
+        image_url=image_url,
+        fields=fields,
+        page_context=str(payload.get("page_context") or ""),
+    )
+    return JSONResponse(result)
 
 
 @app.post("/api/tasks/{task_id}/retry")
@@ -3203,6 +3985,19 @@ UI_HTML = """
       margin-top:2px;
     }
     .theme-wrap{display:flex;align-items:center;gap:8px}
+    .version-pill{
+      display:inline-flex;
+      align-items:center;
+      height:28px;
+      padding:0 10px;
+      border:1px solid rgba(148,163,184,.32);
+      border-radius:999px;
+      color:#64748b;
+      background:rgba(255,255,255,.82);
+      font-size:12px;
+      font-weight:700;
+      white-space:nowrap;
+    }
     .theme-switch{
       display:inline-flex;
       align-items:center;
@@ -4087,6 +4882,7 @@ UI_HTML = """
             <div class="hero-sub">选择文件 -> 添加素材 -> 开始执行</div>
           </div>
           <div class="theme-wrap">
+            <span id="runtimeVersion" class="version-pill">版本检查中</span>
             <div class="theme-switch" role="group" aria-label="页面显示模式">
               <button id="themeModeLight" class="theme-btn" type="button" title="浅色" data-mode="light" aria-label="浅色">
                 <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"/></svg>
@@ -4350,6 +5146,20 @@ function esc(s){
     '"':"&quot;",
     "'":"&#39;"
   }[m]));
+}
+
+async function loadRuntimeVersion(){
+  const el = document.getElementById('runtimeVersion');
+  if(!el) return;
+  try{
+    const resp = await fetch('/api/runtime', {cache:'no-store'});
+    if(!resp.ok) throw new Error('runtime unavailable');
+    const data = await resp.json();
+    el.textContent = data.version ? `v${data.version}` : '版本未知';
+    if(data.app_dir) el.title = `运行目录：${data.app_dir}`;
+  }catch(e){
+    el.textContent = '版本未知';
+  }
 }
 
 function setUploadHint(msg, isOk=true){
@@ -4924,7 +5734,740 @@ document.querySelectorAll('.theme-btn').forEach(btn => {
 });
 restoreUiFromCache();
 syncChannelMaterials();
+loadRuntimeVersion();
 refreshTasks();
+</script>
+</body>
+</html>
+"""
+
+SIMPLE_HTML = """
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>精准营销快速创建</title>
+  <style>
+    :root{--bg:#f7f8fa;--panel:#fff;--text:#111827;--muted:#64748b;--line:#d8dee8;--primary:#2563eb;--ok:#15803d;--bad:#b91c1c;--warn:#b45309}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}
+    header{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;background:#fff;border-bottom:1px solid var(--line)}
+    h1{font-size:18px;margin:0;font-weight:700}
+    .header-right{display:flex;align-items:center;gap:12px}
+    .version-pill{display:inline-flex;align-items:center;height:28px;padding:0 10px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--muted);font-size:12px;font-weight:700;white-space:nowrap}
+    main{max-width:1280px;margin:0 auto;padding:22px 24px 36px}
+    .toolbar-card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:14px}
+    .toolbar-row{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+    .toolbar-group{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .advanced{margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
+    .advanced summary{cursor:pointer;color:#1f2937;font-weight:700;font-size:13px;width:max-content}
+    button{border:1px solid var(--primary);background:var(--primary);color:#fff;border-radius:6px;padding:9px 14px;font-weight:650;cursor:pointer}
+    button.secondary{background:#fff;color:#1f2937;border-color:var(--line)}
+    button.danger{background:#fff;color:var(--bad);border-color:#fecaca}
+    button:disabled{opacity:.55;cursor:not-allowed}
+    .button-link{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--primary);background:var(--primary);color:#fff;border-radius:6px;padding:9px 14px;font-weight:650;text-decoration:none;min-height:36px}
+    .button-link.secondary{background:#fff;color:#1f2937;border-color:var(--line)}
+    input[type="file"],input[type="text"],input[type="number"]{border:1px solid var(--line);border-radius:6px;background:#fff;padding:8px}
+    .add-count{display:flex;gap:6px;align-items:center;color:var(--muted)}
+    .add-count input{width:72px}
+    .plan-count{border:1px solid var(--line);border-radius:999px;padding:5px 10px;background:#fff;color:var(--muted);font-size:12px;font-weight:700}
+    .settings{display:flex;gap:12px;align-items:center;flex-wrap:wrap;color:var(--muted);padding-top:10px}
+    .settings input{width:180px}
+    .grid{display:grid;grid-template-columns:minmax(420px,1.2fr) minmax(320px,.8fr) 260px;gap:12px;align-items:stretch}
+    .head{color:var(--muted);font-weight:700;font-size:12px;padding:0 6px 6px}
+    .plan-row{display:grid;grid-template-columns:minmax(420px,1.2fr) minmax(320px,.8fr) 260px;gap:12px;margin-bottom:12px}
+    .cell{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0}
+    .cell-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;color:var(--muted);font-weight:700;font-size:12px}
+    textarea{width:100%;min-height:230px;resize:vertical;border:1px solid var(--line);border-radius:6px;padding:10px;font-family:"SFMono-Regular",Consolas,monospace;line-height:1.45}
+    .image-list{display:flex;flex-direction:column;gap:8px}
+    .file-line{border-top:1px solid var(--line);padding-top:10px;display:flex;flex-direction:column;gap:6px}
+    .file-name{color:#374151;font-size:12px;line-height:1.4;word-break:break-all}
+    .notice{border:1px solid #bfdbfe;background:#eff6ff;color:#1e40af;border-radius:8px;padding:10px 12px;margin:10px 0 12px;font-size:12px;line-height:1.6}
+    .thumbs{display:flex;gap:8px;flex-wrap:wrap;min-height:34px}
+    .thumbs img{width:54px;height:54px;object-fit:cover;border:1px solid var(--line);border-radius:6px}
+    .thumb-item{width:92px;display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:11px;line-height:1.25}
+    .thumb-item span{overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    .status{display:flex;flex-direction:column;gap:8px;min-height:230px}
+    .pill{display:inline-flex;align-items:center;width:max-content;max-width:100%;padding:3px 8px;border-radius:999px;font-size:12px;border:1px solid var(--line);color:var(--muted)}
+    .pill.ok{color:var(--ok);border-color:#bbf7d0;background:#f0fdf4}
+    .pill.bad{color:var(--bad);border-color:#fecaca;background:#fef2f2}
+    .pill.warn{color:var(--warn);border-color:#fed7aa;background:#fff7ed}
+    .result-link{color:var(--primary);word-break:break-all;text-decoration:none}
+    .review-summary{display:flex;gap:6px;flex-wrap:wrap}
+    .review-chip{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:2px 7px;background:#fff;color:var(--muted)}
+    .review-chip.ok{color:var(--ok);border-color:#bbf7d0;background:#f0fdf4}
+    .review-chip.warn{color:var(--warn);border-color:#fed7aa;background:#fff7ed}
+    .review-chip.fail{color:var(--bad);border-color:#fecaca;background:#fef2f2}
+    .field-results{display:flex;flex-direction:column;gap:4px;max-height:190px;overflow:auto;border-top:1px solid var(--line);padding-top:8px}
+    .field-result{display:flex;gap:6px;align-items:flex-start;font-size:12px;line-height:1.35;color:#374151}
+    .field-result.fail{color:var(--bad);font-weight:650}
+    .field-result.warn{color:var(--warn)}
+    .small{color:var(--muted);font-size:12px;line-height:1.5}
+    .empty{border:1px dashed var(--line);border-radius:8px;padding:22px;text-align:center;color:var(--muted);background:#fff}
+    .row-actions{display:flex;gap:8px;margin-top:auto;flex-wrap:wrap}
+    @media(max-width:980px){
+      .grid,.plan-row{grid-template-columns:1fr}
+      textarea,.status{min-height:160px}
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>精准营销快速创建</h1>
+    <div class="header-right">
+      <span id="runtimeVersion" class="version-pill">版本检查中</span>
+      <a class="result-link" href="/">任务中心</a>
+    </div>
+  </header>
+  <main>
+    <div class="toolbar-card">
+      <div class="toolbar-row">
+        <div class="toolbar-group">
+          <a class="button-link secondary" href="/api/simple/template" download>下载模版</a>
+          <a class="button-link secondary" href="/api/simple/fields" download>字段清单</a>
+          <label class="add-count">新增个数 <input id="addCount" type="number" min="1" max="100" value="1"/> 个</label>
+          <button class="secondary" type="button" onclick="addRowsFromCount()">新增粘贴框</button>
+          <span id="planCount" class="plan-count">0 个文本计划</span>
+        </div>
+        <div class="toolbar-group">
+          <button class="secondary" type="button" onclick="saveDraft()">保存草稿</button>
+          <button class="danger" type="button" onclick="clearDraft()">清空草稿</button>
+          <button class="secondary" type="button" onclick="retryAllFailedRows()">批量重试失败</button>
+          <button id="submitBtn" type="button" onclick="submitPlans()">开始执行</button>
+        </div>
+      </div>
+      <details class="advanced">
+        <summary>高级设置</summary>
+        <div class="settings">
+          <label>浏览器 <input id="cdpEndpoint" type="text" value="http://127.0.0.1:18800"/></label>
+          <label>停留秒 <input id="holdSeconds" type="number" min="0" value="5"/></label>
+          <label><input id="skipStep2" type="checkbox"/> 跳过目标人群</label>
+        </div>
+      </details>
+    </div>
+    <div id="executionSummary" class="small">执行结果：成功 0 个、失败 0 个、执行中 0 个</div>
+    <div class="notice">门店文件说明：每条计划上传的“目标人群门店文件”用于第2步“主消费门店”。当发送渠道包含“会员通-发客户消息”或“会员通-发客户朋友圈”时，系统会自动复用同一个门店文件到第3步上传门店；社群和智能电话不自动复用。</div>
+    <div class="grid">
+      <div class="head">文本计划</div>
+      <div class="head">素材和门店文件</div>
+      <div class="head">结果</div>
+    </div>
+    <div id="rows"></div>
+    <div id="empty" class="empty">点击“新增粘贴框”录入计划文本，或下载模版后复制示例内容再粘贴。</div>
+  </main>
+<script>
+let seq = 0;
+let tracked = new Map();
+let rowImages = new Map();
+let rowStoreFiles = new Map();
+let pollTimer = null;
+const DRAFT_KEY = 'pm_simple_text_draft_v1';
+const DRAFT_DB = 'pm_simple_draft_db_v1';
+const DRAFT_STORE = 'drafts';
+
+const sampleText = `计划名称: 示例计划
+发送渠道: 会员通-发客户朋友圈
+营销主题: 其他
+计划开始时间: 2026-06-01
+计划结束时间: 2026-06-10
+发送时间: 2026-06-02 09:00
+主消费营运区: 广佛省区
+执行员工: 广佛省区
+员工任务结束时间: 2026-06-10
+推送内容: |
+  这里填写业务要发送的内容`;
+
+function esc(s){
+  return (s||'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+async function loadRuntimeVersion(){
+  const el = document.getElementById('runtimeVersion');
+  if(!el) return;
+  try{
+    const resp = await fetch('/api/runtime', {cache:'no-store'});
+    if(!resp.ok) throw new Error('runtime unavailable');
+    const data = await resp.json();
+    el.textContent = data.version ? `v${data.version}` : '版本未知';
+    if(data.app_dir) el.title = `运行目录：${data.app_dir}`;
+  }catch(e){
+    el.textContent = '版本未知';
+  }
+}
+function splitBlocks(text){
+  return (text || '').replace(/\\r\\n/g,'\\n').split(/^\\s*--+\\s*$/m).map(s => s.trim()).filter(Boolean);
+}
+function setEmpty(){
+  const count = document.querySelectorAll('.plan-row').length;
+  document.getElementById('empty').style.display = count ? 'none' : 'block';
+  const countEl = document.getElementById('planCount');
+  if(countEl) countEl.textContent = `${count} 个文本计划`;
+  updateExecutionSummary();
+}
+function updateExecutionSummary(){
+  const el = document.getElementById('executionSummary');
+  if(!el) return;
+  const rows = Array.from(document.querySelectorAll('.plan-row'));
+  const success = rows.filter(row => row.dataset.status === 'success').length;
+  const failed = rows.filter(row => row.dataset.status === 'failed' || row.dataset.status === 'generate_failed').length;
+  const running = rows.filter(row => ['pending','running','paused','submitting'].includes(row.dataset.status || '')).length;
+  el.textContent = `执行结果：成功 ${success} 个、失败 ${failed} 个、执行中 ${running} 个`;
+}
+function refreshRowNumbers(){
+  Array.from(document.querySelectorAll('.plan-row')).forEach((row, idx) => {
+    const label = row.querySelector('.row-title');
+    if(label) label.textContent = `计划 ${idx + 1}`;
+  });
+}
+function addRow(text=''){
+  const id = seq++;
+  const wrap = document.createElement('div');
+  wrap.className = 'plan-row';
+  wrap.dataset.rowId = id;
+  wrap.innerHTML = `
+    <div class="cell">
+      <div class="cell-title"><span class="row-title">计划</span><span>每框一条计划</span></div>
+      <textarea class="plan-text" placeholder="${esc(sampleText)}">${esc(text)}</textarea>
+    </div>
+    <div class="cell image-list">
+      <div class="cell-title"><span>图片</span><span>按选择顺序上传</span></div>
+      <input class="image-input" type="file" accept=".jpg,.jpeg,.png" multiple/>
+      <div class="small image-note">可一次或多次选择图片，系统会按累计顺序上传。客户消息/社群且有小程序字段：第1张为小程序封面；其余图片按顺序上传。</div>
+      <div class="thumbs"></div>
+      <button class="secondary" type="button" onclick="clearRowImages(${id})">清空本行图片</button>
+      <div class="file-line">
+        <div class="cell-title"><span>目标人群门店文件</span><span>可选 .xlsx/.xls</span></div>
+        <input class="store-input" type="file" accept=".xlsx,.xls"/>
+        <div class="small">用于第2步“主消费门店”；客户消息/朋友圈会自动复用到第3步上传门店。上传后无需在文本里填写文件路径。</div>
+        <div class="store-file-name file-name">未选择门店文件</div>
+        <button class="secondary" type="button" onclick="clearRowStoreFile(${id})">清空门店文件</button>
+      </div>
+    </div>
+    <div class="cell status">
+      <span class="pill">未提交</span>
+      <div class="message small"></div>
+      <div class="link-slot"></div>
+      <div class="review-slot"></div>
+      <div class="row-actions">
+        <button class="secondary copy-review" type="button" onclick="copyReviewData(${id})" disabled>复制复核数据</button>
+        <button class="secondary copy-log" type="button" onclick="copyTaskLogs(${id})" disabled>复制日志</button>
+        <button class="secondary retry-row" type="button" onclick="retryFailedRow(${id})" disabled>重试</button>
+        <button class="danger" type="button" onclick="removeRow(${id})">删除</button>
+      </div>
+    </div>`;
+  document.getElementById('rows').appendChild(wrap);
+  rowImages.set(String(id), []);
+  rowStoreFiles.set(String(id), null);
+  wrap.querySelector('.plan-text').addEventListener('paste', e => handlePlanTextPaste(wrap, e));
+  wrap.querySelector('.image-input').addEventListener('change', e => {
+    appendRowImages(wrap, e.target.files);
+    e.target.value = '';
+  });
+  wrap.querySelector('.store-input').addEventListener('change', e => {
+    setRowStoreFile(wrap, (e.target.files || [])[0] || null);
+    e.target.value = '';
+  });
+  refreshRowNumbers();
+  setEmpty();
+  return wrap;
+}
+function handlePlanTextPaste(row, event){
+  const text = (event.clipboardData || window.clipboardData)?.getData('text') || '';
+  const blocks = splitBlocks(text);
+  if(blocks.length <= 1) return;
+  event.preventDefault();
+  const ta = row.querySelector('.plan-text');
+  ta.value = blocks[0];
+  blocks.slice(1).forEach(block => addRow(block));
+  setRowStatus(row, '', '未提交', `已从粘贴内容拆分 ${blocks.length} 条计划`);
+  refreshRowNumbers();
+  setEmpty();
+}
+function addRowsFromCount(){
+  const input = document.getElementById('addCount');
+  const count = Math.max(1, Math.min(100, parseInt(input.value || '1', 10) || 1));
+  for(let i = 0; i < count; i++) addRow();
+}
+function currentPlanTexts(){
+  return Array.from(document.querySelectorAll('.plan-row'))
+    .map(row => (row.querySelector('.plan-text').value || '').trim())
+    .filter(Boolean);
+}
+function replaceRowsWithDraftRows(draftRows){
+  document.getElementById('rows').innerHTML = '';
+  rowImages.clear();
+  rowStoreFiles.clear();
+  seq = 0;
+  const rows = Array.isArray(draftRows) && draftRows.length ? draftRows : [{text:'', images:[], storeFile:null}];
+  rows.forEach(item => {
+    const row = addRow(String(item.text || ''));
+    const id = String(row.dataset.rowId || '');
+    const files = Array.isArray(item.images) ? item.images : [];
+    rowImages.set(id, files);
+    renderThumbs(row, files);
+    const storeFile = item.storeFile || null;
+    rowStoreFiles.set(id, storeFile);
+    renderStoreFile(row, storeFile);
+  });
+  refreshRowNumbers();
+  setEmpty();
+  updateExecutionSummary();
+}
+
+function openDraftDb(){
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DRAFT_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(DRAFT_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('打开草稿库失败'));
+  });
+}
+async function draftDbGet(key){
+  const db = await openDraftDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DRAFT_STORE, 'readonly');
+    const req = tx.objectStore(DRAFT_STORE).get(key);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error || new Error('读取草稿失败'));
+    tx.oncomplete = () => db.close();
+  });
+}
+async function draftDbSet(key, value){
+  const db = await openDraftDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DRAFT_STORE, 'readwrite');
+    tx.objectStore(DRAFT_STORE).put(value, key);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => reject(tx.error || new Error('保存草稿失败'));
+  });
+}
+async function draftDbDelete(key){
+  const db = await openDraftDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DRAFT_STORE, 'readwrite');
+    tx.objectStore(DRAFT_STORE).delete(key);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => reject(tx.error || new Error('清空草稿失败'));
+  });
+}
+async function fileToDraft(file){
+  if(!file) return null;
+  return {
+    name: file.name || 'image.jpg',
+    type: file.type || 'image/jpeg',
+    lastModified: file.lastModified || Date.now(),
+    data: await file.arrayBuffer(),
+  };
+}
+function draftToFile(item){
+  if(!item) return null;
+  return new File([item.data], item.name || 'image.jpg', {
+    type: item.type || 'image/jpeg',
+    lastModified: item.lastModified || Date.now(),
+  });
+}
+async function collectDraftRows(){
+  const rows = [];
+  for(const row of Array.from(document.querySelectorAll('.plan-row'))){
+    const id = String(row.dataset.rowId || '');
+    const images = rowImages.get(id) || [];
+    const storeFile = rowStoreFiles.get(id) || null;
+    const draftImages = [];
+    for(const file of images){
+      draftImages.push(await fileToDraft(file));
+    }
+    rows.push({
+      text: row.querySelector('.plan-text').value || '',
+      images: draftImages,
+      storeFile: storeFile ? await fileToDraft(storeFile) : null,
+    });
+  }
+  return rows;
+}
+async function saveDraft(){
+  const rows = await collectDraftRows();
+  const hasContent = rows.some(row => String(row.text || '').trim() || (row.images || []).length || row.storeFile);
+  if(!hasContent){
+    alert('当前没有可保存的草稿内容');
+    return;
+  }
+  const payload = { saved_at: new Date().toISOString(), rows };
+  try{
+    await draftDbSet(DRAFT_KEY, payload);
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({saved_at: payload.saved_at, rows: rows.length}));
+    const imageCount = rows.reduce((sum, row) => sum + (row.images || []).length, 0);
+    const storeCount = rows.filter(row => row.storeFile).length;
+    alert(`已保存草稿：${rows.length} 个文本计划，${imageCount} 张图片，${storeCount} 个门店文件。下次进入页面会自动恢复。`);
+  }catch(e){
+    alert('草稿保存失败：浏览器本地存储不可用或空间不足');
+  }
+}
+async function autoRestoreDraft(){
+  try{
+    const payload = await draftDbGet(DRAFT_KEY);
+    const draftRows = Array.isArray(payload?.rows) ? payload.rows.map(row => ({
+      text: String(row.text || ''),
+      images: Array.isArray(row.images) ? row.images.map(draftToFile).filter(Boolean) : [],
+      storeFile: row.storeFile ? draftToFile(row.storeFile) : null,
+    })) : [];
+    if(draftRows.length){
+      replaceRowsWithDraftRows(draftRows);
+    }else{
+      addRow();
+    }
+  }catch(e){
+    addRow();
+    console.warn('草稿自动恢复失败', e);
+  }
+}
+async function clearDraft(){
+  await draftDbDelete(DRAFT_KEY).catch(() => {});
+  localStorage.removeItem(DRAFT_KEY);
+  tracked.clear();
+  if(pollTimer){
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  replaceRowsWithDraftRows([{text:'', images:[], storeFile:null}]);
+  alert('已清空草稿，当前页面文本和图片已清除；下次进入不会恢复旧草稿。');
+}
+function removeRow(id){
+  const row = document.querySelector(`.plan-row[data-row-id="${id}"]`);
+  if(row) row.remove();
+  rowImages.delete(String(id));
+  rowStoreFiles.delete(String(id));
+  refreshRowNumbers();
+  setEmpty();
+}
+function appendRowImages(row, files){
+  const id = String(row.dataset.rowId || '');
+  const current = rowImages.get(id) || [];
+  const added = Array.from(files || []);
+  rowImages.set(id, current.concat(added));
+  renderThumbs(row, rowImages.get(id));
+}
+function clearRowImages(id){
+  const row = document.querySelector(`.plan-row[data-row-id="${id}"]`);
+  rowImages.set(String(id), []);
+  if(row){
+    const input = row.querySelector('.image-input');
+    if(input) input.value = '';
+    renderThumbs(row, []);
+  }
+}
+function setRowStoreFile(row, file){
+  const id = String(row.dataset.rowId || '');
+  rowStoreFiles.set(id, file || null);
+  renderStoreFile(row, file || null);
+}
+function clearRowStoreFile(id){
+  const row = document.querySelector(`.plan-row[data-row-id="${id}"]`);
+  rowStoreFiles.set(String(id), null);
+  if(row){
+    const input = row.querySelector('.store-input');
+    if(input) input.value = '';
+    renderStoreFile(row, null);
+  }
+}
+function renderStoreFile(row, file){
+  const el = row.querySelector('.store-file-name');
+  if(!el) return;
+  el.textContent = file ? `已选择：${file.name || '门店文件.xlsx'}` : '未选择门店文件';
+}
+function renderThumbs(row, files){
+  const box = row.querySelector('.thumbs');
+  box.innerHTML = '';
+  const all = Array.from(files || []);
+  if(all.length){
+    const count = document.createElement('div');
+    count.className = 'small';
+    count.textContent = `已选择 ${all.length} 张，按下方顺序上传`;
+    box.appendChild(count);
+  }
+  all.slice(0, 12).forEach((file, idx) => {
+    const item = document.createElement('div');
+    item.className = 'thumb-item';
+    const img = document.createElement('img');
+    img.alt = file.name || `image_${idx + 1}`;
+    img.src = URL.createObjectURL(file);
+    const name = document.createElement('span');
+    name.textContent = `${idx + 1}. ${file.name || '未命名图片'}`;
+    item.appendChild(img);
+    item.appendChild(name);
+    box.appendChild(item);
+  });
+  if(all.length > 12){
+    const more = document.createElement('div');
+    more.className = 'small';
+    more.textContent = `还有 ${all.length - 12} 张未预览，提交时会一起上传`;
+    box.appendChild(more);
+  }
+}
+function setRowStatus(row, cls, text, msg=''){
+  const statusMap = {'提交中':'submitting','排队/执行中':'pending','生成失败':'generate_failed','未提交':'idle'};
+  row.dataset.status = statusMap[text] || text || 'idle';
+  const pill = row.querySelector('.pill');
+  pill.className = 'pill' + (cls ? ' ' + cls : '');
+  pill.textContent = text;
+  row.querySelector('.message').textContent = msg || '';
+  const retryBtn = row.querySelector('.retry-row');
+  if(retryBtn) retryBtn.disabled = !['failed','generate_failed'].includes(row.dataset.status || '');
+  const logBtn = row.querySelector('.copy-log');
+  if(logBtn) logBtn.disabled = !row.dataset.taskId;
+  updateExecutionSummary();
+}
+function renderFieldResults(task){
+  const items = task.field_results || [];
+  const counts = task.field_result_counts || {};
+  if(!items.length) return '';
+  const failItems = items.filter(x => x.status === 'fail');
+  const warnItems = items.filter(x => x.status === 'warn');
+  const okCount = counts.ok || 0;
+  const warnCount = counts.warn || 0;
+  const failCount = counts.fail || 0;
+  const topItems = failItems.concat(warnItems, items.filter(x => x.status === 'ok')).slice(0, 24);
+  const icon = s => s === 'ok' ? '✅' : (s === 'fail' ? '❌' : '⚪');
+  return `
+    <div class="review-summary">
+      <span class="review-chip ok">通过 ${okCount}</span>
+      <span class="review-chip warn">待复核 ${warnCount}</span>
+      <span class="review-chip fail">失败 ${failCount}</span>
+    </div>
+    <div class="field-results">
+      ${topItems.map(x => `<div class="field-result ${esc(x.status || '')}"><span>${icon(x.status)}</span><span>${esc(x.name || '')}</span></div>`).join('')}
+    </div>`;
+}
+function buildReviewData(task){
+  const payload = Object.assign({}, task.review_payload || {});
+  payload.task_id = task.id || '';
+  payload.plan_name = task.plan_name || '';
+  payload.channels = task.send_channels || '';
+  payload.review_link = task.latest_link || '';
+  payload.field_results = task.field_results || [];
+  payload.field_result_counts = task.field_result_counts || {};
+  payload.copied_at = new Date().toISOString();
+  return payload;
+}
+async function copyReviewData(rowId){
+  const row = document.querySelector(`.plan-row[data-row-id="${rowId}"]`);
+  if(!row || !row.dataset.reviewData) return;
+  const text = row.dataset.reviewData;
+  const btn = row.querySelector('.copy-review');
+  const show = label => {
+    if(!btn) return;
+    const old = btn.dataset.label || btn.textContent;
+    btn.dataset.label = old;
+    btn.textContent = label;
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  };
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(text);
+      show('已复制');
+      return;
+    }
+  }catch(e){
+    // 继续走兼容复制。
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', 'readonly');
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  ta.style.top = '0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try{
+    const ok = document.execCommand('copy');
+    show(ok ? '已复制' : '复制失败');
+  }catch(e){
+    show('复制失败');
+  }finally{
+    document.body.removeChild(ta);
+  }
+}
+async function copyTextWithButton(text, btn){
+  const show = label => {
+    if(!btn) return;
+    const old = btn.dataset.label || btn.textContent;
+    btn.dataset.label = old;
+    btn.textContent = label;
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  };
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(text);
+      show('已复制');
+      return true;
+    }
+  }catch(e){}
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', 'readonly');
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  ta.style.top = '0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try{
+    const ok = document.execCommand('copy');
+    show(ok ? '已复制' : '复制失败');
+    return ok;
+  }catch(e){
+    show('复制失败');
+    return false;
+  }finally{
+    document.body.removeChild(ta);
+  }
+}
+async function copyTaskLogs(rowId){
+  const row = document.querySelector(`.plan-row[data-row-id="${rowId}"]`);
+  const taskId = row?.dataset.taskId || '';
+  const btn = row?.querySelector('.copy-log');
+  if(!taskId) return;
+  try{
+    const resp = await fetch(`/api/tasks/${taskId}/logs?offset=0&limit=5000`);
+    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const logs = data.logs || [];
+    const tail = logs.slice(-220).join("\\n");
+    const text = [
+      `task_id=${taskId}`,
+      `status=${data.status || row.dataset.status || ''}`,
+      '',
+      tail || '(日志为空)'
+    ].join("\\n");
+    await copyTextWithButton(text, btn);
+  }catch(e){
+    await copyTextWithButton(`复制日志失败: ${e && e.message ? e.message : e}`, btn);
+  }
+}
+async function submitRows(rows){
+  const allRows = Array.from(document.querySelectorAll('.plan-row'));
+  const fd = new FormData();
+  fd.append('plan_count', String(rows.length));
+  fd.append('cdp_endpoint', document.getElementById('cdpEndpoint').value || 'http://127.0.0.1:18800');
+  fd.append('hold_seconds', document.getElementById('holdSeconds').value || '5');
+  fd.append('skip_step2', document.getElementById('skipStep2').checked ? 'true' : 'false');
+  allRows.filter(row => !rows.includes(row) && !(row.querySelector('.plan-text').value || '').trim()).forEach(row => {
+    setRowStatus(row, '', '未提交', '空白文本已忽略');
+    row.querySelector('.link-slot').innerHTML = '';
+    row.querySelector('.review-slot').innerHTML = '';
+  });
+  rows.forEach((row, idx) => {
+    fd.append(`plan_text_${idx}`, row.querySelector('.plan-text').value || '');
+    const images = rowImages.get(String(row.dataset.rowId || '')) || Array.from(row.querySelector('.image-input').files || []);
+    images.forEach(file => fd.append(`images_${idx}`, file));
+    const storeFile = rowStoreFiles.get(String(row.dataset.rowId || '')) || null;
+    if(storeFile) fd.append(`store_${idx}`, storeFile);
+    setRowStatus(row, 'warn', '提交中');
+    row.querySelector('.link-slot').innerHTML = '';
+    row.querySelector('.review-slot').innerHTML = '';
+    row.dataset.taskId = '';
+    row.dataset.reviewData = '';
+    const logBtn = row.querySelector('.copy-log');
+    if(logBtn) logBtn.disabled = true;
+  });
+  document.getElementById('submitBtn').disabled = true;
+  try{
+    const resp = await fetch('/api/simple/submit', {method:'POST', body:fd});
+    const data = await resp.json().catch(() => ({}));
+    if(!resp.ok){
+      alert(data.detail || await resp.text());
+      return;
+    }
+    (data.errors || []).forEach(err => {
+      const row = rows[(err.row || 1) - 1];
+      if(row) setRowStatus(row, 'bad', '生成失败', err.error || '未知错误');
+    });
+    (data.created || []).forEach(item => {
+      const row = rows[(item.row || 1) - 1];
+      if(!row) return;
+      row.dataset.taskId = item.id;
+      tracked.set(item.id, row);
+      setRowStatus(row, 'warn', '排队/执行中', (item.warnings || []).join('；'));
+      const logBtn = row.querySelector('.copy-log');
+      if(logBtn) logBtn.disabled = false;
+    });
+    startPolling();
+  }finally{
+    document.getElementById('submitBtn').disabled = false;
+  }
+}
+async function submitPlans(){
+  const allRows = Array.from(document.querySelectorAll('.plan-row'));
+  const rows = allRows.filter(row => (row.querySelector('.plan-text').value || '').trim());
+  if(!rows.length){
+    if(!allRows.length) addRow();
+    alert('请至少填写一条计划文本');
+    return;
+  }
+  await submitRows(rows);
+}
+async function retryFailedRow(rowId){
+  const row = document.querySelector(`.plan-row[data-row-id="${rowId}"]`);
+  if(!row) return;
+  if(!['failed','generate_failed'].includes(row.dataset.status || '')){
+    alert('当前行不是失败状态，无需重试');
+    return;
+  }
+  if(!(row.querySelector('.plan-text').value || '').trim()){
+    alert('当前行没有计划文本，无法重试');
+    return;
+  }
+  await submitRows([row]);
+}
+async function retryAllFailedRows(){
+  const rows = Array.from(document.querySelectorAll('.plan-row')).filter(row =>
+    ['failed','generate_failed'].includes(row.dataset.status || '') &&
+    (row.querySelector('.plan-text').value || '').trim()
+  );
+  if(!rows.length){
+    alert('当前没有可重试的失败计划');
+    return;
+  }
+  await submitRows(rows);
+}
+function startPolling(){
+  if(pollTimer) return;
+  pollTimer = setInterval(refreshResults, 1800);
+  refreshResults();
+}
+async function refreshResults(){
+  if(!tracked.size){
+    clearInterval(pollTimer);
+    pollTimer = null;
+    return;
+  }
+  const resp = await fetch('/api/tasks');
+  if(!resp.ok) return;
+  const data = await resp.json();
+  const map = new Map((data.tasks || []).map(t => [t.id, t]));
+  for(const [id, row] of tracked.entries()){
+    const task = map.get(id);
+    if(!task) continue;
+    const status = task.paused && task.status === 'pending' ? 'paused' : task.status;
+    const cls = status === 'success' ? 'ok' : (status === 'failed' ? 'bad' : 'warn');
+    let msg = '';
+    if(status === 'failed') msg = task.error_summary || task.error || '执行失败，请查看任务中心日志';
+    else msg = `${task.completed_plans || 0}/${task.total_plans || '-'}，成功/失败 ${task.success_count || 0}/${task.fail_count || 0}`;
+    setRowStatus(row, cls, status, msg);
+    if(task.latest_link){
+      row.querySelector('.link-slot').innerHTML = `<a class="result-link" target="_blank" href="${esc(task.latest_link)}">打开创建结果</a>`;
+    }
+    row.querySelector('.review-slot').innerHTML = renderFieldResults(task);
+    row.dataset.reviewData = JSON.stringify(buildReviewData(task), null, 2);
+    const copyBtn = row.querySelector('.copy-review');
+    if(copyBtn) copyBtn.disabled = false;
+    const logBtn = row.querySelector('.copy-log');
+    if(logBtn) logBtn.disabled = false;
+    if(status === 'success' || status === 'failed') tracked.delete(id);
+  }
+}
+loadRuntimeVersion();
+autoRestoreDraft();
 </script>
 </body>
 </html>

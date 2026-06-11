@@ -5,6 +5,7 @@ from pathlib import Path
 import importlib.util
 import sys
 import types
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -47,8 +48,8 @@ class BatchScriptTests(unittest.TestCase):
             "group_name", "update_type", "main_operating_area", "coupon_ids", "sms_content"
         ]
         row = [
-            "测试计划", "省区", "其他", "否", "2026-03-01 08:00", "2026-03-01 08:00",
-            "定时-单次任务", "2026-03-01 08:00", "不限制", "否",
+            "测试计划", "省区", "其他", "否", "2026-06-15 08:00", "2026-06-15 08:00",
+            "定时-单次任务", "2026-06-15 08:00", "不限制", "否",
             "测试分群", "自动更新", "广佛省区", "1-20000005475", "短信内容"
         ]
 
@@ -62,6 +63,33 @@ class BatchScriptTests(unittest.TestCase):
 
         self.assertEqual(len(plans), 1)
         self.assertEqual(plans[0]["main_operating_area"], "广佛省区")
+
+    def test_load_csv_supports_smart_phone_activity_intro(self):
+        headers = [
+            "name", "channels", "region", "theme", "use_recommend", "start_time", "end_time",
+            "trigger_type", "send_time", "global_limit", "set_target", "activity_intro"
+        ]
+        row = [
+            "智能电话测试", "智能电话", "营运区", "其他", "否", "2026-06-15 09:00:00", "2026-06-22 23:00:00",
+            "定时-单次任务", "2026-06-16 10:00:00", "不限制", "否", "电话活动介绍"
+        ]
+
+        with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8", suffix=".csv") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            writer.writerow(row)
+            f.flush()
+
+            plans = self.module.load_plans_from_csv(f.name)
+
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(plans[0]["activity_intro"], "电话活动介绍")
+
+    def test_resolve_smart_phone_create_url(self):
+        url, reason = self.module.resolve_base_url_by_channel({"channels": "智能电话"})
+
+        self.assertIn("620450416034897920", url)
+        self.assertEqual(reason, "智能电话")
 
     def test_split_datetime(self):
         date_part, time_part = self.module.split_datetime("2026-03-02 08:00")
@@ -77,6 +105,108 @@ class BatchScriptTests(unittest.TestCase):
         self.assertTrue(self.module.datetime_equals("2026-03-06 08:30", "2026-03-06 08:30:00"))
         self.assertTrue(self.module.datetime_equals("2026-03-06 08:30:00", "2026-03-06 08:30"))
         self.assertFalse(self.module.datetime_equals("2026-03-06 08:30:00", "2026-03-02 08:00:00"))
+
+    def test_build_review_link_from_activity_id(self):
+        body = '{"code":"A0200","data":{"activityId":"600000000000000001"}}'
+        activity_id = self.module.extract_activity_id_from_api_body(body)
+
+        self.assertEqual(activity_id, "600000000000000001")
+        self.assertEqual(
+            self.module.build_review_link_from_activity_id(activity_id),
+            "https://precision.dslyy.com/admin#/marketingPlan/editPlan?activityId=600000000000000001",
+        )
+
+    def test_build_community_review_link_from_activity_id(self):
+        url = "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=add"
+
+        self.assertEqual(
+            self.module.build_review_link_from_activity_id("600000000000000002", url),
+            "https://precision.dslyy.com/admin#/marketingPlan/addcommunityPlan?checkType=edit&activityId=600000000000000002",
+        )
+
+    def test_extract_community_activity_id_from_rows(self):
+        rows = [
+            "624111111111111111 旧计划名称 已完成",
+            "【回归社群A】黑龙江武汉双区域 624222222222222222 进行中",
+        ]
+
+        self.assertEqual(
+            self.module.extract_community_activity_id_from_rows(rows, "【回归社群A】黑龙江武汉双区域"),
+            "624222222222222222",
+        )
+
+    def test_extract_community_activity_id_ignores_wrong_plan_name(self):
+        rows = [
+            {"name": "旧计划", "id": "624333333333333333"},
+            {"name": "相似但不是目标计划", "id": "624444444444444444"},
+        ]
+
+        self.assertEqual(
+            self.module.extract_community_activity_id_from_rows(rows, "目标计划"),
+            "",
+        )
+
+    def test_read_save_response_body_timeout_returns_empty(self):
+        class SlowResponse:
+            async def finished(self):
+                return None
+
+            async def text(self):
+                import asyncio
+
+                await asyncio.sleep(0.05)
+                return "late"
+
+        import asyncio
+
+        body = asyncio.run(self.module.read_save_response_body(SlowResponse(), timeout=0.01))
+
+        self.assertEqual(body, "")
+
+    def test_normalize_cdp_endpoint_strips_trailing_slash(self):
+        self.assertEqual(
+            self.module.normalize_cdp_endpoint(" http://127.0.0.1:18800/ "),
+            "http://127.0.0.1:18800",
+        )
+
+    def test_probe_cdp_endpoint_requires_websocket_url(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, _size):
+                return b'{"Browser":"Chrome/149"}'
+
+        with mock.patch.object(self.module.urllib.request, "urlopen", return_value=FakeResponse()):
+            with self.assertRaisesRegex(RuntimeError, "webSocketDebuggerUrl"):
+                self.module.probe_cdp_endpoint("http://127.0.0.1:18800/")
+
+    def test_detects_chrome_cdp_context_management_unsupported_error(self):
+        err = (
+            "BrowserType.connect_over_cdp: Protocol error "
+            "(Browser.setDownloadBehavior): Browser context management is not supported."
+        )
+
+        self.assertTrue(self.module.is_cdp_context_management_unsupported_error(err))
+        self.assertFalse(self.module.is_cdp_context_management_unsupported_error("ECONNREFUSED"))
+
+    def test_cdp_fallback_uses_persistent_profile(self):
+        source = MODULE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('DATA_DIR / "playwright-profile"', source)
+        self.assertIn("launch_persistent_context", source)
+        self.assertIn("is_persistent_adapter", source)
+
+    def test_executor_area_hints_include_zhaoyun_and_no_default_loose_pass(self):
+        source = MODULE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('"肇云营运区": ["华南大区", "广佛省区", "肇云营运区"]', source)
+        self.assertIn('"肇云营运区加盟": ["华南大区加盟", "广佛省区加盟", "肇云营运区加盟"]', source)
+        self.assertIn("按目标核心词回读命中放行", source)
+        self.assertNotIn("按页面已填+无报错放行", source)
 
 
 if __name__ == "__main__":

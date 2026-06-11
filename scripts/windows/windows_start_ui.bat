@@ -7,6 +7,18 @@ set PYTHONIOENCODING=utf-8
 REM Move to repo root (scripts/windows -> repo root)
 cd /d "%~dp0\..\.."
 set "REPO_ROOT=%CD%"
+set "LOG_DIR=%REPO_ROOT%\logs"
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+set "UI_LOG=%LOG_DIR%\ui_server.log"
+set "UI_URL=http://127.0.0.1:8790"
+
+call :IS_PORT_OPEN 8790
+if "%PORT_OPEN%"=="1" (
+  echo [0/6] UI already running on %UI_URL%
+  start "" "%UI_URL%"
+  endlocal
+  exit /b 0
+)
 
 echo [1/5] Checking Python ...
 set "PY_CMD="
@@ -37,16 +49,33 @@ if not exist ".venv\.deps_ready" (
   echo     Dependencies already prepared, skip reinstall.
 )
 
-echo [4/5] Starting local UI ...
-echo     URL: http://127.0.0.1:8790
+echo [4/6] Starting local UI service ...
+echo     URL: %UI_URL%
 call :ENSURE_CDP
-start "" "http://127.0.0.1:8790"
 
-echo [5/5] Running server (keep this window open) ...
-".venv\Scripts\python.exe" -m uvicorn ui_app.server:app --host 127.0.0.1 --port 8790
+echo [5/6] Launching server process ...
+start "" /b cmd /c ""%REPO_ROOT%\.venv\Scripts\python.exe" -m uvicorn ui_app.server:app --host 127.0.0.1 --port 8790 > "%UI_LOG%" 2>&1"
 
+echo [6/6] Waiting for UI health ...
+for /l %%i in (1,1,25) do (
+  curl -s "%UI_URL%/api/tasks" >nul 2>nul
+  if not errorlevel 1 goto :UI_READY
+  timeout /t 1 /nobreak >nul
+)
+echo ERROR: UI did not start successfully.
+echo ----- Last server log lines -----
+if exist "%UI_LOG%" powershell -NoProfile -Command "Get-Content -Path '%UI_LOG%' -Tail 40"
+echo ---------------------------------
+pause
+endlocal
+exit /b 1
+
+:UI_READY
+echo UI started.
+start "" "%UI_URL%"
 endlocal
 exit /b 0
+
 
 :NO_PY
 echo ERROR: Python not found.
@@ -68,6 +97,15 @@ exit /b 1
 echo ERROR: playwright install chromium failed.
 pause
 exit /b 1
+
+:IS_PORT_OPEN
+set "PORT_OPEN=0"
+for /f "tokens=5" %%A in ('netstat -ano ^| findstr /r /c:":%~1 .*LISTENING" 2^>nul') do (
+  set "PORT_OPEN=1"
+  goto :PORT_DONE
+)
+:PORT_DONE
+exit /b 0
 
 :ENSURE_CDP
 echo [CDP] Checking http://127.0.0.1:18800 ...

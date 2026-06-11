@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "精准营销复核助手",
+  "version": "0.1.4",
+  "description": "在精准营销业务页面中对比 /simple 创建数据与当前页面可见字段。",
+  "permissions": ["activeTab", "storage", "sidePanel", "tabs", "scripting"],
+  "host_permissions": ["<all_urls>", "http://127.0.0.1:8790/*"],
+  "action": {
+    "default_title": "精准营销复核助手"
+  },
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://precision.dslyy.com/*"],
+      "js": ["content_script.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

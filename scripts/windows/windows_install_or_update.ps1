@@ -1,7 +1,9 @@
 param(
   [string]$InstallDir = "$env:LOCALAPPDATA\PrecisionMarketingAuto",
   [string]$Repo = "lmr1123/precision-marketing-auto",
-  [string]$AssetName = "precision-marketing-auto-windows-oneclick.zip"
+  [string]$AssetName = "precision-marketing-auto-windows-oneclick.zip",
+  [string]$PackageUrl = "",
+  [string]$PackageFile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,8 +17,20 @@ function Get-LatestRelease([string]$repo) {
   return Invoke-RestMethod -Uri $api -UseBasicParsing
 }
 
+function Resolve-LocalPackageCandidates([string]$assetName, [string]$explicitPath) {
+  $list = @()
+  if ($explicitPath) { $list += $explicitPath }
+  $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+  $repoRoot = Resolve-Path (Join-Path $scriptDir "..\..")
+  $list += (Join-Path $repoRoot $assetName)
+  $list += (Join-Path $repoRoot "release\$assetName")
+  return $list
+}
+
 function Resolve-AssetUrl($release, [string]$assetName, [string]$repo) {
   $urls = @()
+  if ($PackageUrl) { $urls += [string]$PackageUrl }
+  if ($env:PMA_UPDATE_URL) { $urls += [string]$env:PMA_UPDATE_URL }
   if ($release -and $release.assets) {
     $asset = $release.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
     if ($asset -and $asset.browser_download_url) { $urls += [string]$asset.browser_download_url }
@@ -66,26 +80,39 @@ $zipPath = Join-Path $tmpRoot $AssetName
 $extractRoot = Join-Path $tmpRoot "extract"
 New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
 
-Write-Step "Fetching latest release info..."
-$release = $null
-try { $release = Get-LatestRelease -repo $Repo } catch {}
-
-$assetUrls = Resolve-AssetUrl -release $release -assetName $AssetName -repo $Repo
-Write-Step "Downloading package..."
-$downloadOk = $false
-$downloadErr = ""
-foreach ($assetUrl in $assetUrls) {
-  try {
-    Write-Step "Try: $assetUrl"
-    Invoke-WebRequest -Uri $assetUrl -OutFile $zipPath -UseBasicParsing
-    $downloadOk = $true
-    break
-  } catch {
-    $downloadErr = $_.Exception.Message
-  }
+Write-Step "Resolving package source (local/mirror/github)..."
+$localCandidates = Resolve-LocalPackageCandidates -assetName $AssetName -explicitPath $PackageFile
+$localFound = $null
+foreach ($c in $localCandidates) {
+  if ($c -and (Test-Path $c)) { $localFound = $c; break }
 }
-if (-not $downloadOk) {
-  throw "Download failed. Last error: $downloadErr"
+
+if ($localFound) {
+  Write-Step "Using local package: $localFound"
+  Copy-Item -Path $localFound -Destination $zipPath -Force
+} else {
+  Write-Step "No local package found. Trying network sources..."
+  Write-Step "Fetching latest release info..."
+  $release = $null
+  try { $release = Get-LatestRelease -repo $Repo } catch {}
+
+  $assetUrls = Resolve-AssetUrl -release $release -assetName $AssetName -repo $Repo
+  Write-Step "Downloading package..."
+  $downloadOk = $false
+  $downloadErr = ""
+  foreach ($assetUrl in $assetUrls) {
+    try {
+      Write-Step "Try: $assetUrl"
+      Invoke-WebRequest -Uri $assetUrl -OutFile $zipPath -UseBasicParsing
+      $downloadOk = $true
+      break
+    } catch {
+      $downloadErr = $_.Exception.Message
+    }
+  }
+  if (-not $downloadOk) {
+    throw "Download failed. Last error: $downloadErr`nHint: China/no-VPN users should use local offline zip update."
+  }
 }
 
 Write-Step "Extracting package..."
