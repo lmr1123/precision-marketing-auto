@@ -43,3 +43,22 @@
 - 已新增测试覆盖“普通肇云不能替代肇云加盟”。
 - 已构建并发布 `v1.0.30`；公网 `latest.json` 返回 `1.0.30`，Win/Mac zip 均 HTTP 200。
 - 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（14 tests OK）。
+
+## 2026-06-11 Windows 误点 start.command
+
+- [x] 确认 Windows 包内是否同时包含 Mac 启动文件
+- [x] 调整 Windows 发布包：根目录只保留 `start.bat`
+- [x] 增加 Windows 快速开始说明，提示双击 `start.bat`
+- [x] 构建发布新版并验证 zip 内容
+
+### 成功标准
+
+- Windows 同事解压后不会再看到/误点根目录 `start.command`。
+- 下载包根目录有明确说明：Windows 请双击 `start.bat`。
+
+### Review
+
+- 根因：Windows 发布包根目录同时包含 `start.bat` 和 Mac 专用 `start.command`，同事误点 `start.command` 后 Windows 弹出“如何打开 .command 文件”。
+- 已发布 `v1.0.31`：Windows zip 根目录只保留 `start.bat`，并新增 `WINDOWS_START_HERE.txt`；Windows 包内不再包含 `start.command`。
+- Mac zip 仍保留 `start.command`。
+- 公网 `latest.json` 返回 `1.0.31`，Win/Mac zip 均 HTTP 200。
