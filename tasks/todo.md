@@ -7,7 +7,7 @@
 - [x] 复核 `/simple` 是否仍符合文本粘贴 + 图片/门店文件上传的新方案
 - [x] 补充测试覆盖 `/simple` 页面合同和 CDP 持久备用浏览器
 - [x] 运行测试
-- [ ] 提交并推送到 GitHub
+- [x] 提交并推送到 GitHub
 
 ### 成功标准
 
@@ -19,4 +19,5 @@
 
 - 已从 `release/PrecisionMarketingAuto-v1.0.29-mac.zip` 恢复当前 app 源码到仓库根目录。
 - `/simple` smoke 通过：`/api/runtime` 返回 `version=1.0.29`，`/simple` 页面包含新增粘贴框、图片顺序上传、门店文件、草稿、复制日志等当前新方案元素。
+- 已提交并推送到 GitHub：`d0546a0 feat: sync simple workflow and review assistant`。
 - 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（13 tests OK）。
