@@ -147,3 +147,27 @@
 - 已新增测试覆盖 pending 分支：必须同步 copy、继续启动，且不能包含 `/min cmd` 或成功后直接 `exit /b 0`。
 - 已构建并发布 `v1.0.35`；公网 `latest.json` 返回 `1.0.35`，Win/Mac zip 均 HTTP 200。
 - 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（18 tests OK）。
+
+## 2026-06-12 Windows v1.0.35 二次启动失败且多开浏览器
+
+- [x] 复查 `start.bat` 的服务复用、启动、打开浏览器链路
+- [x] 修复打开页面策略：每次最多主动打开一次，避免 Chrome 多标签
+- [x] 修复二次启动服务不可访问问题：启动后必须健康检查通过，否则窗口停留并输出日志
+- [x] 增加/更新启动器静态测试覆盖上述合同
+- [x] 构建发布新版并验证 Windows 包内容
+
+### 成功标准
+
+- 第二次双击时，如果服务已存活，只打开一次 `/simple`。
+- 第二次双击时，如果服务未存活，必须重新拉起 UI 服务并健康检查通过。
+- 任意启动失败不能闪退，必须显示 `launcher.log`/`ui_server.log` 位置。
+- 不再连续执行多个浏览器打开命令导致 Chrome 多开页面。
+
+### Review
+
+- 根因拆成两部分：`v1.0.35` 的 `OPEN_UI` 会连续执行多种打开方式，导致 Chrome 多开；服务启动仍依赖嵌套 `cmd /c` 和外层重定向，失败时不够可见。
+- 已将 `OPEN_UI` 改为单路径打开：优先 Chrome `--new-window`，成功后立即返回；只在找不到 Chrome 时再走 PowerShell/default fallback。
+- CDP 启动不再打开业务系统 dashboard，改为最小化 `about:blank`，避免启动工具时额外弹业务页面。
+- UI 服务启动脚本现在自己写入 `ui_server.log`，并用 PowerShell 请求 `/api/tasks` 做健康检查；失败时打印最后 80 行服务日志。
+- 已构建并发布 `v1.0.36`；公网 `latest.json` 返回 `1.0.36`，Win/Mac zip 均 HTTP 200。
+- 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（20 tests OK）。

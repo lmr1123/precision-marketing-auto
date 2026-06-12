@@ -234,17 +234,23 @@ set "SERVER_CMD=%LOG_DIR%\run_ui_server.bat"
   echo set PYTHONUNBUFFERED=1
   echo set "PM_DATA_DIR=%DATA_DIR%"
   echo cd /d "%APP_DIR%"
-  echo "%PY_EXE%" %PY_ARGS% -m uvicorn ui_app.server:app --host 127.0.0.1 --port 8790
+  echo echo Starting UI server at %%DATE%% %%TIME%% ^>^> "%UI_LOG%"
+  echo "%PY_EXE%" %PY_ARGS% -m uvicorn ui_app.server:app --host 127.0.0.1 --port 8790 ^>^> "%UI_LOG%" 2^>^&1
 ) > "%SERVER_CMD%"
-start "Precision Marketing UI Server" /min cmd /c ""%SERVER_CMD%" > "%UI_LOG%" 2>&1"
+start "Precision Marketing UI Server" /min cmd.exe /d /c call "%SERVER_CMD%"
 
 REM Wait for health check
 for /l %%i in (1,1,30) do (
-  curl -s "%BASE_URL%/api/tasks" >nul 2>nul
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; Invoke-WebRequest -UseBasicParsing -Uri '%BASE_URL%/api/tasks' -TimeoutSec 2 | Out-Null" >nul 2>nul
   if not errorlevel 1 goto :UI_READY
   timeout /t 1 /nobreak >nul
 )
 echo ERROR: UI did not start. Check %UI_LOG%
+if exist "%UI_LOG%" (
+  echo ----- Last UI server log lines -----
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Path '%UI_LOG%' -Tail 80" 2>nul
+  echo ------------------------------------
+)
 goto :FAIL
 
 :UI_READY
@@ -262,14 +268,13 @@ REM ============================================================
 
 :OPEN_UI
 echo     Opening browser: %UI_URL%
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; $u=[uri]::EscapeDataString('%UI_URL%'); try { Invoke-WebRequest -UseBasicParsing -Method Put -Uri ('http://127.0.0.1:18800/json/new?' + $u) -TimeoutSec 2 | Out-Null; exit 0 } catch {}; try { Invoke-WebRequest -UseBasicParsing -Uri ('http://127.0.0.1:18800/json/new?' + $u) -TimeoutSec 2 | Out-Null; exit 0 } catch {}; exit 1" >nul 2>nul
 if not defined CHROME_PATH call :FIND_CHROME
 if defined CHROME_PATH (
   start "" "%CHROME_PATH%" --new-window "%UI_URL%"
+  exit /b 0
 )
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process '%UI_URL%'" >nul 2>nul
-explorer.exe "%UI_URL%" >nul 2>nul
-rundll32 url.dll,FileProtocolHandler "%UI_URL%" >nul 2>nul
+if not errorlevel 1 exit /b 0
 start "" "%UI_URL%"
 exit /b 0
 
@@ -296,7 +301,7 @@ timeout /t 2 /nobreak >nul
 exit /b 0
 
 :ENSURE_CDP
-curl -s http://127.0.0.1:18800/json/version >nul 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18800/json/version' -TimeoutSec 2 | Out-Null" >nul 2>nul
 if not errorlevel 1 (
   echo     CDP already running.
   exit /b 0
@@ -309,10 +314,10 @@ if not defined CHROME_PATH (
   exit /b 0
 )
 set "CDP_PROFILE=%DATA_DIR%\chrome-cdp-profile"
-start "" "%CHROME_PATH%" --remote-debugging-port=18800 --user-data-dir="%CDP_PROFILE%" --no-first-run --no-default-browser-check "https://precision.dslyy.com/admin#/dashboard"
+start "" /min "%CHROME_PATH%" --remote-debugging-port=18800 --user-data-dir="%CDP_PROFILE%" --no-first-run --no-default-browser-check about:blank
 for /l %%i in (1,1,20) do (
   timeout /t 1 /nobreak >nul
-  curl -s http://127.0.0.1:18800/json/version >nul 2>nul
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18800/json/version' -TimeoutSec 2 | Out-Null" >nul 2>nul
   if not errorlevel 1 (
     echo     CDP started.
     exit /b 0
@@ -359,7 +364,7 @@ echo   STARTUP FAILED - see errors above
 echo   Logs: %LOG_DIR%
 echo ========================================
 echo.
-pause
+if not "%PM_AUTO_START_INNER%"=="1" pause
 endlocal
 exit /b 1
 

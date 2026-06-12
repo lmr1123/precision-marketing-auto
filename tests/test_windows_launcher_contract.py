@@ -17,23 +17,39 @@ class WindowsLauncherContractTests(unittest.TestCase):
         self.assertIn(":OPEN_UI", source)
         self.assertIn("Opening browser: %UI_URL%", source)
 
-    def test_open_ui_has_multiple_windows_fallbacks(self):
+    def test_open_ui_opens_once_with_limited_fallbacks(self):
         source = self.source
 
-        self.assertIn("http://127.0.0.1:18800/json/new?", source)
-        self.assertIn("Invoke-WebRequest -UseBasicParsing -Method Put", source)
         self.assertIn('start "" "%CHROME_PATH%" --new-window "%UI_URL%"', source)
         self.assertIn("Start-Process '%UI_URL%'", source)
-        self.assertIn('explorer.exe "%UI_URL%"', source)
-        self.assertIn('rundll32 url.dll,FileProtocolHandler "%UI_URL%"', source)
         self.assertIn('start "" "%UI_URL%"', source)
+        self.assertNotIn("http://127.0.0.1:18800/json/new?", source)
+        self.assertNotIn('explorer.exe "%UI_URL%"', source)
+        self.assertNotIn('rundll32 url.dll,FileProtocolHandler "%UI_URL%"', source)
 
-    def test_open_ui_does_not_exit_after_first_success(self):
+    def test_open_ui_exits_after_first_selected_open_method(self):
         source = self.source
         open_ui = source.split(":OPEN_UI", 1)[1].split(":IS_PORT_OPEN", 1)[0]
 
-        self.assertNotIn("if not errorlevel 1 exit /b 0", open_ui)
+        self.assertIn("exit /b 0", open_ui)
+        self.assertIn("if not errorlevel 1 exit /b 0", open_ui)
         self.assertIn('start "" "%UI_URL%"', open_ui)
+        self.assertLess(open_ui.count('"%UI_URL%"'), 4)
+
+    def test_ui_server_start_has_health_check_and_log_tail(self):
+        source = self.source
+
+        self.assertIn("Starting UI server at", source)
+        self.assertIn("Invoke-WebRequest -UseBasicParsing -Uri '%BASE_URL%/api/tasks'", source)
+        self.assertIn("Last UI server log lines", source)
+        self.assertIn("Get-Content -Path '%UI_LOG%' -Tail 80", source)
+
+    def test_cdp_start_does_not_open_business_dashboard(self):
+        source = self.source
+
+        self.assertNotIn("precision.dslyy.com/admin#/dashboard", source)
+        self.assertIn("--remote-debugging-port=18800", source)
+        self.assertIn("about:blank", source)
 
     def test_pending_launcher_update_continues_in_same_window(self):
         source = self.source
