@@ -234,10 +234,9 @@ set "SERVER_CMD=%LOG_DIR%\run_ui_server.bat"
   echo set PYTHONUNBUFFERED=1
   echo set "PM_DATA_DIR=%DATA_DIR%"
   echo cd /d "%APP_DIR%"
-  echo echo Starting UI server at %%DATE%% %%TIME%% ^>^> "%UI_LOG%"
-  echo "%PY_EXE%" %PY_ARGS% -m uvicorn ui_app.server:app --host 127.0.0.1 --port 8790 ^>^> "%UI_LOG%" 2^>^&1
+  echo "%PY_EXE%" %PY_ARGS% -m uvicorn ui_app.server:app --host 127.0.0.1 --port 8790
 ) > "%SERVER_CMD%"
-start "Precision Marketing UI Server" /min cmd.exe /d /c call "%SERVER_CMD%"
+start "Precision Marketing UI Server" /min cmd /c ""%SERVER_CMD%" > "%UI_LOG%" 2>&1"
 
 REM Wait for health check
 for /l %%i in (1,1,30) do (
@@ -268,13 +267,6 @@ REM ============================================================
 
 :OPEN_UI
 echo     Opening browser: %UI_URL%
-if not defined CHROME_PATH call :FIND_CHROME
-if defined CHROME_PATH (
-  start "" "%CHROME_PATH%" --new-window "%UI_URL%"
-  exit /b 0
-)
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process '%UI_URL%'" >nul 2>nul
-if not errorlevel 1 exit /b 0
 start "" "%UI_URL%"
 exit /b 0
 

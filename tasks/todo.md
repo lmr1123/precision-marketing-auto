@@ -171,3 +171,46 @@
 - UI 服务启动脚本现在自己写入 `ui_server.log`，并用 PowerShell 请求 `/api/tasks` 做健康检查；失败时打印最后 80 行服务日志。
 - 已构建并发布 `v1.0.36`；公网 `latest.json` 返回 `1.0.36`，Win/Mac zip 均 HTTP 200。
 - 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（20 tests OK）。
+
+## 2026-06-12 对比 v1.0.24 与当前 Windows 启动差异
+
+- [x] 找到 `v1.0.24` Windows 包或历史启动脚本
+- [x] 对比 `v1.0.24` 与当前 `start.bat` 的服务启动、复用、打开浏览器、自动更新差异
+- [x] 判断是否需要回推旧启动模型，或在当前模型上修正
+- [x] 给出可验证的结论和下一步处理方案
+
+### 成功标准
+
+- 明确解释为什么旧版本曾经可反复打开，而新版本/当前状态不可用。
+- 不盲目回滚；如果回推，说明保留哪些新能力、撤销哪些高风险改动。
+
+### Review
+
+- 已确认本地存在 `release/PrecisionMarketingAuto-v1.0.24-win.zip`，其 `start.bat` 已包含自动更新、`start.bat.pending`、CDP 启动、UI 健康检查逻辑。
+- 关键结论：业务同事“v1.0.24 现在也不行”不一定代表原始 v1.0.24 启动器坏了；v1.0.24 启动时会访问云端 `latest.json`，联网后会自动更新 `app/` 并生成 `start.bat.pending`，所以旧目录很可能已经被更新链路改造成新版状态。
+- v1.0.24 与当前差异集中在启动器：当前版更改了 pending 应用方式、服务启动命令、打开网页策略、CDP 启动页面和健康检查实现。
+- 建议下一步不是完整回滚业务代码，而是回推 Windows 启动器策略：保留新版业务 app，启动器回到更简单、更可观测的模型，并增加“禁用自动更新/强制诊断模式”用于现场排查。
+
+## 2026-06-12 对比 v1.0.24 与 v1.0.36 Windows 启动差异
+
+- [x] 找到 `v1.0.24` Windows 包或启动脚本
+- [x] 对比 `v1.0.24` 与当前 `start.bat` 的二次启动、服务启动、浏览器打开逻辑
+- [x] 判断是否需要恢复旧版可工作的启动策略
+- [x] 若确认问题，做最小修复并验证测试
+- [x] 更新发布包和 GitHub
+
+### 成功标准
+
+- 明确说明为什么 `v1.0.24` 能反复打开，而新版不行。
+- 修复不能重新引入多开浏览器。
+- 修复后失败时仍保留日志，不再闪退。
+
+### Review
+
+- 已找到 `release/PrecisionMarketingAuto-v1.0.24-win.zip`，并确认根目录 `start.bat` 与 `app/scripts/deploy/start.bat` 的启动逻辑一致。
+- 关键差异：`v1.0.24` 在服务复用和启动成功后都只执行 `start "" "%UI_URL%"`；`v1.0.36` 改为 Chrome/PowerShell 等包装打开，且服务启动命令也改过，增加了 Windows 兼容风险。
+- 已将 `start.bat` 的服务启动方式恢复为 `v1.0.24` 兼容写法：`start "Precision Marketing UI Server" /min cmd /c ""%SERVER_CMD%" > "%UI_LOG%" 2>&1"`。
+- 已将打开页面恢复为单一 `start "" "%UI_URL%"`，避免多个浏览器/多个标签页。
+- 保留 CDP 启动不打开业务 dashboard 的修正，改为最小化 `about:blank`，减少额外页面干扰。
+- 已构建并发布 `v1.0.37`；公网 `latest.json` 返回 `1.0.37`，Win/Mac zip 均 HTTP 200。
+- 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（20 tests OK）。

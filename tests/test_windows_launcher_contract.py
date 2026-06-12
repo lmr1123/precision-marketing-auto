@@ -19,27 +19,29 @@ class WindowsLauncherContractTests(unittest.TestCase):
 
     def test_open_ui_opens_once_with_limited_fallbacks(self):
         source = self.source
+        open_ui = source.split(":OPEN_UI", 1)[1].split(":IS_PORT_OPEN", 1)[0]
 
-        self.assertIn('start "" "%CHROME_PATH%" --new-window "%UI_URL%"', source)
-        self.assertIn("Start-Process '%UI_URL%'", source)
-        self.assertIn('start "" "%UI_URL%"', source)
+        self.assertIn('start "" "%UI_URL%"', open_ui)
+        self.assertEqual(open_ui.count('"%UI_URL%"'), 1)
         self.assertNotIn("http://127.0.0.1:18800/json/new?", source)
-        self.assertNotIn('explorer.exe "%UI_URL%"', source)
-        self.assertNotIn('rundll32 url.dll,FileProtocolHandler "%UI_URL%"', source)
+        self.assertNotIn('"%CHROME_PATH%" --new-window "%UI_URL%"', open_ui)
+        self.assertNotIn("Start-Process '%UI_URL%'", open_ui)
+        self.assertNotIn('explorer.exe "%UI_URL%"', open_ui)
+        self.assertNotIn('rundll32 url.dll,FileProtocolHandler "%UI_URL%"', open_ui)
 
     def test_open_ui_exits_after_first_selected_open_method(self):
         source = self.source
         open_ui = source.split(":OPEN_UI", 1)[1].split(":IS_PORT_OPEN", 1)[0]
 
         self.assertIn("exit /b 0", open_ui)
-        self.assertIn("if not errorlevel 1 exit /b 0", open_ui)
+        self.assertNotIn("if not errorlevel 1 exit /b 0", open_ui)
         self.assertIn('start "" "%UI_URL%"', open_ui)
-        self.assertLess(open_ui.count('"%UI_URL%"'), 4)
 
-    def test_ui_server_start_has_health_check_and_log_tail(self):
+    def test_ui_server_start_uses_v1024_compatible_cmd_wrapper(self):
         source = self.source
 
-        self.assertIn("Starting UI server at", source)
+        self.assertIn('start "Precision Marketing UI Server" /min cmd /c ""%SERVER_CMD%" > "%UI_LOG%" 2>&1"', source)
+        self.assertIn('echo "%PY_EXE%" %PY_ARGS% -m uvicorn ui_app.server:app --host 127.0.0.1 --port 8790', source)
         self.assertIn("Invoke-WebRequest -UseBasicParsing -Uri '%BASE_URL%/api/tasks'", source)
         self.assertIn("Last UI server log lines", source)
         self.assertIn("Get-Content -Path '%UI_LOG%' -Tail 80", source)
