@@ -105,3 +105,24 @@
 - 已构建并发布 `v1.0.33`；Windows zip 根目录仍只有 `start.bat` 和 `WINDOWS_START_HERE.txt`，不含 `start.command`。
 - 公网 `latest.json` 返回 `1.0.33`，Win/Mac zip 均 HTTP 200。
 - 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（16 tests OK）。
+
+## 2026-06-12 Windows 打开命令返回成功但页面未显示
+
+- [x] 取消 `OPEN_UI` 中间步骤成功即退出的逻辑
+- [x] 改为连续尝试 CDP、Chrome、PowerShell、explorer、rundll32、start
+- [x] 更新测试，防止打开页面逻辑再次提前退出
+- [x] 构建发布新版并验证 Windows 包内容
+
+### 成功标准
+
+- 某个打开命令返回成功但没有显示页面时，后续兜底命令仍会继续执行。
+- 二次双击 `start.bat` 至少会通过一种方式唤起 `/simple` 页面。
+
+### Review
+
+- 根因进一步收敛：`v1.0.33` 在 CDP `/json/new` 返回成功后立即退出 `OPEN_UI`，但部分 Windows/Chrome 环境中该成功并不代表页面被拉到前台。
+- 已取消 `OPEN_UI` 中的中途成功退出，改为连续尝试：CDP `/json/new`、Chrome `--new-window`、PowerShell `Start-Process`、`explorer.exe`、`rundll32 url.dll,FileProtocolHandler`、Windows `start`。
+- 已新增测试防止 `OPEN_UI` 再出现 `if not errorlevel 1 exit /b 0` 的提前退出。
+- 已构建并发布 `v1.0.34`；Windows zip 根目录仍只有 `start.bat` 和 `WINDOWS_START_HERE.txt`。
+- 公网 `latest.json` 返回 `1.0.34`，Win/Mac zip 均 HTTP 200。
+- 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（17 tests OK）。

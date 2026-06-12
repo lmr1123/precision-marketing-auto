@@ -22,10 +22,18 @@ class WindowsLauncherContractTests(unittest.TestCase):
 
         self.assertIn("http://127.0.0.1:18800/json/new?", source)
         self.assertIn("Invoke-WebRequest -UseBasicParsing -Method Put", source)
-        self.assertIn('start "" "%CHROME_PATH%" "%UI_URL%"', source)
+        self.assertIn('start "" "%CHROME_PATH%" --new-window "%UI_URL%"', source)
         self.assertIn("Start-Process '%UI_URL%'", source)
         self.assertIn('explorer.exe "%UI_URL%"', source)
+        self.assertIn('rundll32 url.dll,FileProtocolHandler "%UI_URL%"', source)
         self.assertIn('start "" "%UI_URL%"', source)
+
+    def test_open_ui_does_not_exit_after_first_success(self):
+        source = self.source
+        open_ui = source.split(":OPEN_UI", 1)[1].split(":IS_PORT_OPEN", 1)[0]
+
+        self.assertNotIn("if not errorlevel 1 exit /b 0", open_ui)
+        self.assertIn('start "" "%UI_URL%"', open_ui)
 
 
 if __name__ == "__main__":
