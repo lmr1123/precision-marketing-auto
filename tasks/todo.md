@@ -126,3 +126,24 @@
 - 已构建并发布 `v1.0.34`；Windows zip 根目录仍只有 `start.bat` 和 `WINDOWS_START_HERE.txt`。
 - 公网 `latest.json` 返回 `1.0.34`，Win/Mac zip 均 HTTP 200。
 - 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（17 tests OK）。
+
+## 2026-06-12 Windows 自更新后服务未启动
+
+- [x] 定位 `start.bat.pending` 自更新分支是否会中断启动链路
+- [x] 改为当前窗口同步应用 `start.bat.pending` 后继续启动
+- [x] 增加测试禁止 pending 分支再用最小化后台中转
+- [x] 构建发布新版并验证 Windows 包内容
+
+### 成功标准
+
+- 自动更新启动器后，同一次双击仍继续进入依赖检查、服务启动和打开页面流程。
+- 如果启动器更新失败，窗口要停留并提示日志位置，不再“闪一下就没了”。
+
+### Review
+
+- 根因进一步定位：`start.bat.pending` 分支位于脚本最开头，旧逻辑会启动一个最小化中转窗口应用更新，然后当前窗口直接退出；若中转窗口没有继续跑，就会出现“终端闪一下、服务没启动、手动访问 8790 也打不开”。
+- 已改为当前窗口同步应用 `start.bat.pending`，删除 pending 后继续正常启动流程，不再使用最小化中转窗口。
+- 如果启动器更新失败，会停留窗口并提示 `data\logs`，不再静默闪退。
+- 已新增测试覆盖 pending 分支：必须同步 copy、继续启动，且不能包含 `/min cmd` 或成功后直接 `exit /b 0`。
+- 已构建并发布 `v1.0.35`；公网 `latest.json` 返回 `1.0.35`，Win/Mac zip 均 HTTP 200。
+- 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（18 tests OK）。

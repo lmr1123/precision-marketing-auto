@@ -3,18 +3,17 @@ setlocal EnableExtensions
 
 if not "%PM_AUTO_START_INNER%"=="1" if exist "%~dp0start.bat.pending" (
   if not exist "%~dp0data\logs" mkdir "%~dp0data\logs" 2>nul
-  set "PM_APPLY_CMD=%~dp0data\logs\apply_launcher_update.bat"
-  (
-    echo @echo off
-    echo timeout /t 1 /nobreak ^>nul
-    echo copy /y "%~dp0start.bat.pending" "%~f0" ^>nul
-    echo if errorlevel 1 exit /b 1
-    echo del "%~dp0start.bat.pending" ^>nul 2^>nul
-    echo start "" "%~f0"
-  ) > "%PM_APPLY_CMD%"
-  start "Precision Marketing Launcher Update" /min cmd /c ""%PM_APPLY_CMD%""
-  endlocal
-  exit /b 0
+  echo Applying launcher update ...
+  copy /y "%~dp0start.bat.pending" "%~f0" >nul
+  if errorlevel 1 (
+    echo ERROR: Failed to apply launcher update.
+    echo Please send this log folder to support: %~dp0data\logs
+    pause
+    endlocal
+    exit /b 1
+  )
+  del "%~dp0start.bat.pending" >nul 2>nul
+  echo Launcher updated. Continuing startup ...
 )
 
 if "%PM_AUTO_START_INNER%"=="1" goto :INNER

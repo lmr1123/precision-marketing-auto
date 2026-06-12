@@ -35,6 +35,16 @@ class WindowsLauncherContractTests(unittest.TestCase):
         self.assertNotIn("if not errorlevel 1 exit /b 0", open_ui)
         self.assertIn('start "" "%UI_URL%"', open_ui)
 
+    def test_pending_launcher_update_continues_in_same_window(self):
+        source = self.source
+        pending_block = source.split('if not "%PM_AUTO_START_INNER%"=="1" if exist "%~dp0start.bat.pending"', 1)[1].split('if "%PM_AUTO_START_INNER%"=="1"', 1)[0]
+
+        self.assertIn("Applying launcher update", pending_block)
+        self.assertIn('copy /y "%~dp0start.bat.pending" "%~f0"', pending_block)
+        self.assertIn("Launcher updated. Continuing startup", pending_block)
+        self.assertNotIn("/min cmd", pending_block)
+        self.assertNotIn("exit /b 0", pending_block)
+
 
 if __name__ == "__main__":
     unittest.main()
