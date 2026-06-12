@@ -96,6 +96,13 @@ def _parse_block(block: str, block_no: int) -> Dict[str, str]:
         in_multiline = False
         multiline = []
 
+    def is_multiline_boundary(label: str, value: str, full_line: str) -> bool:
+        if label in FIELD_TO_INTERNAL:
+            return True
+        if "://" in full_line or value.startswith("//"):
+            return False
+        return True
+
     for raw_line in block.splitlines():
         line = raw_line.rstrip()
         stripped = line.strip()
@@ -103,7 +110,7 @@ def _parse_block(block: str, block_no: int) -> Dict[str, str]:
             continue
         if in_multiline:
             m_next = re.match(r"^([^:：]{2,40})\s*[:：]\s*(.*)$", stripped)
-            if m_next:
+            if m_next and is_multiline_boundary(m_next.group(1).strip(), m_next.group(2).strip(), stripped):
                 flush_multiline()
             else:
                 if current_key and not current_key.startswith("__unsupported__"):

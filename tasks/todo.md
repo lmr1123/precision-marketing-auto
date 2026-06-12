@@ -214,3 +214,24 @@
 - 保留 CDP 启动不打开业务 dashboard 的修正，改为最小化 `about:blank`，减少额外页面干扰。
 - 已构建并发布 `v1.0.37`；公网 `latest.json` 返回 `1.0.37`，Win/Mac zip 均 HTTP 200。
 - 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（20 tests OK）。
+
+## 2026-06-12 发送内容小程序链接误报未自动化字段
+
+- [x] 定位文本计划解析器对 `发送内容: |` 内容块的字段识别逻辑
+- [x] 修复 `#小程序://` 等正文内冒号被误判为字段名的问题
+- [x] 增加回归测试覆盖用户样本文本
+- [x] 运行测试并确认不影响其他字段解析
+
+### 成功标准
+
+- 用户样本中的 `更多商品到大参林门店选购→#小程序://...` 必须完整保留在发送内容里。
+- 不再提示未自动化字段 `更多商品到大参林门店选购→#小程序`。
+- 真实未支持字段仍能被提示。
+
+### Review
+
+- 根因：多行正文模式中遇到任意 `xxx: yyy` 行都会退出正文；`#小程序://...` 中的冒号被误判为字段分隔符。
+- 已新增 `is_multiline_boundary()`：已知字段仍可结束正文；包含 `://` 或值以 `//` 开头的行继续作为正文。
+- 已增加回归测试覆盖用户朋友圈样本和真实未知字段提示。
+- 直接解析用户样本确认：`__warnings` 为空，`send_content` 完整保留 `#小程序://大参林健康/0zlXowworfnAJea`。
+- 验证通过：`.venv/bin/python -m py_compile precision-auto-playwright-batch.py ui_app/server.py ui_app/text_plan_parser.py`；`.venv/bin/python -m unittest discover -s tests`（22 tests OK）。
